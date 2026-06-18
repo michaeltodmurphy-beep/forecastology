@@ -1,0 +1,90 @@
+# run.py
+import asyncio
+import structlog
+from app.config import AppConfig
+from app.database import DatabaseManager
+from data.ticker_cache import TickerCache
+from data.websocket_manager import WebSocketManager
+from execution.factory import create_executor
+from core.state_machine import TemperatureStrategy
+
+logger = structlog.get_logger(__name__)
+
+
+async def main():
+    # 1. Load configuration
+    config = AppConfig.from_env()
+    logger.info("app.config_loaded", mode=config.trading_mode)
+
+    # Validate: LIVE mode must connect ONLY to production
+    if config.trading_mode == "LIVE":
+        if "demo" in config.rest_base_url.lower() or "demo" in config.ws_url.lower():
+            raise RuntimeError(
+                "CRITICAL: LIVE mode must use Kalshi PRODUCTION URLs. "
+                "Check your configuration or .env file."
+            )
+        if not config.kalshi_api_key:
+            raise RuntimeError(
+ "LIVE mode requires KALSHI_API_KEY to be set in the .env file."
+                "to be set in the .env file."
+            )
+        logger.warning("app.live_mode", message="!!! REAL MONEY TRADING ENABLED !!!")
+
+    # 2. Initialize database
+    db = DatabaseManager(config.mysql_database_url)
+    await db.initialize()
+    logger.info("app.database_initialized")
+
+    # 3. Initialize ticker cache (in-memory data store)
+    cache = TickerCache()
+    logger.info("app.cache_initialized")
+
+    # 4. Initialize WebSocket manager
+    ws_manager = WebSocketManager(
+        ws_url=config.ws_url,
+        api_key=config.kalshi_api_key,
+        private_key_path=config.kalshi_private_key_path,
+    )
+    logger.info("app.websocket_manager_created")
+
+    # 5. Create executor (PAPER or LIVE)
+    executor = create_executor(
+        trading_mode=config.trading_mode,
+        ticker_cache=cache,
+        rest_base_url=config.rest_base_url,
+        api_key=config.kalshi_api_key,
+        private_key_path=config.kalshi_private_key_path,
+    )
+    logger.info("app.executor_created", type=type(executor).__name__)
+
+    # 6. Create and start strategy
+    strategy = TemperatureStrategy(
+        config=config,
+        cache=cache,
+        ws_manager=ws_manager,
+        executor=executor,
+        db=db,
+    )
+
+    # 7. Run everything concurrently
+    try:
+        await asyncio.gather(
+            ws_manager.run_forever(),
+            strategy.start(),
+        )
+    except KeyboardInterrupt:
+        logger.info("app.shutdown_requested")
+    except Exception as e:
+        logger.error("app.fatal_error", error=str(e), exc_info=True)
+    finally:
+        logger.info("app.shutting_down")
+        await strategy.stop()
+        await ws_manager.close()
+        if hasattr(executor, 'close'):
+            await executor.close()
+        await db.dispose()
+        logger.info("app.shutdown_complete")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
