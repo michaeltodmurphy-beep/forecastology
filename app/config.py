@@ -58,4 +58,3 @@ class AppConfig(BaseSettings):
         Field validators convert them to integer cents automatically.
         """
         return cls()
-

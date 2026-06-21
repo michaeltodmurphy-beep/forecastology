@@ -1,0 +1,1038 @@
+2026-06-21 09:39:30 [info     ] wsd.start                      mode=LIVE
+2026-06-21 09:39:30 [warning  ] wsd.live_mode                  message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:39:32 [info     ] wsd.fetched_markets            count=240
+2026-06-21 09:39:32 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:39:37 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:39:47 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:40:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:40:22 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:40:47 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:41:17 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:41:52 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:42:32 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:43:17 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:44:07 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:45:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:46:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:47:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:48:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:49:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:50:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:51:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:52:02 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:53:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:54:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:55:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:56:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:57:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:58:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 09:59:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 10:00:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 10:01:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 10:02:03 [error    ] wsd.listen_error               error="BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'"
+2026-06-21 10:02:14 [info     ] wsd.start                      mode=LIVE
+2026-06-21 10:02:14 [warning  ] wsd.live_mode                  message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:02:15 [info     ] wsd.fetched_markets            count=216
+2026-06-21 10:02:15 [info     ] wsd.connected
+2026-06-21 10:02:15 [info     ] wsd.subscribed
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 214
+    try:
+    ^
+IndentationError: expected an indented block after 'for' statement on line 213
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+  File "/home/ubuntu/forecastology/run.py", line 215
+    await self._process_ws_message(msg)
+IndentationError: unexpected indent
+2026-06-21 10:25:58 [info     ] wsd.start                      mode=LIVE
+2026-06-21 10:25:58 [warning  ] wsd.live_mode                  message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:25:59 [info     ] wsd.fetched_markets            count=228
+2026-06-21 10:25:59 [info     ] wsd.connected
+2026-06-21 10:25:59 [info     ] wsd.subscribed
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'ticker', 'sid': 1}}"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=error preview="{'type': 'error', 'id': 1, 'msg': {'code': 8, 'msg': 'Unknown channel name'}}"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=error preview="{'type': 'error', 'id': 1, 'msg': {'code': 2, 'msg': 'Params required'}}"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'market_lifecycle_v2', 'sid': 3}}"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'trade', 'sid': 4}}"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 4, 'seq': 1, 'msg': {'trade_id': '8f90bdc7-81d3-6c12-04e2-963a5eb46c96', 'market_ticker': 'KXBTC15M-26JUN211030-30', 'yes_price_dollars': '0.6500', 'no_price_dollars': '0.3500', 'count_fp': '223.63', 'taker_side': 'no', 'taker_outcome_side': 'no', 'taker_book_side': 'ask', '"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 4, 'seq': 2, 'msg': {'trade_id': 'fc60433c-0fc9-4fcf-5827-d19dd93dbf5e', 'market_ticker': 'KXBTC15M-26JUN211030-30', 'yes_price_dollars': '0.6600', 'no_price_dollars': '0.3400', 'count_fp': '113.21', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bid',"
+2026-06-21 10:25:59 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 4, 'seq': 3, 'msg': {'trade_id': 'db295d3d-7801-4b73-5bd3-9378b3a59f73', 'market_ticker': 'KXBTC15M-26JUN211030-30', 'yes_price_dollars': '0.6600', 'no_price_dollars': '0.3400', 'count_fp': '0.10', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bid', '"
+2026-06-21 10:26:00 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '43dc608c-ee39-43c4-a49d-3edf79e59e2b', 'market_ticker': 'KXMVESPORTSMULTIGAMEEXTENDED-S2026DBB06261D5E-F2229F6B155', 'price_dollars': '0.0000', 'yes_bid_dollars': '0.0000', 'yes_ask_dollars': '0.0980', 'volume_fp': '0.00', 'open_interest_fp': '0.00'"
+2026-06-21 10:26:00 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '1e0784eb-a805-4256-aecd-6d37e6102060', 'market_ticker': 'KXTRUMPMENTION-26JUL24-AUTO', 'price_dollars': '0.4100', 'yes_bid_dollars': '0.4000', 'yes_ask_dollars': '0.5000', 'volume_fp': '2096.04', 'open_interest_fp': '1770.50', 'dollar_volume': 1048,"
+2026-06-21 10:26:00 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '7134994d-405f-449c-a07e-483225c9e248', 'market_ticker': 'KXMVECROSSCATEGORY-S2026AD2693093B2-3EC8D4A09A9', 'price_dollars': '0.0000', 'yes_bid_dollars': '0.0000', 'yes_ask_dollars': '0.0990', 'volume_fp': '0.00', 'open_interest_fp': '0.00', 'dollar_"
+2026-06-21 10:26:05 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 3, 'seq': 1, 'msg': {'market_ticker': 'KXATPCHALLENGERMATCH-26JUN21GUNMAK-GUN', 'is_deactivated': True, 'event_type': 'deactivated'}}"
+2026-06-21 10:26:05 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 3, 'seq': 2, 'msg': {'market_ticker': 'KXATPCHALLENGERMATCH-26JUN21GUNMAK-MAK', 'is_deactivated': True, 'event_type': 'deactivated'}}"
+2026-06-21 10:26:09 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 3, 'seq': 3, 'msg': {'market_ticker': 'KXATPCHALLENGERMATCH-26JUN21GUNMAK-GUN', 'close_ts': 1782051910, 'event_type': 'close_date_updated'}}"
+2026-06-21 10:28:03 [info     ] wsd.msg_sample                 msg_type=event_lifecycle preview="{'type': 'event_lifecycle', 'sid': 3, 'seq': 17, 'msg': {'event_ticker': 'KXSPOTIFYD-26JUN22', 'title': 'Top USA Song on Spotify on Jun 22, 2026?', 'subtitle': '', 'collateral_return_type': 'MECNET', 'series_ticker': 'KXSPOTIFYD'}}"
+2026-06-21 10:28:03 [info     ] wsd.msg_sample                 msg_type=event_lifecycle preview="{'type': 'event_lifecycle', 'sid': 3, 'seq': 33, 'msg': {'event_ticker': 'KXSPOTIFY2D-26JUN22', 'title': 'Runner-up USA Song on Spotify on Jun 22, 2026?', 'subtitle': '', 'collateral_return_type': 'MECNET', 'series_ticker': 'KXSPOTIFY2D'}}"
+2026-06-21 10:28:04 [info     ] wsd.msg_sample                 msg_type=event_lifecycle preview="{'type': 'event_lifecycle', 'sid': 3, 'seq': 49, 'msg': {'event_ticker': 'KXSPOTIFYGLOBALD-26JUN22', 'title': 'Top Global Song on Spotify on Jun 22, 2026?', 'subtitle': '', 'collateral_return_type': 'MECNET', 'series_ticker': 'KXSPOTIFYGLOBALD'}}"
+2026-06-21 11:01:26 [info     ] wsd.start                      mode=LIVE
+2026-06-21 11:01:26 [warning  ] wsd.live_mode                  message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:01:26 [info     ] wsd.fetched_markets            count=216
+2026-06-21 11:01:27 [info     ] wsd.connected
+2026-06-21 11:01:27 [info     ] wsd.subscribed
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'ticker', 'sid': 1}}"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'market_lifecycle_v2', 'sid': 2}}"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'trade', 'sid': 3}}"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 3, 'seq': 1, 'msg': {'trade_id': '4dcce29e-1c3b-6e20-3166-be89c7ecb26c', 'market_ticker': 'KXNASCARRACE-AND26-MIMC', 'yes_price_dollars': '0.0400', 'no_price_dollars': '0.9600', 'count_fp': '100.00', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bid',"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 2, 'seq': 1, 'msg': {'market_ticker': 'KXDOGED-26JUN2111-T0.0299999', 'determination_ts': 1782054087, 'result': 'yes', 'settlement_value': '1.0000', 'event_type': 'determined'}}"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 3, 'seq': 2, 'msg': {'trade_id': '2cdb2c94-0712-4f4d-751b-dcb3807ace0e', 'market_ticker': 'KXWCGAME-26JUN21ESPKSA-TIE', 'yes_price_dollars': '0.0800', 'no_price_dollars': '0.9200', 'count_fp': '293.59', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bi"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 2, 'seq': 2, 'msg': {'market_ticker': 'KXDOGED-26JUN2111-T0.0349999', 'determination_ts': 1782054087, 'result': 'yes', 'settlement_value': '1.0000', 'event_type': 'determined'}}"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 3, 'seq': 3, 'msg': {'trade_id': 'ba392948-72cc-734d-72bb-d855c3516df6', 'market_ticker': 'KXWCGAME-26JUN21ESPKSA-KSA', 'yes_price_dollars': '0.0500', 'no_price_dollars': '0.9500', 'count_fp': '56.25', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bid"
+2026-06-21 11:01:27 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 2, 'seq': 3, 'msg': {'market_ticker': 'KXDOGED-26JUN2111-T0.0399999', 'determination_ts': 1782054087, 'result': 'yes', 'settlement_value': '1.0000', 'event_type': 'determined'}}"
+2026-06-21 11:01:28 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '41560849-9556-49de-bedb-2ab06d425b5a', 'market_ticker': 'KXWC1H-26JUN21ESPKSA-TIE', 'price_dollars': '0.2200', 'yes_bid_dollars': '0.2200', 'yes_ask_dollars': '0.2300', 'volume_fp': '76379.50', 'open_interest_fp': '72774.68', 'dollar_volume': 38189,"
+2026-06-21 11:01:28 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '1c588a89-62e4-4cf6-8bae-f661dbf7c42b', 'market_ticker': 'KXRAINMIAM-26JUN-3', 'price_dollars': '0.4000', 'yes_bid_dollars': '0.3600', 'yes_ask_dollars': '0.4000', 'volume_fp': '24285.80', 'open_interest_fp': '4748.42', 'dollar_volume': 12142, 'dolla"
+2026-06-21 11:01:28 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '11c30809-4895-472d-a592-3c0b2d28acfd', 'market_ticker': 'KXSILVERD-26JUN2217-T65.25', 'price_dollars': '0.4500', 'yes_bid_dollars': '0.4400', 'yes_ask_dollars': '0.4600', 'volume_fp': '2780.80', 'open_interest_fp': '2054.06', 'dollar_volume': 1390, "
+2026-06-21 11:01:40 [info     ] wsd.start                      mode=LIVE
+2026-06-21 11:01:40 [warning  ] wsd.live_mode                  message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:01:40 [info     ] wsd.fetched_markets            count=216
+2026-06-21 11:01:40 [info     ] wsd.connected
+2026-06-21 11:01:40 [info     ] wsd.subscribed
+2026-06-21 11:01:40 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'ticker', 'sid': 1}}"
+2026-06-21 11:01:40 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'market_lifecycle_v2', 'sid': 2}}"
+2026-06-21 11:01:40 [info     ] wsd.msg_sample                 msg_type=subscribed preview="{'type': 'subscribed', 'id': 1, 'msg': {'channel': 'trade', 'sid': 3}}"
+2026-06-21 11:01:40 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 3, 'seq': 1, 'msg': {'trade_id': '1d8d6f5d-0323-508d-ab50-5249bde081b9', 'market_ticker': 'KXATPCHALLENGERMATCH-26JUN21CIGORT-ORT', 'yes_price_dollars': '0.1400', 'no_price_dollars': '0.8600', 'count_fp': '134.74', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_boo"
+2026-06-21 11:01:40 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 3, 'seq': 2, 'msg': {'trade_id': 'f90fc40e-9af6-5fc1-7c46-aabccfcaf3bb', 'market_ticker': 'KXPGATOUR-USO26-XSCH', 'yes_price_dollars': '0.0310', 'no_price_dollars': '0.9690', 'count_fp': '19.00', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bid', 'ts"
+2026-06-21 11:01:40 [info     ] wsd.msg_sample                 msg_type=trade preview="{'type': 'trade', 'sid': 3, 'seq': 3, 'msg': {'trade_id': '03d29543-7086-52c7-30b0-87a1fbd23c1e', 'market_ticker': 'KXATP-26LONDON-PAU', 'yes_price_dollars': '0.5200', 'no_price_dollars': '0.4800', 'count_fp': '92.13', 'taker_side': 'yes', 'taker_outcome_side': 'yes', 'taker_book_side': 'bid', 'ts':"
+2026-06-21 11:01:41 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 2, 'seq': 1, 'msg': {'market_ticker': 'KXMAMDANIEO-26JUN20-T0', 'determination_ts': 1782054101, 'result': 'no', 'settlement_value': '0.0000', 'event_type': 'determined'}}"
+2026-06-21 11:01:41 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': 'd1bac42d-54e1-48bc-963e-dcb387f4eea9', 'market_ticker': 'KXITFWMATCH-26JUN21TATPOP-POP', 'price_dollars': '0.0000', 'yes_bid_dollars': '0.0600', 'yes_ask_dollars': '0.9700', 'volume_fp': '0.00', 'open_interest_fp': '0.00', 'dollar_volume': 0, 'dolla"
+2026-06-21 11:01:41 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': '429696e0-4cc2-4c37-aef8-d1611cb2a402', 'market_ticker': 'KXITFMATCH-26JUN21PANBAT-BAT', 'price_dollars': '0.0000', 'yes_bid_dollars': '0.0100', 'yes_ask_dollars': '0.9300', 'volume_fp': '0.00', 'open_interest_fp': '0.00', 'dollar_volume': 0, 'dollar"
+2026-06-21 11:01:41 [info     ] wsd.msg_sample                 msg_type=ticker preview="{'type': 'ticker', 'sid': 1, 'msg': {'market_id': 'db4cb05a-42ee-483b-80a5-266ab3b9fb71', 'market_ticker': 'KXITFWMATCH-26JUN21MARLOP-LOP', 'price_dollars': '0.0000', 'yes_bid_dollars': '0.0700', 'yes_ask_dollars': '0.9700', 'volume_fp': '0.00', 'open_interest_fp': '0.00', 'dollar_volume': 0, 'dolla"
+2026-06-21 11:01:54 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 2, 'seq': 2, 'msg': {'market_ticker': 'KXT20MATCH-26JUN210530GWAJAB-JAB', 'is_deactivated': True, 'event_type': 'deactivated'}}"
+2026-06-21 11:01:54 [info     ] wsd.msg_sample                 msg_type=market_lifecycle_v2 preview="{'type': 'market_lifecycle_v2', 'sid': 2, 'seq': 3, 'msg': {'market_ticker': 'KXT20MATCH-26JUN210530GWAJAB-GWA', 'is_deactivated': True, 'event_type': 'deactivated'}}"
+2026-06-21 11:02:18 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:02:23 [info     ] wsd.connected
+2026-06-21 11:02:23 [info     ] wsd.subscribed
+2026-06-21 11:02:58 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:03:03 [info     ] wsd.connected
+2026-06-21 11:03:03 [info     ] wsd.subscribed
+2026-06-21 11:03:41 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:03:46 [info     ] wsd.connected
+2026-06-21 11:03:46 [info     ] wsd.subscribed
+2026-06-21 11:03:47 [info     ] wsd.msg_sample                 msg_type=event_lifecycle preview="{'type': 'event_lifecycle', 'sid': 2, 'seq': 1, 'msg': {'event_ticker': 'KXITFMATCH-26JUN21WUXMIN', 'title': 'Wu vs Minakata', 'subtitle': '', 'collateral_return_type': 'MECNET', 'series_ticker': 'KXITFMATCH'}}"
+2026-06-21 11:03:54 [info     ] wsd.msg_sample                 msg_type=event_lifecycle preview="{'type': 'event_lifecycle', 'sid': 2, 'seq': 4, 'msg': {'event_ticker': 'KXITFMATCH-26JUN21TAKVAN', 'title': 'Taka vs Van Der Merwe', 'subtitle': '', 'collateral_return_type': 'MECNET', 'series_ticker': 'KXITFMATCH'}}"
+2026-06-21 11:04:00 [info     ] wsd.msg_sample                 msg_type=event_lifecycle preview="{'type': 'event_lifecycle', 'sid': 2, 'seq': 7, 'msg': {'event_ticker': 'KXITFMATCH-26JUN21LIXHON', 'title': 'Li vs Hongyu', 'subtitle': '', 'collateral_return_type': 'MECNET', 'series_ticker': 'KXITFMATCH'}}"
+2026-06-21 11:04:27 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:04:32 [info     ] wsd.connected
+2026-06-21 11:04:32 [info     ] wsd.subscribed
+2026-06-21 11:05:14 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:05:19 [info     ] wsd.connected
+2026-06-21 11:05:19 [info     ] wsd.subscribed
+2026-06-21 11:06:07 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:06:12 [info     ] wsd.connected
+2026-06-21 11:06:12 [info     ] wsd.subscribed
+2026-06-21 11:06:59 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:07:04 [info     ] wsd.connected
+2026-06-21 11:07:04 [info     ] wsd.subscribed
+2026-06-21 11:07:50 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:07:55 [info     ] wsd.connected
+2026-06-21 11:07:55 [info     ] wsd.subscribed
+2026-06-21 11:08:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:08:44 [info     ] wsd.connected
+2026-06-21 11:08:44 [info     ] wsd.subscribed
+2026-06-21 11:09:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:09:40 [info     ] wsd.connected
+2026-06-21 11:09:40 [info     ] wsd.subscribed
+2026-06-21 11:10:30 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:10:35 [info     ] wsd.connected
+2026-06-21 11:10:35 [info     ] wsd.subscribed
+2026-06-21 11:11:24 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:11:29 [info     ] wsd.connected
+2026-06-21 11:11:29 [info     ] wsd.subscribed
+2026-06-21 11:12:18 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:12:23 [info     ] wsd.connected
+2026-06-21 11:12:23 [info     ] wsd.subscribed
+2026-06-21 11:13:13 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:13:18 [info     ] wsd.connected
+2026-06-21 11:13:18 [info     ] wsd.subscribed
+2026-06-21 11:14:07 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:14:12 [info     ] wsd.connected
+2026-06-21 11:14:12 [info     ] wsd.subscribed
+2026-06-21 11:15:03 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:15:08 [info     ] wsd.connected
+2026-06-21 11:15:08 [info     ] wsd.subscribed
+2026-06-21 11:16:00 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:16:05 [info     ] wsd.connected
+2026-06-21 11:16:05 [info     ] wsd.subscribed
+2026-06-21 11:16:51 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:16:56 [info     ] wsd.connected
+2026-06-21 11:16:56 [info     ] wsd.subscribed
+2026-06-21 11:17:51 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:17:56 [info     ] wsd.connected
+2026-06-21 11:17:56 [info     ] wsd.subscribed
+2026-06-21 11:18:44 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:18:49 [info     ] wsd.connected
+2026-06-21 11:18:49 [info     ] wsd.subscribed
+2026-06-21 11:19:35 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:19:40 [info     ] wsd.connected
+2026-06-21 11:19:40 [info     ] wsd.subscribed
+2026-06-21 11:20:33 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:20:38 [info     ] wsd.connected
+2026-06-21 11:20:38 [info     ] wsd.subscribed
+2026-06-21 11:21:29 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:21:34 [info     ] wsd.connected
+2026-06-21 11:21:34 [info     ] wsd.subscribed
+2026-06-21 11:22:26 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:22:31 [info     ] wsd.connected
+2026-06-21 11:22:31 [info     ] wsd.subscribed
+2026-06-21 11:23:21 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:23:26 [info     ] wsd.connected
+2026-06-21 11:23:26 [info     ] wsd.subscribed
+2026-06-21 11:24:24 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:24:29 [info     ] wsd.connected
+2026-06-21 11:24:29 [info     ] wsd.subscribed
+2026-06-21 11:25:25 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:25:30 [info     ] wsd.connected
+2026-06-21 11:25:30 [info     ] wsd.subscribed
+2026-06-21 11:26:26 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:26:31 [info     ] wsd.connected
+2026-06-21 11:26:31 [info     ] wsd.subscribed
+2026-06-21 11:27:28 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:27:33 [info     ] wsd.connected
+2026-06-21 11:27:33 [info     ] wsd.subscribed
+2026-06-21 11:28:31 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:28:36 [info     ] wsd.connected
+2026-06-21 11:28:36 [info     ] wsd.subscribed
+2026-06-21 11:29:35 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:29:40 [info     ] wsd.connected
+2026-06-21 11:29:40 [info     ] wsd.subscribed
+2026-06-21 11:30:40 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:30:45 [info     ] wsd.connected
+2026-06-21 11:30:45 [info     ] wsd.subscribed
+2026-06-21 11:31:40 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:31:45 [info     ] wsd.connected
+2026-06-21 11:31:45 [info     ] wsd.subscribed
+2026-06-21 11:32:42 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:32:47 [info     ] wsd.connected
+2026-06-21 11:32:47 [info     ] wsd.subscribed
+2026-06-21 11:33:38 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:33:43 [info     ] wsd.connected
+2026-06-21 11:33:43 [info     ] wsd.subscribed
+2026-06-21 11:34:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:34:40 [info     ] wsd.connected
+2026-06-21 11:34:40 [info     ] wsd.subscribed
+2026-06-21 11:35:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:35:44 [info     ] wsd.connected
+2026-06-21 11:35:44 [info     ] wsd.subscribed
+2026-06-21 11:36:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:36:44 [info     ] wsd.connected
+2026-06-21 11:36:44 [info     ] wsd.subscribed
+2026-06-21 11:37:37 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:37:42 [info     ] wsd.connected
+2026-06-21 11:37:42 [info     ] wsd.subscribed
+2026-06-21 11:38:38 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:38:43 [info     ] wsd.connected
+2026-06-21 11:38:43 [info     ] wsd.subscribed
+2026-06-21 11:39:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:39:44 [info     ] wsd.connected
+2026-06-21 11:39:44 [info     ] wsd.subscribed
+2026-06-21 11:40:36 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:40:41 [info     ] wsd.connected
+2026-06-21 11:40:41 [info     ] wsd.subscribed
+2026-06-21 11:41:47 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:41:52 [info     ] wsd.connected
+2026-06-21 11:41:52 [info     ] wsd.subscribed
+2026-06-21 11:43:06 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:43:11 [info     ] wsd.connected
+2026-06-21 11:43:11 [info     ] wsd.subscribed
+2026-06-21 11:44:19 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:44:24 [info     ] wsd.connected
+2026-06-21 11:44:24 [info     ] wsd.subscribed
+2026-06-21 11:45:12 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:45:18 [info     ] wsd.connected
+2026-06-21 11:45:18 [info     ] wsd.subscribed
+2026-06-21 11:46:12 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:46:18 [info     ] wsd.connected
+2026-06-21 11:46:18 [info     ] wsd.subscribed
+2026-06-21 11:47:14 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:47:19 [info     ] wsd.connected
+2026-06-21 11:47:19 [info     ] wsd.subscribed
+2026-06-21 11:48:14 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:48:19 [info     ] wsd.connected
+2026-06-21 11:48:19 [info     ] wsd.subscribed
+2026-06-21 11:49:33 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:49:38 [info     ] wsd.connected
+2026-06-21 11:49:38 [info     ] wsd.subscribed
+2026-06-21 11:50:38 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:50:44 [info     ] wsd.connected
+2026-06-21 11:50:44 [info     ] wsd.subscribed
+2026-06-21 11:51:37 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:51:42 [info     ] wsd.connected
+2026-06-21 11:51:42 [info     ] wsd.subscribed
+2026-06-21 11:52:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:52:39 [info     ] wsd.connected
+2026-06-21 11:52:39 [info     ] wsd.subscribed
+2026-06-21 11:53:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:53:39 [info     ] wsd.connected
+2026-06-21 11:53:39 [info     ] wsd.subscribed
+2026-06-21 11:54:33 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:54:38 [info     ] wsd.connected
+2026-06-21 11:54:38 [info     ] wsd.subscribed
+2026-06-21 11:55:48 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:55:53 [info     ] wsd.connected
+2026-06-21 11:55:53 [info     ] wsd.subscribed
+2026-06-21 11:56:54 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:56:59 [info     ] wsd.connected
+2026-06-21 11:56:59 [info     ] wsd.subscribed
+2026-06-21 11:58:16 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:58:22 [info     ] wsd.connected
+2026-06-21 11:58:22 [info     ] wsd.subscribed
+2026-06-21 11:59:17 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 11:59:22 [info     ] wsd.connected
+2026-06-21 11:59:22 [info     ] wsd.subscribed
+2026-06-21 12:00:31 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:00:37 [info     ] wsd.connected
+2026-06-21 12:00:37 [info     ] wsd.subscribed
+2026-06-21 12:01:51 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:01:56 [info     ] wsd.connected
+2026-06-21 12:01:56 [info     ] wsd.subscribed
+2026-06-21 12:03:02 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:03:07 [info     ] wsd.connected
+2026-06-21 12:03:07 [info     ] wsd.subscribed
+2026-06-21 12:04:14 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:04:19 [info     ] wsd.connected
+2026-06-21 12:04:19 [info     ] wsd.subscribed
+2026-06-21 12:05:15 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:05:20 [info     ] wsd.connected
+2026-06-21 12:05:20 [info     ] wsd.subscribed
+2026-06-21 12:06:17 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:06:22 [info     ] wsd.connected
+2026-06-21 12:06:22 [info     ] wsd.subscribed
+2026-06-21 12:07:16 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:07:21 [info     ] wsd.connected
+2026-06-21 12:07:21 [info     ] wsd.subscribed
+2026-06-21 12:08:18 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:08:24 [info     ] wsd.connected
+2026-06-21 12:08:24 [info     ] wsd.subscribed
+2026-06-21 12:09:19 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:09:24 [info     ] wsd.connected
+2026-06-21 12:09:24 [info     ] wsd.subscribed
+2026-06-21 12:10:27 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:10:32 [info     ] wsd.connected
+2026-06-21 12:10:32 [info     ] wsd.subscribed
+2026-06-21 12:11:25 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:11:30 [info     ] wsd.connected
+2026-06-21 12:11:30 [info     ] wsd.subscribed
+2026-06-21 12:12:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:12:44 [info     ] wsd.connected
+2026-06-21 12:12:44 [info     ] wsd.subscribed
+2026-06-21 12:13:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:13:44 [info     ] wsd.connected
+2026-06-21 12:13:44 [info     ] wsd.subscribed
+2026-06-21 12:14:55 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:15:01 [info     ] wsd.connected
+2026-06-21 12:15:01 [info     ] wsd.subscribed
+2026-06-21 12:15:59 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:16:04 [info     ] wsd.connected
+2026-06-21 12:16:04 [info     ] wsd.subscribed
+2026-06-21 12:17:27 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:17:32 [info     ] wsd.connected
+2026-06-21 12:17:32 [info     ] wsd.subscribed
+2026-06-21 12:19:04 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:19:09 [info     ] wsd.connected
+2026-06-21 12:19:09 [info     ] wsd.subscribed
+2026-06-21 12:21:31 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:21:36 [info     ] wsd.connected
+2026-06-21 12:21:36 [info     ] wsd.subscribed
+2026-06-21 12:23:24 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:23:29 [info     ] wsd.connected
+2026-06-21 12:23:29 [info     ] wsd.subscribed
+2026-06-21 12:24:59 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:25:04 [info     ] wsd.connected
+2026-06-21 12:25:04 [info     ] wsd.subscribed
+2026-06-21 12:27:37 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:27:42 [info     ] wsd.connected
+2026-06-21 12:27:42 [info     ] wsd.subscribed
+2026-06-21 12:29:09 [warning  ] wsd.connection_closed          error='no close frame received or sent'
+2026-06-21 12:29:14 [info     ] wsd.connected
+2026-06-21 12:29:14 [info     ] wsd.subscribed
+2026-06-21 12:30:49 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:30:54 [info     ] wsd.connected
+2026-06-21 12:30:54 [info     ] wsd.subscribed
+2026-06-21 12:32:28 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:32:33 [info     ] wsd.connected
+2026-06-21 12:32:33 [info     ] wsd.subscribed
+2026-06-21 12:34:07 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:34:12 [info     ] wsd.connected
+2026-06-21 12:34:12 [info     ] wsd.subscribed
+2026-06-21 12:35:52 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:35:58 [info     ] wsd.connected
+2026-06-21 12:35:58 [info     ] wsd.subscribed
+2026-06-21 12:37:27 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:37:33 [info     ] wsd.connected
+2026-06-21 12:37:33 [info     ] wsd.subscribed
+2026-06-21 12:38:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:38:39 [info     ] wsd.connected
+2026-06-21 12:38:39 [info     ] wsd.subscribed
+2026-06-21 12:39:43 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:39:48 [info     ] wsd.connected
+2026-06-21 12:39:48 [info     ] wsd.subscribed
+2026-06-21 12:40:59 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:41:04 [info     ] wsd.connected
+2026-06-21 12:41:04 [info     ] wsd.subscribed
+2026-06-21 12:42:13 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:42:18 [info     ] wsd.connected
+2026-06-21 12:42:18 [info     ] wsd.subscribed
+2026-06-21 12:43:32 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:43:37 [info     ] wsd.connected
+2026-06-21 12:43:37 [info     ] wsd.subscribed
+2026-06-21 12:44:45 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:44:51 [info     ] wsd.connected
+2026-06-21 12:44:51 [info     ] wsd.subscribed
+2026-06-21 12:46:00 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:46:05 [info     ] wsd.connected
+2026-06-21 12:46:05 [info     ] wsd.subscribed
+2026-06-21 12:47:11 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:47:16 [info     ] wsd.connected
+2026-06-21 12:47:16 [info     ] wsd.subscribed
+2026-06-21 12:48:22 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:48:28 [info     ] wsd.connected
+2026-06-21 12:48:28 [info     ] wsd.subscribed
+2026-06-21 12:49:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:49:39 [info     ] wsd.connected
+2026-06-21 12:49:39 [info     ] wsd.subscribed
+2026-06-21 12:50:43 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:50:48 [info     ] wsd.connected
+2026-06-21 12:50:48 [info     ] wsd.subscribed
+2026-06-21 12:52:23 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:52:28 [info     ] wsd.connected
+2026-06-21 12:52:28 [info     ] wsd.subscribed
+2026-06-21 12:53:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:53:39 [info     ] wsd.connected
+2026-06-21 12:53:39 [info     ] wsd.subscribed
+2026-06-21 12:54:49 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:54:54 [info     ] wsd.connected
+2026-06-21 12:54:54 [info     ] wsd.subscribed
+2026-06-21 12:56:06 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:56:11 [info     ] wsd.connected
+2026-06-21 12:56:11 [info     ] wsd.subscribed
+2026-06-21 12:57:21 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:57:26 [info     ] wsd.connected
+2026-06-21 12:57:26 [info     ] wsd.subscribed
+2026-06-21 12:58:39 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 12:58:44 [info     ] wsd.connected
+2026-06-21 12:58:44 [info     ] wsd.subscribed
+2026-06-21 12:59:59 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:00:05 [info     ] wsd.connected
+2026-06-21 13:00:05 [info     ] wsd.subscribed
+2026-06-21 13:01:17 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:01:22 [info     ] wsd.connected
+2026-06-21 13:01:22 [info     ] wsd.subscribed
+2026-06-21 13:02:33 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:02:38 [info     ] wsd.connected
+2026-06-21 13:02:38 [info     ] wsd.subscribed
+2026-06-21 13:03:51 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:03:56 [info     ] wsd.connected
+2026-06-21 13:03:56 [info     ] wsd.subscribed
+2026-06-21 13:05:06 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:05:11 [info     ] wsd.connected
+2026-06-21 13:05:11 [info     ] wsd.subscribed
+2026-06-21 13:06:35 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:06:40 [info     ] wsd.connected
+2026-06-21 13:06:40 [info     ] wsd.subscribed
+2026-06-21 13:07:47 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:07:52 [info     ] wsd.connected
+2026-06-21 13:07:52 [info     ] wsd.subscribed
+2026-06-21 13:08:55 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:09:00 [info     ] wsd.connected
+2026-06-21 13:09:00 [info     ] wsd.subscribed
+2026-06-21 13:10:18 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:10:23 [info     ] wsd.connected
+2026-06-21 13:10:23 [info     ] wsd.subscribed
+2026-06-21 13:11:30 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:11:35 [info     ] wsd.connected
+2026-06-21 13:11:35 [info     ] wsd.subscribed
+2026-06-21 13:12:54 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:12:59 [info     ] wsd.connected
+2026-06-21 13:12:59 [info     ] wsd.subscribed
+2026-06-21 13:14:28 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:14:33 [info     ] wsd.connected
+2026-06-21 13:14:33 [info     ] wsd.subscribed
+2026-06-21 13:15:51 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:15:57 [info     ] wsd.connected
+2026-06-21 13:15:57 [info     ] wsd.subscribed
+2026-06-21 13:17:11 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:17:16 [info     ] wsd.connected
+2026-06-21 13:17:16 [info     ] wsd.subscribed
+2026-06-21 13:18:31 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:18:36 [info     ] wsd.connected
+2026-06-21 13:18:36 [info     ] wsd.subscribed
+2026-06-21 13:19:57 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:20:02 [info     ] wsd.connected
+2026-06-21 13:20:02 [info     ] wsd.subscribed
+2026-06-21 13:21:34 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:21:39 [info     ] wsd.connected
+2026-06-21 13:21:39 [info     ] wsd.subscribed
+2026-06-21 13:22:58 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:23:03 [info     ] wsd.connected
+2026-06-21 13:23:03 [info     ] wsd.subscribed
+2026-06-21 13:24:16 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:24:22 [info     ] wsd.connected
+2026-06-21 13:24:22 [info     ] wsd.subscribed
+2026-06-21 13:25:47 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:25:52 [info     ] wsd.connected
+2026-06-21 13:25:52 [info     ] wsd.subscribed
+2026-06-21 13:27:08 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:27:13 [info     ] wsd.connected
+2026-06-21 13:27:13 [info     ] wsd.subscribed
+2026-06-21 13:28:29 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:28:35 [info     ] wsd.connected
+2026-06-21 13:28:35 [info     ] wsd.subscribed
+2026-06-21 13:30:03 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:30:09 [info     ] wsd.connected
+2026-06-21 13:30:09 [info     ] wsd.subscribed
+2026-06-21 13:31:23 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:31:29 [info     ] wsd.connected
+2026-06-21 13:31:29 [info     ] wsd.subscribed
+2026-06-21 13:32:46 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:32:51 [info     ] wsd.connected
+2026-06-21 13:32:51 [info     ] wsd.subscribed
+2026-06-21 13:34:07 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:34:12 [info     ] wsd.connected
+2026-06-21 13:34:12 [info     ] wsd.subscribed
+2026-06-21 13:35:20 [warning  ] wsd.connection_closed          error='sent 1011 (internal error) keepalive ping timeout; no close frame received'
+2026-06-21 13:35:25 [info     ] wsd.connected
+2026-06-21 13:35:25 [info     ] wsd.subscribed

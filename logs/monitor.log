@@ -1,0 +1,2389 @@
+2026-06-21 09:39:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:39:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:39:32 [info     ] database.initialized
+2026-06-21 09:39:32 [info     ] monitor.positions_to_check     count=24
+2026-06-21 09:39:32 [debug    ] monitor.price_check            entry=85 price=99 ticker=KXHIGHTLV-26JUN12-B107.5
+2026-06-21 09:39:32 [info     ] monitor.position_expired       ticker=KXHIGHTLV-26JUN12-B107.5
+2026-06-21 09:39:32 [debug    ] monitor.price_check            entry=85 price=99 ticker=KXHIGHTMIN-26JUN13-B75.5
+2026-06-21 09:39:32 [info     ] monitor.position_expired       ticker=KXHIGHTMIN-26JUN13-B75.5
+2026-06-21 09:39:32 [debug    ] monitor.price_check            entry=87 price=99 ticker=KXLOWTATL-26JUN14-B73.5
+2026-06-21 09:39:32 [info     ] monitor.position_expired       ticker=KXLOWTATL-26JUN14-B73.5
+2026-06-21 09:39:32 [debug    ] monitor.price_check            entry=85 price=99 ticker=KXLOWTAUS-26JUN14-B75.5
+2026-06-21 09:39:32 [info     ] monitor.position_expired       ticker=KXLOWTAUS-26JUN14-B75.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=86 price=99 ticker=KXHIGHMIA-26JUN14-B93.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXHIGHMIA-26JUN14-B93.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=88 price=99 ticker=KXHIGHDEN-26JUN14-T69
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXHIGHDEN-26JUN14-T69
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=88 price=99 ticker=KXLOWTDAL-26JUN14-B70.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTDAL-26JUN14-B70.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=90 price=99 ticker=KXLOWTPHIL-26JUN14-T67
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTPHIL-26JUN14-T67
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=88 price=99 ticker=KXLOWTSATX-26JUN14-B76.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTSATX-26JUN14-B76.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=85 price=99 ticker=KXHIGHTATL-26JUN14-B89.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXHIGHTATL-26JUN14-B89.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=82 price=89 ticker=KXLOWTHOU-26JUN14-B78.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTHOU-26JUN14-B78.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=85 price=98 ticker=KXLOWTBOS-26JUN15-T64
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTBOS-26JUN15-T64
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=82 price=99 ticker=KXLOWTSATX-26JUN15-B70.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTSATX-26JUN15-B70.5
+2026-06-21 09:39:33 [debug    ] monitor.price_check            entry=82 price=99 ticker=KXLOWTSFO-26JUN15-B57.5
+2026-06-21 09:39:33 [info     ] monitor.position_expired       ticker=KXLOWTSFO-26JUN15-B57.5
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=86 price=99 ticker=KXHIGHNY-26JUN15-T78
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXHIGHNY-26JUN15-T78
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=86 price=73 ticker=KXLOWTSEA-26JUN15-T63
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXLOWTSEA-26JUN15-T63
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=82 price=99 ticker=KXHIGHTHOU-26JUN15-T84
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXHIGHTHOU-26JUN15-T84
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=85 price=99 ticker=KXLOWTLV-26JUN16-T82
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXLOWTLV-26JUN16-T82
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=87 price=99 ticker=KXLOWTPHX-26JUN16-T86
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXLOWTPHX-26JUN16-T86
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=90 price=99 ticker=KXHIGHTATL-26JUN16-T76
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXHIGHTATL-26JUN16-T76
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=89 price=98 ticker=KXLOWTPHIL-26JUN17-T64
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXLOWTPHIL-26JUN17-T64
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=83 price=99 ticker=KXLOWTMIN-26JUN17-T56
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXLOWTMIN-26JUN17-T56
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=84 price=99 ticker=KXHIGHTOKC-26JUN17-T96
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXHIGHTOKC-26JUN17-T96
+2026-06-21 09:39:34 [debug    ] monitor.price_check            entry=85 price=99 ticker=KXHIGHDEN-26JUN17-T92
+2026-06-21 09:39:34 [info     ] monitor.position_expired       ticker=KXHIGHDEN-26JUN17-T92
+2026-06-21 09:39:34 [info     ] monitor.cycle_complete         checked=24
+2026-06-21 09:39:34 [info     ] database.disposed
+2026-06-21 09:40:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:40:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:40:05 [info     ] database.initialized
+2026-06-21 09:40:06 [debug    ] monitor.no_positions
+2026-06-21 09:40:06 [info     ] database.disposed
+2026-06-21 09:40:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:40:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:40:34 [info     ] database.initialized
+2026-06-21 09:40:34 [debug    ] monitor.no_positions
+2026-06-21 09:40:34 [info     ] database.disposed
+2026-06-21 09:41:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:41:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:41:04 [info     ] database.initialized
+2026-06-21 09:41:04 [debug    ] monitor.no_positions
+2026-06-21 09:41:04 [info     ] database.disposed
+2026-06-21 09:41:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:41:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:41:35 [info     ] database.initialized
+2026-06-21 09:41:35 [debug    ] monitor.no_positions
+2026-06-21 09:41:35 [info     ] database.disposed
+2026-06-21 09:42:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:42:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:42:05 [info     ] database.initialized
+2026-06-21 09:42:05 [debug    ] monitor.no_positions
+2026-06-21 09:42:05 [info     ] database.disposed
+2026-06-21 09:42:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:42:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:42:42 [info     ] database.initialized
+2026-06-21 09:42:42 [debug    ] monitor.no_positions
+2026-06-21 09:42:42 [info     ] database.disposed
+2026-06-21 09:43:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:43:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:43:12 [info     ] database.initialized
+2026-06-21 09:43:12 [debug    ] monitor.no_positions
+2026-06-21 09:43:12 [info     ] database.disposed
+2026-06-21 09:43:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:43:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:43:43 [info     ] database.initialized
+2026-06-21 09:43:43 [debug    ] monitor.no_positions
+2026-06-21 09:43:43 [info     ] database.disposed
+2026-06-21 09:44:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:44:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:44:14 [info     ] database.initialized
+2026-06-21 09:44:14 [debug    ] monitor.no_positions
+2026-06-21 09:44:14 [info     ] database.disposed
+2026-06-21 09:44:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:44:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:44:43 [info     ] database.initialized
+2026-06-21 09:44:43 [debug    ] monitor.no_positions
+2026-06-21 09:44:43 [info     ] database.disposed
+2026-06-21 09:45:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:45:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:45:13 [info     ] database.initialized
+2026-06-21 09:45:13 [debug    ] monitor.no_positions
+2026-06-21 09:45:13 [info     ] database.disposed
+2026-06-21 09:45:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:45:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:45:43 [info     ] database.initialized
+2026-06-21 09:45:43 [debug    ] monitor.no_positions
+2026-06-21 09:45:43 [info     ] database.disposed
+2026-06-21 09:46:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:46:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:46:14 [info     ] database.initialized
+2026-06-21 09:46:14 [debug    ] monitor.no_positions
+2026-06-21 09:46:14 [info     ] database.disposed
+2026-06-21 09:46:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:46:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:46:44 [info     ] database.initialized
+2026-06-21 09:46:44 [debug    ] monitor.no_positions
+2026-06-21 09:46:44 [info     ] database.disposed
+2026-06-21 09:47:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:47:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:47:14 [info     ] database.initialized
+2026-06-21 09:47:14 [debug    ] monitor.no_positions
+2026-06-21 09:47:14 [info     ] database.disposed
+2026-06-21 09:47:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:47:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:47:44 [info     ] database.initialized
+2026-06-21 09:47:44 [debug    ] monitor.no_positions
+2026-06-21 09:47:44 [info     ] database.disposed
+2026-06-21 09:48:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:48:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:48:15 [info     ] database.initialized
+2026-06-21 09:48:15 [debug    ] monitor.no_positions
+2026-06-21 09:48:15 [info     ] database.disposed
+2026-06-21 09:48:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:48:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:48:44 [info     ] database.initialized
+2026-06-21 09:48:44 [debug    ] monitor.no_positions
+2026-06-21 09:48:44 [info     ] database.disposed
+2026-06-21 09:49:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:49:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:49:14 [info     ] database.initialized
+2026-06-21 09:49:14 [debug    ] monitor.no_positions
+2026-06-21 09:49:14 [info     ] database.disposed
+2026-06-21 09:49:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:49:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:49:44 [info     ] database.initialized
+2026-06-21 09:49:44 [debug    ] monitor.no_positions
+2026-06-21 09:49:44 [info     ] database.disposed
+2026-06-21 09:50:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:50:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:50:15 [info     ] database.initialized
+2026-06-21 09:50:15 [debug    ] monitor.no_positions
+2026-06-21 09:50:15 [info     ] database.disposed
+2026-06-21 09:50:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:50:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:50:45 [info     ] database.initialized
+2026-06-21 09:50:45 [debug    ] monitor.no_positions
+2026-06-21 09:50:45 [info     ] database.disposed
+2026-06-21 09:51:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:51:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:51:15 [info     ] database.initialized
+2026-06-21 09:51:15 [debug    ] monitor.no_positions
+2026-06-21 09:51:15 [info     ] database.disposed
+2026-06-21 09:51:48 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:51:48 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:51:49 [info     ] database.initialized
+2026-06-21 09:51:49 [debug    ] monitor.no_positions
+2026-06-21 09:51:49 [info     ] database.disposed
+2026-06-21 09:52:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:52:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:52:20 [info     ] database.initialized
+2026-06-21 09:52:20 [debug    ] monitor.no_positions
+2026-06-21 09:52:20 [info     ] database.disposed
+2026-06-21 09:52:50 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:52:50 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:52:50 [info     ] database.initialized
+2026-06-21 09:52:50 [debug    ] monitor.no_positions
+2026-06-21 09:52:50 [info     ] database.disposed
+2026-06-21 09:53:20 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:53:20 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:53:21 [info     ] database.initialized
+2026-06-21 09:53:21 [debug    ] monitor.no_positions
+2026-06-21 09:53:21 [info     ] database.disposed
+2026-06-21 09:53:51 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:53:51 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:53:51 [info     ] database.initialized
+2026-06-21 09:53:51 [debug    ] monitor.no_positions
+2026-06-21 09:53:51 [info     ] database.disposed
+2026-06-21 09:54:21 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:54:21 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:54:22 [info     ] database.initialized
+2026-06-21 09:54:22 [debug    ] monitor.no_positions
+2026-06-21 09:54:22 [info     ] database.disposed
+2026-06-21 09:54:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:54:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:54:52 [info     ] database.initialized
+2026-06-21 09:54:52 [debug    ] monitor.no_positions
+2026-06-21 09:54:52 [info     ] database.disposed
+2026-06-21 09:55:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:55:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:55:22 [info     ] database.initialized
+2026-06-21 09:55:22 [debug    ] monitor.no_positions
+2026-06-21 09:55:22 [info     ] database.disposed
+2026-06-21 09:55:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:55:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:55:52 [info     ] database.initialized
+2026-06-21 09:55:52 [debug    ] monitor.no_positions
+2026-06-21 09:55:52 [info     ] database.disposed
+2026-06-21 09:56:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:56:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:56:23 [info     ] database.initialized
+2026-06-21 09:56:23 [debug    ] monitor.no_positions
+2026-06-21 09:56:23 [info     ] database.disposed
+2026-06-21 09:56:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:56:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:56:53 [info     ] database.initialized
+2026-06-21 09:56:53 [debug    ] monitor.no_positions
+2026-06-21 09:56:53 [info     ] database.disposed
+2026-06-21 09:57:23 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:57:23 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:57:23 [info     ] database.initialized
+2026-06-21 09:57:23 [debug    ] monitor.no_positions
+2026-06-21 09:57:23 [info     ] database.disposed
+2026-06-21 09:57:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:57:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:57:54 [info     ] database.initialized
+2026-06-21 09:57:54 [debug    ] monitor.no_positions
+2026-06-21 09:57:54 [info     ] database.disposed
+2026-06-21 09:58:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:58:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:58:24 [info     ] database.initialized
+2026-06-21 09:58:24 [debug    ] monitor.no_positions
+2026-06-21 09:58:24 [info     ] database.disposed
+2026-06-21 09:58:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:58:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:58:54 [info     ] database.initialized
+2026-06-21 09:58:54 [debug    ] monitor.no_positions
+2026-06-21 09:58:54 [info     ] database.disposed
+2026-06-21 09:59:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:59:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:59:24 [info     ] database.initialized
+2026-06-21 09:59:24 [debug    ] monitor.no_positions
+2026-06-21 09:59:24 [info     ] database.disposed
+2026-06-21 09:59:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 09:59:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 09:59:54 [info     ] database.initialized
+2026-06-21 09:59:54 [debug    ] monitor.no_positions
+2026-06-21 09:59:54 [info     ] database.disposed
+2026-06-21 10:00:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:00:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:00:24 [info     ] database.initialized
+2026-06-21 10:00:24 [debug    ] monitor.no_positions
+2026-06-21 10:00:24 [info     ] database.disposed
+2026-06-21 10:00:55 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:00:55 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:00:55 [info     ] database.initialized
+2026-06-21 10:00:55 [debug    ] monitor.no_positions
+2026-06-21 10:00:55 [info     ] database.disposed
+2026-06-21 10:01:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:01:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:01:26 [info     ] database.initialized
+2026-06-21 10:01:26 [debug    ] monitor.no_positions
+2026-06-21 10:01:26 [info     ] database.disposed
+2026-06-21 10:01:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:01:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:01:56 [info     ] database.initialized
+2026-06-21 10:01:56 [debug    ] monitor.no_positions
+2026-06-21 10:01:56 [info     ] database.disposed
+2026-06-21 10:02:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:02:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:02:28 [info     ] database.initialized
+2026-06-21 10:02:28 [debug    ] monitor.no_positions
+2026-06-21 10:02:28 [info     ] database.disposed
+2026-06-21 10:02:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:02:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:02:57 [info     ] database.initialized
+2026-06-21 10:02:57 [debug    ] monitor.no_positions
+2026-06-21 10:02:57 [info     ] database.disposed
+2026-06-21 10:03:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:03:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:03:28 [info     ] database.initialized
+2026-06-21 10:03:28 [debug    ] monitor.no_positions
+2026-06-21 10:03:28 [info     ] database.disposed
+2026-06-21 10:03:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:03:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:03:58 [info     ] database.initialized
+2026-06-21 10:03:58 [debug    ] monitor.no_positions
+2026-06-21 10:03:58 [info     ] database.disposed
+2026-06-21 10:04:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:04:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:04:28 [info     ] database.initialized
+2026-06-21 10:04:28 [debug    ] monitor.no_positions
+2026-06-21 10:04:28 [info     ] database.disposed
+2026-06-21 10:04:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:04:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:04:58 [info     ] database.initialized
+2026-06-21 10:04:58 [debug    ] monitor.no_positions
+2026-06-21 10:04:58 [info     ] database.disposed
+2026-06-21 10:05:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:05:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:05:29 [info     ] database.initialized
+2026-06-21 10:05:29 [debug    ] monitor.no_positions
+2026-06-21 10:05:29 [info     ] database.disposed
+2026-06-21 10:05:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:05:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:05:59 [info     ] database.initialized
+2026-06-21 10:05:59 [debug    ] monitor.no_positions
+2026-06-21 10:05:59 [info     ] database.disposed
+2026-06-21 10:06:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:06:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:06:31 [info     ] database.initialized
+2026-06-21 10:06:31 [debug    ] monitor.no_positions
+2026-06-21 10:06:31 [info     ] database.disposed
+2026-06-21 10:07:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:07:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:07:00 [info     ] database.initialized
+2026-06-21 10:07:00 [debug    ] monitor.no_positions
+2026-06-21 10:07:00 [info     ] database.disposed
+2026-06-21 10:07:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:07:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:07:30 [info     ] database.initialized
+2026-06-21 10:07:30 [debug    ] monitor.no_positions
+2026-06-21 10:07:30 [info     ] database.disposed
+2026-06-21 10:08:01 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:08:01 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:08:01 [info     ] database.initialized
+2026-06-21 10:08:01 [debug    ] monitor.no_positions
+2026-06-21 10:08:01 [info     ] database.disposed
+2026-06-21 10:08:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:08:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:08:31 [info     ] database.initialized
+2026-06-21 10:08:31 [debug    ] monitor.no_positions
+2026-06-21 10:08:31 [info     ] database.disposed
+2026-06-21 10:09:02 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:09:02 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:09:02 [info     ] database.initialized
+2026-06-21 10:09:02 [debug    ] monitor.no_positions
+2026-06-21 10:09:02 [info     ] database.disposed
+2026-06-21 10:09:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:09:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:09:32 [info     ] database.initialized
+2026-06-21 10:09:32 [debug    ] monitor.no_positions
+2026-06-21 10:09:32 [info     ] database.disposed
+2026-06-21 10:10:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:10:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:10:03 [info     ] database.initialized
+2026-06-21 10:10:03 [debug    ] monitor.no_positions
+2026-06-21 10:10:03 [info     ] database.disposed
+2026-06-21 10:10:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:10:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:10:32 [info     ] database.initialized
+2026-06-21 10:10:32 [debug    ] monitor.no_positions
+2026-06-21 10:10:32 [info     ] database.disposed
+2026-06-21 10:11:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:11:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:11:03 [info     ] database.initialized
+2026-06-21 10:11:03 [debug    ] monitor.no_positions
+2026-06-21 10:11:03 [info     ] database.disposed
+2026-06-21 10:11:33 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:11:33 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:11:33 [info     ] database.initialized
+2026-06-21 10:11:33 [debug    ] monitor.no_positions
+2026-06-21 10:11:33 [info     ] database.disposed
+2026-06-21 10:12:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:12:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:12:05 [info     ] database.initialized
+2026-06-21 10:12:05 [debug    ] monitor.no_positions
+2026-06-21 10:12:05 [info     ] database.disposed
+2026-06-21 10:12:33 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:12:33 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:12:33 [info     ] database.initialized
+2026-06-21 10:12:33 [debug    ] monitor.no_positions
+2026-06-21 10:12:33 [info     ] database.disposed
+2026-06-21 10:13:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:13:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:13:06 [info     ] database.initialized
+2026-06-21 10:13:06 [debug    ] monitor.no_positions
+2026-06-21 10:13:06 [info     ] database.disposed
+2026-06-21 10:13:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:13:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:13:34 [info     ] database.initialized
+2026-06-21 10:13:34 [debug    ] monitor.no_positions
+2026-06-21 10:13:34 [info     ] database.disposed
+2026-06-21 10:14:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:14:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:14:05 [info     ] database.initialized
+2026-06-21 10:14:06 [debug    ] monitor.no_positions
+2026-06-21 10:14:06 [info     ] database.disposed
+2026-06-21 10:14:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:14:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:14:35 [info     ] database.initialized
+2026-06-21 10:14:35 [debug    ] monitor.no_positions
+2026-06-21 10:14:35 [info     ] database.disposed
+2026-06-21 10:15:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:15:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:15:05 [info     ] database.initialized
+2026-06-21 10:15:05 [debug    ] monitor.no_positions
+2026-06-21 10:15:05 [info     ] database.disposed
+2026-06-21 10:15:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:15:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:15:36 [info     ] database.initialized
+2026-06-21 10:15:36 [debug    ] monitor.no_positions
+2026-06-21 10:15:36 [info     ] database.disposed
+2026-06-21 10:16:06 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:16:06 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:16:07 [info     ] database.initialized
+2026-06-21 10:16:07 [debug    ] monitor.no_positions
+2026-06-21 10:16:07 [info     ] database.disposed
+2026-06-21 10:16:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:16:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:16:37 [info     ] database.initialized
+2026-06-21 10:16:37 [debug    ] monitor.no_positions
+2026-06-21 10:16:37 [info     ] database.disposed
+2026-06-21 10:17:06 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:17:06 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:17:06 [info     ] database.initialized
+2026-06-21 10:17:06 [debug    ] monitor.no_positions
+2026-06-21 10:17:06 [info     ] database.disposed
+2026-06-21 10:17:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:17:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:17:37 [info     ] database.initialized
+2026-06-21 10:17:37 [debug    ] monitor.no_positions
+2026-06-21 10:17:37 [info     ] database.disposed
+2026-06-21 10:18:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:18:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:18:07 [info     ] database.initialized
+2026-06-21 10:18:07 [debug    ] monitor.no_positions
+2026-06-21 10:18:07 [info     ] database.disposed
+2026-06-21 10:18:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:18:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:18:38 [info     ] database.initialized
+2026-06-21 10:18:38 [debug    ] monitor.no_positions
+2026-06-21 10:18:38 [info     ] database.disposed
+2026-06-21 10:19:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:19:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:19:08 [info     ] database.initialized
+2026-06-21 10:19:08 [debug    ] monitor.no_positions
+2026-06-21 10:19:08 [info     ] database.disposed
+2026-06-21 10:19:38 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:19:38 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:19:38 [info     ] database.initialized
+2026-06-21 10:19:38 [debug    ] monitor.no_positions
+2026-06-21 10:19:38 [info     ] database.disposed
+2026-06-21 10:20:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:20:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:20:09 [info     ] database.initialized
+2026-06-21 10:20:09 [debug    ] monitor.no_positions
+2026-06-21 10:20:09 [info     ] database.disposed
+2026-06-21 10:20:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:20:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:20:39 [info     ] database.initialized
+2026-06-21 10:20:39 [debug    ] monitor.no_positions
+2026-06-21 10:20:39 [info     ] database.disposed
+2026-06-21 10:21:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:21:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:21:09 [info     ] database.initialized
+2026-06-21 10:21:09 [debug    ] monitor.no_positions
+2026-06-21 10:21:09 [info     ] database.disposed
+2026-06-21 10:21:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:21:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:21:40 [info     ] database.initialized
+2026-06-21 10:21:40 [debug    ] monitor.no_positions
+2026-06-21 10:21:40 [info     ] database.disposed
+2026-06-21 10:22:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:22:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:22:09 [info     ] database.initialized
+2026-06-21 10:22:09 [debug    ] monitor.no_positions
+2026-06-21 10:22:09 [info     ] database.disposed
+2026-06-21 10:22:40 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:22:40 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:22:40 [info     ] database.initialized
+2026-06-21 10:22:40 [debug    ] monitor.no_positions
+2026-06-21 10:22:40 [info     ] database.disposed
+2026-06-21 10:23:11 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:23:11 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:23:11 [info     ] database.initialized
+2026-06-21 10:23:11 [debug    ] monitor.no_positions
+2026-06-21 10:23:11 [info     ] database.disposed
+2026-06-21 10:23:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:23:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:23:41 [info     ] database.initialized
+2026-06-21 10:23:41 [debug    ] monitor.no_positions
+2026-06-21 10:23:41 [info     ] database.disposed
+2026-06-21 10:24:11 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:24:11 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:24:12 [info     ] database.initialized
+2026-06-21 10:24:12 [debug    ] monitor.no_positions
+2026-06-21 10:24:12 [info     ] database.disposed
+2026-06-21 10:24:42 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:24:42 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:24:42 [info     ] database.initialized
+2026-06-21 10:24:42 [debug    ] monitor.no_positions
+2026-06-21 10:24:42 [info     ] database.disposed
+2026-06-21 10:25:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:25:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:25:13 [info     ] database.initialized
+2026-06-21 10:25:13 [debug    ] monitor.no_positions
+2026-06-21 10:25:13 [info     ] database.disposed
+2026-06-21 10:25:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:25:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:25:43 [info     ] database.initialized
+2026-06-21 10:25:43 [debug    ] monitor.no_positions
+2026-06-21 10:25:43 [info     ] database.disposed
+2026-06-21 10:26:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:26:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:26:13 [info     ] database.initialized
+2026-06-21 10:26:13 [debug    ] monitor.no_positions
+2026-06-21 10:26:13 [info     ] database.disposed
+2026-06-21 10:26:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:26:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:26:44 [info     ] database.initialized
+2026-06-21 10:26:44 [debug    ] monitor.no_positions
+2026-06-21 10:26:44 [info     ] database.disposed
+2026-06-21 10:27:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:27:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:27:14 [info     ] database.initialized
+2026-06-21 10:27:14 [debug    ] monitor.no_positions
+2026-06-21 10:27:14 [info     ] database.disposed
+2026-06-21 10:27:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:27:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:27:44 [info     ] database.initialized
+2026-06-21 10:27:44 [debug    ] monitor.no_positions
+2026-06-21 10:27:44 [info     ] database.disposed
+2026-06-21 10:28:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:28:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:28:16 [info     ] database.initialized
+2026-06-21 10:28:16 [debug    ] monitor.no_positions
+2026-06-21 10:28:16 [info     ] database.disposed
+2026-06-21 10:28:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:28:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:28:45 [info     ] database.initialized
+2026-06-21 10:28:45 [debug    ] monitor.no_positions
+2026-06-21 10:28:45 [info     ] database.disposed
+2026-06-21 10:29:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:29:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:29:16 [info     ] database.initialized
+2026-06-21 10:29:16 [debug    ] monitor.no_positions
+2026-06-21 10:29:16 [info     ] database.disposed
+2026-06-21 10:29:46 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:29:46 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:29:46 [info     ] database.initialized
+2026-06-21 10:29:46 [debug    ] monitor.no_positions
+2026-06-21 10:29:46 [info     ] database.disposed
+2026-06-21 10:30:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:30:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:30:16 [info     ] database.initialized
+2026-06-21 10:30:16 [debug    ] monitor.no_positions
+2026-06-21 10:30:16 [info     ] database.disposed
+2026-06-21 10:30:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:30:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:30:47 [info     ] database.initialized
+2026-06-21 10:30:47 [debug    ] monitor.no_positions
+2026-06-21 10:30:47 [info     ] database.disposed
+2026-06-21 10:31:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:31:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:31:17 [info     ] database.initialized
+2026-06-21 10:31:17 [debug    ] monitor.no_positions
+2026-06-21 10:31:17 [info     ] database.disposed
+2026-06-21 10:31:48 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:31:48 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:31:48 [info     ] database.initialized
+2026-06-21 10:31:48 [debug    ] monitor.no_positions
+2026-06-21 10:31:48 [info     ] database.disposed
+2026-06-21 10:32:18 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:32:18 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:32:18 [info     ] database.initialized
+2026-06-21 10:32:18 [debug    ] monitor.no_positions
+2026-06-21 10:32:18 [info     ] database.disposed
+2026-06-21 10:32:48 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:32:48 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:32:48 [info     ] database.initialized
+2026-06-21 10:32:48 [debug    ] monitor.no_positions
+2026-06-21 10:32:48 [info     ] database.disposed
+2026-06-21 10:33:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:33:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:33:19 [info     ] database.initialized
+2026-06-21 10:33:19 [debug    ] monitor.no_positions
+2026-06-21 10:33:19 [info     ] database.disposed
+2026-06-21 10:33:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:33:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:33:49 [info     ] database.initialized
+2026-06-21 10:33:49 [debug    ] monitor.no_positions
+2026-06-21 10:33:49 [info     ] database.disposed
+2026-06-21 10:34:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:34:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:34:19 [info     ] database.initialized
+2026-06-21 10:34:19 [debug    ] monitor.no_positions
+2026-06-21 10:34:19 [info     ] database.disposed
+2026-06-21 10:34:51 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:34:51 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:34:51 [info     ] database.initialized
+2026-06-21 10:34:51 [debug    ] monitor.no_positions
+2026-06-21 10:34:51 [info     ] database.disposed
+2026-06-21 10:35:20 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:35:20 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:35:20 [info     ] database.initialized
+2026-06-21 10:35:20 [debug    ] monitor.no_positions
+2026-06-21 10:35:20 [info     ] database.disposed
+2026-06-21 10:35:51 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:35:51 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:35:51 [info     ] database.initialized
+2026-06-21 10:35:51 [debug    ] monitor.no_positions
+2026-06-21 10:35:51 [info     ] database.disposed
+2026-06-21 10:36:21 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:36:21 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:36:21 [info     ] database.initialized
+2026-06-21 10:36:21 [debug    ] monitor.no_positions
+2026-06-21 10:36:21 [info     ] database.disposed
+2026-06-21 10:36:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:36:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:36:52 [info     ] database.initialized
+2026-06-21 10:36:52 [debug    ] monitor.no_positions
+2026-06-21 10:36:52 [info     ] database.disposed
+2026-06-21 10:37:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:37:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:37:22 [info     ] database.initialized
+2026-06-21 10:37:22 [debug    ] monitor.no_positions
+2026-06-21 10:37:22 [info     ] database.disposed
+2026-06-21 10:37:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:37:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:37:52 [info     ] database.initialized
+2026-06-21 10:37:52 [debug    ] monitor.no_positions
+2026-06-21 10:37:52 [info     ] database.disposed
+2026-06-21 10:38:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:38:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:38:22 [info     ] database.initialized
+2026-06-21 10:38:22 [debug    ] monitor.no_positions
+2026-06-21 10:38:22 [info     ] database.disposed
+2026-06-21 10:38:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:38:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:38:52 [info     ] database.initialized
+2026-06-21 10:38:52 [debug    ] monitor.no_positions
+2026-06-21 10:38:52 [info     ] database.disposed
+2026-06-21 10:39:23 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:39:23 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:39:23 [info     ] database.initialized
+2026-06-21 10:39:23 [debug    ] monitor.no_positions
+2026-06-21 10:39:23 [info     ] database.disposed
+2026-06-21 10:39:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:39:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:39:53 [info     ] database.initialized
+2026-06-21 10:39:53 [debug    ] monitor.no_positions
+2026-06-21 10:39:53 [info     ] database.disposed
+2026-06-21 10:40:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:40:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:40:24 [info     ] database.initialized
+2026-06-21 10:40:24 [debug    ] monitor.no_positions
+2026-06-21 10:40:24 [info     ] database.disposed
+2026-06-21 10:40:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:40:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:40:54 [info     ] database.initialized
+2026-06-21 10:40:54 [debug    ] monitor.no_positions
+2026-06-21 10:40:54 [info     ] database.disposed
+2026-06-21 10:41:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:41:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:41:24 [info     ] database.initialized
+2026-06-21 10:41:24 [debug    ] monitor.no_positions
+2026-06-21 10:41:24 [info     ] database.disposed
+2026-06-21 10:41:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:41:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:41:54 [info     ] database.initialized
+2026-06-21 10:41:54 [debug    ] monitor.no_positions
+2026-06-21 10:41:54 [info     ] database.disposed
+2026-06-21 10:42:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:42:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:42:24 [info     ] database.initialized
+2026-06-21 10:42:24 [debug    ] monitor.no_positions
+2026-06-21 10:42:24 [info     ] database.disposed
+2026-06-21 10:42:55 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:42:55 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:42:55 [info     ] database.initialized
+2026-06-21 10:42:55 [debug    ] monitor.no_positions
+2026-06-21 10:42:55 [info     ] database.disposed
+2026-06-21 10:43:25 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:43:25 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:43:25 [info     ] database.initialized
+2026-06-21 10:43:25 [debug    ] monitor.no_positions
+2026-06-21 10:43:25 [info     ] database.disposed
+2026-06-21 10:43:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:43:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:43:56 [info     ] database.initialized
+2026-06-21 10:43:56 [debug    ] monitor.no_positions
+2026-06-21 10:43:56 [info     ] database.disposed
+2026-06-21 10:44:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:44:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:44:26 [info     ] database.initialized
+2026-06-21 10:44:26 [debug    ] monitor.no_positions
+2026-06-21 10:44:26 [info     ] database.disposed
+2026-06-21 10:44:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:44:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:44:56 [info     ] database.initialized
+2026-06-21 10:44:56 [debug    ] monitor.no_positions
+2026-06-21 10:44:56 [info     ] database.disposed
+2026-06-21 10:45:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:45:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:45:28 [info     ] database.initialized
+2026-06-21 10:45:28 [debug    ] monitor.no_positions
+2026-06-21 10:45:28 [info     ] database.disposed
+2026-06-21 10:45:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:45:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:45:57 [info     ] database.initialized
+2026-06-21 10:45:57 [debug    ] monitor.no_positions
+2026-06-21 10:45:57 [info     ] database.disposed
+2026-06-21 10:46:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:46:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:46:27 [info     ] database.initialized
+2026-06-21 10:46:27 [debug    ] monitor.no_positions
+2026-06-21 10:46:27 [info     ] database.disposed
+2026-06-21 10:46:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:46:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:46:57 [info     ] database.initialized
+2026-06-21 10:46:57 [debug    ] monitor.no_positions
+2026-06-21 10:46:57 [info     ] database.disposed
+2026-06-21 10:47:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:47:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:47:28 [info     ] database.initialized
+2026-06-21 10:47:28 [debug    ] monitor.no_positions
+2026-06-21 10:47:28 [info     ] database.disposed
+2026-06-21 10:47:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:47:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:47:58 [info     ] database.initialized
+2026-06-21 10:47:58 [debug    ] monitor.no_positions
+2026-06-21 10:47:58 [info     ] database.disposed
+2026-06-21 10:48:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:48:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:48:28 [info     ] database.initialized
+2026-06-21 10:48:28 [debug    ] monitor.no_positions
+2026-06-21 10:48:28 [info     ] database.disposed
+2026-06-21 10:48:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:48:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:48:59 [info     ] database.initialized
+2026-06-21 10:48:59 [debug    ] monitor.no_positions
+2026-06-21 10:48:59 [info     ] database.disposed
+2026-06-21 10:49:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:49:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:49:29 [info     ] database.initialized
+2026-06-21 10:49:29 [debug    ] monitor.no_positions
+2026-06-21 10:49:29 [info     ] database.disposed
+2026-06-21 10:49:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:49:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:49:59 [info     ] database.initialized
+2026-06-21 10:49:59 [debug    ] monitor.no_positions
+2026-06-21 10:49:59 [info     ] database.disposed
+2026-06-21 10:50:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:50:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:50:30 [info     ] database.initialized
+2026-06-21 10:50:30 [debug    ] monitor.no_positions
+2026-06-21 10:50:30 [info     ] database.disposed
+2026-06-21 10:51:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:51:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:51:00 [info     ] database.initialized
+2026-06-21 10:51:00 [debug    ] monitor.no_positions
+2026-06-21 10:51:00 [info     ] database.disposed
+2026-06-21 10:51:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:51:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:51:30 [info     ] database.initialized
+2026-06-21 10:51:30 [debug    ] monitor.no_positions
+2026-06-21 10:51:30 [info     ] database.disposed
+2026-06-21 10:52:01 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:52:01 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:52:01 [info     ] database.initialized
+2026-06-21 10:52:01 [debug    ] monitor.no_positions
+2026-06-21 10:52:01 [info     ] database.disposed
+2026-06-21 10:52:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:52:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:52:31 [info     ] database.initialized
+2026-06-21 10:52:31 [debug    ] monitor.no_positions
+2026-06-21 10:52:31 [info     ] database.disposed
+2026-06-21 10:53:02 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:53:02 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:53:02 [info     ] database.initialized
+2026-06-21 10:53:02 [debug    ] monitor.no_positions
+2026-06-21 10:53:02 [info     ] database.disposed
+2026-06-21 10:53:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:53:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:53:32 [info     ] database.initialized
+2026-06-21 10:53:32 [debug    ] monitor.no_positions
+2026-06-21 10:53:32 [info     ] database.disposed
+2026-06-21 10:54:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:54:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:54:04 [info     ] database.initialized
+2026-06-21 10:54:04 [debug    ] monitor.no_positions
+2026-06-21 10:54:04 [info     ] database.disposed
+2026-06-21 10:54:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:54:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:54:32 [info     ] database.initialized
+2026-06-21 10:54:32 [debug    ] monitor.no_positions
+2026-06-21 10:54:32 [info     ] database.disposed
+2026-06-21 10:55:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:55:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:55:04 [info     ] database.initialized
+2026-06-21 10:55:04 [debug    ] monitor.no_positions
+2026-06-21 10:55:04 [info     ] database.disposed
+2026-06-21 10:55:33 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:55:33 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:55:33 [info     ] database.initialized
+2026-06-21 10:55:33 [debug    ] monitor.no_positions
+2026-06-21 10:55:33 [info     ] database.disposed
+2026-06-21 10:56:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:56:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:56:04 [info     ] database.initialized
+2026-06-21 10:56:04 [debug    ] monitor.no_positions
+2026-06-21 10:56:04 [info     ] database.disposed
+2026-06-21 10:56:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:56:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:56:34 [info     ] database.initialized
+2026-06-21 10:56:34 [debug    ] monitor.no_positions
+2026-06-21 10:56:34 [info     ] database.disposed
+2026-06-21 10:57:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:57:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:57:05 [info     ] database.initialized
+2026-06-21 10:57:05 [debug    ] monitor.no_positions
+2026-06-21 10:57:05 [info     ] database.disposed
+2026-06-21 10:57:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:57:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:57:34 [info     ] database.initialized
+2026-06-21 10:57:34 [debug    ] monitor.no_positions
+2026-06-21 10:57:34 [info     ] database.disposed
+2026-06-21 10:58:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:58:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:58:05 [info     ] database.initialized
+2026-06-21 10:58:05 [debug    ] monitor.no_positions
+2026-06-21 10:58:05 [info     ] database.disposed
+2026-06-21 10:58:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:58:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:58:35 [info     ] database.initialized
+2026-06-21 10:58:35 [debug    ] monitor.no_positions
+2026-06-21 10:58:35 [info     ] database.disposed
+2026-06-21 10:59:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:59:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:59:05 [info     ] database.initialized
+2026-06-21 10:59:05 [debug    ] monitor.no_positions
+2026-06-21 10:59:05 [info     ] database.disposed
+2026-06-21 10:59:36 [info     ] monitor.start                  mode=LIVE
+2026-06-21 10:59:36 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 10:59:36 [info     ] database.initialized
+2026-06-21 10:59:36 [debug    ] monitor.no_positions
+2026-06-21 10:59:36 [info     ] database.disposed
+2026-06-21 11:00:06 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:00:06 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:00:06 [info     ] database.initialized
+2026-06-21 11:00:06 [debug    ] monitor.no_positions
+2026-06-21 11:00:06 [info     ] database.disposed
+2026-06-21 11:00:36 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:00:36 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:00:36 [info     ] database.initialized
+2026-06-21 11:00:36 [debug    ] monitor.no_positions
+2026-06-21 11:00:36 [info     ] database.disposed
+2026-06-21 11:01:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:01:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:01:07 [info     ] database.initialized
+2026-06-21 11:01:07 [debug    ] monitor.no_positions
+2026-06-21 11:01:07 [info     ] database.disposed
+2026-06-21 11:01:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:01:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:01:37 [info     ] database.initialized
+2026-06-21 11:01:37 [debug    ] monitor.no_positions
+2026-06-21 11:01:37 [info     ] database.disposed
+2026-06-21 11:02:08 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:02:08 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:02:09 [info     ] database.initialized
+2026-06-21 11:02:09 [debug    ] monitor.no_positions
+2026-06-21 11:02:09 [info     ] database.disposed
+2026-06-21 11:02:38 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:02:38 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:02:38 [info     ] database.initialized
+2026-06-21 11:02:38 [debug    ] monitor.no_positions
+2026-06-21 11:02:38 [info     ] database.disposed
+2026-06-21 11:03:08 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:03:08 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:03:08 [info     ] database.initialized
+2026-06-21 11:03:08 [debug    ] monitor.no_positions
+2026-06-21 11:03:08 [info     ] database.disposed
+2026-06-21 11:03:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:03:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:03:39 [info     ] database.initialized
+2026-06-21 11:03:39 [debug    ] monitor.no_positions
+2026-06-21 11:03:39 [info     ] database.disposed
+2026-06-21 11:04:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:04:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:04:09 [info     ] database.initialized
+2026-06-21 11:04:09 [debug    ] monitor.no_positions
+2026-06-21 11:04:09 [info     ] database.disposed
+2026-06-21 11:04:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:04:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:04:39 [info     ] database.initialized
+2026-06-21 11:04:39 [debug    ] monitor.no_positions
+2026-06-21 11:04:39 [info     ] database.disposed
+2026-06-21 11:05:10 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:05:10 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:05:10 [info     ] database.initialized
+2026-06-21 11:05:10 [debug    ] monitor.no_positions
+2026-06-21 11:05:10 [info     ] database.disposed
+2026-06-21 11:05:40 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:05:40 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:05:40 [info     ] database.initialized
+2026-06-21 11:05:41 [debug    ] monitor.no_positions
+2026-06-21 11:05:41 [info     ] database.disposed
+2026-06-21 11:06:10 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:06:10 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:06:10 [info     ] database.initialized
+2026-06-21 11:06:10 [debug    ] monitor.no_positions
+2026-06-21 11:06:10 [info     ] database.disposed
+2026-06-21 11:06:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:06:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:06:41 [info     ] database.initialized
+2026-06-21 11:06:42 [debug    ] monitor.no_positions
+2026-06-21 11:06:42 [info     ] database.disposed
+2026-06-21 11:07:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:07:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:07:12 [info     ] database.initialized
+2026-06-21 11:07:12 [debug    ] monitor.no_positions
+2026-06-21 11:07:12 [info     ] database.disposed
+2026-06-21 11:07:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:07:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:07:44 [info     ] database.initialized
+2026-06-21 11:07:44 [debug    ] monitor.no_positions
+2026-06-21 11:07:44 [info     ] database.disposed
+2026-06-21 11:08:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:08:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:08:12 [info     ] database.initialized
+2026-06-21 11:08:12 [debug    ] monitor.no_positions
+2026-06-21 11:08:12 [info     ] database.disposed
+2026-06-21 11:08:42 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:08:42 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:08:42 [info     ] database.initialized
+2026-06-21 11:08:42 [debug    ] monitor.no_positions
+2026-06-21 11:08:42 [info     ] database.disposed
+2026-06-21 11:09:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:09:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:09:12 [info     ] database.initialized
+2026-06-21 11:09:12 [debug    ] monitor.no_positions
+2026-06-21 11:09:12 [info     ] database.disposed
+2026-06-21 11:09:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:09:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:09:43 [info     ] database.initialized
+2026-06-21 11:09:43 [debug    ] monitor.no_positions
+2026-06-21 11:09:43 [info     ] database.disposed
+2026-06-21 11:10:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:10:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:10:12 [info     ] database.initialized
+2026-06-21 11:10:13 [debug    ] monitor.no_positions
+2026-06-21 11:10:13 [info     ] database.disposed
+2026-06-21 11:10:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:10:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:10:43 [info     ] database.initialized
+2026-06-21 11:10:43 [debug    ] monitor.no_positions
+2026-06-21 11:10:43 [info     ] database.disposed
+2026-06-21 11:11:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:11:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:11:14 [info     ] database.initialized
+2026-06-21 11:11:14 [debug    ] monitor.no_positions
+2026-06-21 11:11:14 [info     ] database.disposed
+2026-06-21 11:11:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:11:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:11:45 [info     ] database.initialized
+2026-06-21 11:11:45 [debug    ] monitor.no_positions
+2026-06-21 11:11:45 [info     ] database.disposed
+2026-06-21 11:12:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:12:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:12:14 [info     ] database.initialized
+2026-06-21 11:12:14 [debug    ] monitor.no_positions
+2026-06-21 11:12:14 [info     ] database.disposed
+2026-06-21 11:12:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:12:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:12:44 [info     ] database.initialized
+2026-06-21 11:12:44 [debug    ] monitor.no_positions
+2026-06-21 11:12:44 [info     ] database.disposed
+2026-06-21 11:13:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:13:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:13:14 [info     ] database.initialized
+2026-06-21 11:13:14 [debug    ] monitor.no_positions
+2026-06-21 11:13:14 [info     ] database.disposed
+2026-06-21 11:13:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:13:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:13:45 [info     ] database.initialized
+2026-06-21 11:13:45 [debug    ] monitor.no_positions
+2026-06-21 11:13:45 [info     ] database.disposed
+2026-06-21 11:14:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:14:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:14:15 [info     ] database.initialized
+2026-06-21 11:14:15 [debug    ] monitor.no_positions
+2026-06-21 11:14:15 [info     ] database.disposed
+2026-06-21 11:14:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:14:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:14:45 [info     ] database.initialized
+2026-06-21 11:14:45 [debug    ] monitor.no_positions
+2026-06-21 11:14:45 [info     ] database.disposed
+2026-06-21 11:15:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:15:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:15:16 [info     ] database.initialized
+2026-06-21 11:15:16 [debug    ] monitor.no_positions
+2026-06-21 11:15:16 [info     ] database.disposed
+2026-06-21 11:15:46 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:15:46 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:15:46 [info     ] database.initialized
+2026-06-21 11:15:46 [debug    ] monitor.no_positions
+2026-06-21 11:15:46 [info     ] database.disposed
+2026-06-21 11:16:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:16:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:16:17 [info     ] database.initialized
+2026-06-21 11:16:17 [debug    ] monitor.no_positions
+2026-06-21 11:16:17 [info     ] database.disposed
+2026-06-21 11:16:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:16:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:16:47 [info     ] database.initialized
+2026-06-21 11:16:47 [debug    ] monitor.no_positions
+2026-06-21 11:16:47 [info     ] database.disposed
+2026-06-21 11:17:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:17:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:17:17 [info     ] database.initialized
+2026-06-21 11:17:17 [debug    ] monitor.no_positions
+2026-06-21 11:17:17 [info     ] database.disposed
+2026-06-21 11:17:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:17:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:17:47 [info     ] database.initialized
+2026-06-21 11:17:47 [debug    ] monitor.no_positions
+2026-06-21 11:17:47 [info     ] database.disposed
+2026-06-21 11:18:18 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:18:18 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:18:18 [info     ] database.initialized
+2026-06-21 11:18:18 [debug    ] monitor.no_positions
+2026-06-21 11:18:18 [info     ] database.disposed
+2026-06-21 11:18:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:18:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:18:48 [info     ] database.initialized
+2026-06-21 11:18:48 [debug    ] monitor.no_positions
+2026-06-21 11:18:48 [info     ] database.disposed
+2026-06-21 11:19:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:19:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:19:19 [info     ] database.initialized
+2026-06-21 11:19:19 [debug    ] monitor.no_positions
+2026-06-21 11:19:19 [info     ] database.disposed
+2026-06-21 11:19:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:19:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:19:49 [info     ] database.initialized
+2026-06-21 11:19:49 [debug    ] monitor.no_positions
+2026-06-21 11:19:49 [info     ] database.disposed
+2026-06-21 11:20:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:20:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:20:19 [info     ] database.initialized
+2026-06-21 11:20:19 [debug    ] monitor.no_positions
+2026-06-21 11:20:19 [info     ] database.disposed
+2026-06-21 11:20:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:20:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:20:49 [info     ] database.initialized
+2026-06-21 11:20:49 [debug    ] monitor.no_positions
+2026-06-21 11:20:49 [info     ] database.disposed
+2026-06-21 11:21:20 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:21:20 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:21:20 [info     ] database.initialized
+2026-06-21 11:21:20 [debug    ] monitor.no_positions
+2026-06-21 11:21:20 [info     ] database.disposed
+2026-06-21 11:21:50 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:21:50 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:21:50 [info     ] database.initialized
+2026-06-21 11:21:50 [debug    ] monitor.no_positions
+2026-06-21 11:21:50 [info     ] database.disposed
+2026-06-21 11:22:21 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:22:21 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:22:21 [info     ] database.initialized
+2026-06-21 11:22:21 [debug    ] monitor.no_positions
+2026-06-21 11:22:21 [info     ] database.disposed
+2026-06-21 11:22:51 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:22:51 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:22:51 [info     ] database.initialized
+2026-06-21 11:22:51 [debug    ] monitor.no_positions
+2026-06-21 11:22:51 [info     ] database.disposed
+2026-06-21 11:23:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:23:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:23:22 [info     ] database.initialized
+2026-06-21 11:23:22 [debug    ] monitor.no_positions
+2026-06-21 11:23:22 [info     ] database.disposed
+2026-06-21 11:23:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:23:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:23:52 [info     ] database.initialized
+2026-06-21 11:23:52 [debug    ] monitor.no_positions
+2026-06-21 11:23:52 [info     ] database.disposed
+2026-06-21 11:24:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:24:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:24:22 [info     ] database.initialized
+2026-06-21 11:24:22 [debug    ] monitor.no_positions
+2026-06-21 11:24:22 [info     ] database.disposed
+2026-06-21 11:24:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:24:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:24:53 [info     ] database.initialized
+2026-06-21 11:24:53 [debug    ] monitor.no_positions
+2026-06-21 11:24:53 [info     ] database.disposed
+2026-06-21 11:25:23 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:25:23 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:25:23 [info     ] database.initialized
+2026-06-21 11:25:23 [debug    ] monitor.no_positions
+2026-06-21 11:25:23 [info     ] database.disposed
+2026-06-21 11:25:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:25:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:25:53 [info     ] database.initialized
+2026-06-21 11:25:53 [debug    ] monitor.no_positions
+2026-06-21 11:25:53 [info     ] database.disposed
+2026-06-21 11:26:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:26:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:26:24 [info     ] database.initialized
+2026-06-21 11:26:24 [debug    ] monitor.no_positions
+2026-06-21 11:26:24 [info     ] database.disposed
+2026-06-21 11:26:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:26:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:26:54 [info     ] database.initialized
+2026-06-21 11:26:54 [debug    ] monitor.no_positions
+2026-06-21 11:26:54 [info     ] database.disposed
+2026-06-21 11:27:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:27:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:27:24 [info     ] database.initialized
+2026-06-21 11:27:24 [debug    ] monitor.no_positions
+2026-06-21 11:27:24 [info     ] database.disposed
+2026-06-21 11:27:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:27:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:27:55 [info     ] database.initialized
+2026-06-21 11:27:55 [debug    ] monitor.no_positions
+2026-06-21 11:27:55 [info     ] database.disposed
+2026-06-21 11:28:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:28:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:28:25 [info     ] database.initialized
+2026-06-21 11:28:25 [debug    ] monitor.no_positions
+2026-06-21 11:28:25 [info     ] database.disposed
+2026-06-21 11:28:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:28:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:28:56 [info     ] database.initialized
+2026-06-21 11:28:56 [debug    ] monitor.no_positions
+2026-06-21 11:28:56 [info     ] database.disposed
+2026-06-21 11:29:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:29:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:29:26 [info     ] database.initialized
+2026-06-21 11:29:26 [debug    ] monitor.no_positions
+2026-06-21 11:29:26 [info     ] database.disposed
+2026-06-21 11:29:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:29:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:29:57 [info     ] database.initialized
+2026-06-21 11:29:57 [debug    ] monitor.no_positions
+2026-06-21 11:29:57 [info     ] database.disposed
+2026-06-21 11:30:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:30:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:30:27 [info     ] database.initialized
+2026-06-21 11:30:27 [debug    ] monitor.no_positions
+2026-06-21 11:30:27 [info     ] database.disposed
+2026-06-21 11:30:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:30:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:30:57 [info     ] database.initialized
+2026-06-21 11:30:57 [debug    ] monitor.no_positions
+2026-06-21 11:30:57 [info     ] database.disposed
+2026-06-21 11:31:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:31:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:31:27 [info     ] database.initialized
+2026-06-21 11:31:27 [debug    ] monitor.no_positions
+2026-06-21 11:31:27 [info     ] database.disposed
+2026-06-21 11:31:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:31:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:31:58 [info     ] database.initialized
+2026-06-21 11:31:58 [debug    ] monitor.no_positions
+2026-06-21 11:31:58 [info     ] database.disposed
+2026-06-21 11:32:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:32:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:32:28 [info     ] database.initialized
+2026-06-21 11:32:28 [debug    ] monitor.no_positions
+2026-06-21 11:32:28 [info     ] database.disposed
+2026-06-21 11:32:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:32:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:32:59 [info     ] database.initialized
+2026-06-21 11:32:59 [debug    ] monitor.no_positions
+2026-06-21 11:32:59 [info     ] database.disposed
+2026-06-21 11:33:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:33:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:33:29 [info     ] database.initialized
+2026-06-21 11:33:29 [debug    ] monitor.no_positions
+2026-06-21 11:33:29 [info     ] database.disposed
+2026-06-21 11:34:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:34:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:34:00 [info     ] database.initialized
+2026-06-21 11:34:00 [debug    ] monitor.no_positions
+2026-06-21 11:34:00 [info     ] database.disposed
+2026-06-21 11:34:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:34:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:34:30 [info     ] database.initialized
+2026-06-21 11:34:30 [debug    ] monitor.no_positions
+2026-06-21 11:34:30 [info     ] database.disposed
+2026-06-21 11:35:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:35:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:35:00 [info     ] database.initialized
+2026-06-21 11:35:00 [debug    ] monitor.no_positions
+2026-06-21 11:35:00 [info     ] database.disposed
+2026-06-21 11:35:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:35:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:35:31 [info     ] database.initialized
+2026-06-21 11:35:31 [debug    ] monitor.no_positions
+2026-06-21 11:35:31 [info     ] database.disposed
+2026-06-21 11:36:01 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:36:01 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:36:01 [info     ] database.initialized
+2026-06-21 11:36:01 [debug    ] monitor.no_positions
+2026-06-21 11:36:01 [info     ] database.disposed
+2026-06-21 11:36:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:36:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:36:31 [info     ] database.initialized
+2026-06-21 11:36:31 [debug    ] monitor.no_positions
+2026-06-21 11:36:31 [info     ] database.disposed
+2026-06-21 11:37:02 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:37:02 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:37:02 [info     ] database.initialized
+2026-06-21 11:37:02 [debug    ] monitor.no_positions
+2026-06-21 11:37:02 [info     ] database.disposed
+2026-06-21 11:37:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:37:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:37:32 [info     ] database.initialized
+2026-06-21 11:37:32 [debug    ] monitor.no_positions
+2026-06-21 11:37:32 [info     ] database.disposed
+2026-06-21 11:38:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:38:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:38:03 [info     ] database.initialized
+2026-06-21 11:38:03 [debug    ] monitor.no_positions
+2026-06-21 11:38:03 [info     ] database.disposed
+2026-06-21 11:38:33 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:38:33 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:38:33 [info     ] database.initialized
+2026-06-21 11:38:33 [debug    ] monitor.no_positions
+2026-06-21 11:38:33 [info     ] database.disposed
+2026-06-21 11:39:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:39:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:39:04 [info     ] database.initialized
+2026-06-21 11:39:04 [debug    ] monitor.no_positions
+2026-06-21 11:39:04 [info     ] database.disposed
+2026-06-21 11:39:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:39:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:39:34 [info     ] database.initialized
+2026-06-21 11:39:34 [debug    ] monitor.no_positions
+2026-06-21 11:39:34 [info     ] database.disposed
+2026-06-21 11:40:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:40:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:40:05 [info     ] database.initialized
+2026-06-21 11:40:05 [debug    ] monitor.no_positions
+2026-06-21 11:40:05 [info     ] database.disposed
+2026-06-21 11:40:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:40:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:40:34 [info     ] database.initialized
+2026-06-21 11:40:34 [debug    ] monitor.no_positions
+2026-06-21 11:40:34 [info     ] database.disposed
+2026-06-21 11:41:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:41:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:41:05 [info     ] database.initialized
+2026-06-21 11:41:05 [debug    ] monitor.no_positions
+2026-06-21 11:41:05 [info     ] database.disposed
+2026-06-21 11:41:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:41:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:41:35 [info     ] database.initialized
+2026-06-21 11:41:35 [debug    ] monitor.no_positions
+2026-06-21 11:41:35 [info     ] database.disposed
+2026-06-21 11:42:06 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:42:06 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:42:06 [info     ] database.initialized
+2026-06-21 11:42:06 [debug    ] monitor.no_positions
+2026-06-21 11:42:06 [info     ] database.disposed
+2026-06-21 11:42:36 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:42:36 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:42:36 [info     ] database.initialized
+2026-06-21 11:42:36 [debug    ] monitor.no_positions
+2026-06-21 11:42:36 [info     ] database.disposed
+2026-06-21 11:43:06 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:43:06 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:43:06 [info     ] database.initialized
+2026-06-21 11:43:06 [debug    ] monitor.no_positions
+2026-06-21 11:43:06 [info     ] database.disposed
+2026-06-21 11:43:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:43:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:43:38 [info     ] database.initialized
+2026-06-21 11:43:38 [debug    ] monitor.no_positions
+2026-06-21 11:43:38 [info     ] database.disposed
+2026-06-21 11:44:08 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:44:08 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:44:08 [info     ] database.initialized
+2026-06-21 11:44:08 [debug    ] monitor.no_positions
+2026-06-21 11:44:08 [info     ] database.disposed
+2026-06-21 11:44:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:44:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:44:37 [info     ] database.initialized
+2026-06-21 11:44:37 [debug    ] monitor.no_positions
+2026-06-21 11:44:37 [info     ] database.disposed
+2026-06-21 11:45:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:45:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:45:07 [info     ] database.initialized
+2026-06-21 11:45:07 [debug    ] monitor.no_positions
+2026-06-21 11:45:07 [info     ] database.disposed
+2026-06-21 11:45:38 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:45:38 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:45:38 [info     ] database.initialized
+2026-06-21 11:45:38 [debug    ] monitor.no_positions
+2026-06-21 11:45:38 [info     ] database.disposed
+2026-06-21 11:46:08 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:46:08 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:46:08 [info     ] database.initialized
+2026-06-21 11:46:09 [debug    ] monitor.no_positions
+2026-06-21 11:46:09 [info     ] database.disposed
+2026-06-21 11:46:38 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:46:38 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:46:38 [info     ] database.initialized
+2026-06-21 11:46:38 [debug    ] monitor.no_positions
+2026-06-21 11:46:38 [info     ] database.disposed
+2026-06-21 11:47:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:47:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:47:09 [info     ] database.initialized
+2026-06-21 11:47:09 [debug    ] monitor.no_positions
+2026-06-21 11:47:09 [info     ] database.disposed
+2026-06-21 11:47:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:47:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:47:39 [info     ] database.initialized
+2026-06-21 11:47:39 [debug    ] monitor.no_positions
+2026-06-21 11:47:39 [info     ] database.disposed
+2026-06-21 11:48:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:48:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:48:09 [info     ] database.initialized
+2026-06-21 11:48:09 [debug    ] monitor.no_positions
+2026-06-21 11:48:09 [info     ] database.disposed
+2026-06-21 11:48:40 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:48:40 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:48:40 [info     ] database.initialized
+2026-06-21 11:48:40 [debug    ] monitor.no_positions
+2026-06-21 11:48:40 [info     ] database.disposed
+2026-06-21 11:49:10 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:49:10 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:49:10 [info     ] database.initialized
+2026-06-21 11:49:10 [debug    ] monitor.no_positions
+2026-06-21 11:49:10 [info     ] database.disposed
+2026-06-21 11:49:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:49:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:49:41 [info     ] database.initialized
+2026-06-21 11:49:41 [debug    ] monitor.no_positions
+2026-06-21 11:49:41 [info     ] database.disposed
+2026-06-21 11:50:11 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:50:11 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:50:12 [info     ] database.initialized
+2026-06-21 11:50:12 [debug    ] monitor.no_positions
+2026-06-21 11:50:12 [info     ] database.disposed
+2026-06-21 11:50:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:50:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:50:42 [info     ] database.initialized
+2026-06-21 11:50:42 [debug    ] monitor.no_positions
+2026-06-21 11:50:42 [info     ] database.disposed
+2026-06-21 11:51:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:51:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:51:12 [info     ] database.initialized
+2026-06-21 11:51:12 [debug    ] monitor.no_positions
+2026-06-21 11:51:12 [info     ] database.disposed
+2026-06-21 11:51:42 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:51:42 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:51:42 [info     ] database.initialized
+2026-06-21 11:51:42 [debug    ] monitor.no_positions
+2026-06-21 11:51:42 [info     ] database.disposed
+2026-06-21 11:52:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:52:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:52:13 [info     ] database.initialized
+2026-06-21 11:52:14 [debug    ] monitor.no_positions
+2026-06-21 11:52:14 [info     ] database.disposed
+2026-06-21 11:52:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:52:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:52:43 [info     ] database.initialized
+2026-06-21 11:52:43 [debug    ] monitor.no_positions
+2026-06-21 11:52:43 [info     ] database.disposed
+2026-06-21 11:53:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:53:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:53:13 [info     ] database.initialized
+2026-06-21 11:53:13 [debug    ] monitor.no_positions
+2026-06-21 11:53:13 [info     ] database.disposed
+2026-06-21 11:53:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:53:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:53:44 [info     ] database.initialized
+2026-06-21 11:53:44 [debug    ] monitor.no_positions
+2026-06-21 11:53:44 [info     ] database.disposed
+2026-06-21 11:54:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:54:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:54:15 [info     ] database.initialized
+2026-06-21 11:54:15 [debug    ] monitor.no_positions
+2026-06-21 11:54:15 [info     ] database.disposed
+2026-06-21 11:54:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:54:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:54:44 [info     ] database.initialized
+2026-06-21 11:54:44 [debug    ] monitor.no_positions
+2026-06-21 11:54:44 [info     ] database.disposed
+2026-06-21 11:55:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:55:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:55:15 [info     ] database.initialized
+2026-06-21 11:55:15 [debug    ] monitor.no_positions
+2026-06-21 11:55:15 [info     ] database.disposed
+2026-06-21 11:55:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:55:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:55:45 [info     ] database.initialized
+2026-06-21 11:55:45 [debug    ] monitor.no_positions
+2026-06-21 11:55:45 [info     ] database.disposed
+2026-06-21 11:56:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:56:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:56:15 [info     ] database.initialized
+2026-06-21 11:56:15 [debug    ] monitor.no_positions
+2026-06-21 11:56:15 [info     ] database.disposed
+2026-06-21 11:56:46 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:56:46 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:56:46 [info     ] database.initialized
+2026-06-21 11:56:46 [debug    ] monitor.no_positions
+2026-06-21 11:56:46 [info     ] database.disposed
+2026-06-21 11:57:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:57:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:57:17 [info     ] database.initialized
+2026-06-21 11:57:17 [debug    ] monitor.no_positions
+2026-06-21 11:57:17 [info     ] database.disposed
+2026-06-21 11:57:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:57:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:57:47 [info     ] database.initialized
+2026-06-21 11:57:47 [debug    ] monitor.no_positions
+2026-06-21 11:57:47 [info     ] database.disposed
+2026-06-21 11:58:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:58:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:58:17 [info     ] database.initialized
+2026-06-21 11:58:17 [debug    ] monitor.no_positions
+2026-06-21 11:58:17 [info     ] database.disposed
+2026-06-21 11:58:48 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:58:48 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:58:48 [info     ] database.initialized
+2026-06-21 11:58:48 [debug    ] monitor.no_positions
+2026-06-21 11:58:48 [info     ] database.disposed
+2026-06-21 11:59:18 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:59:18 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:59:18 [info     ] database.initialized
+2026-06-21 11:59:18 [debug    ] monitor.no_positions
+2026-06-21 11:59:18 [info     ] database.disposed
+2026-06-21 11:59:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 11:59:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 11:59:49 [info     ] database.initialized
+2026-06-21 11:59:49 [debug    ] monitor.no_positions
+2026-06-21 11:59:49 [info     ] database.disposed
+2026-06-21 12:00:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:00:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:00:19 [info     ] database.initialized
+2026-06-21 12:00:19 [debug    ] monitor.no_positions
+2026-06-21 12:00:19 [info     ] database.disposed
+2026-06-21 12:00:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:00:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:00:49 [info     ] database.initialized
+2026-06-21 12:00:49 [debug    ] monitor.no_positions
+2026-06-21 12:00:49 [info     ] database.disposed
+2026-06-21 12:01:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:01:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:01:19 [info     ] database.initialized
+2026-06-21 12:01:19 [debug    ] monitor.no_positions
+2026-06-21 12:01:19 [info     ] database.disposed
+2026-06-21 12:01:50 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:01:50 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:01:50 [info     ] database.initialized
+2026-06-21 12:01:50 [debug    ] monitor.no_positions
+2026-06-21 12:01:50 [info     ] database.disposed
+2026-06-21 12:02:20 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:02:20 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:02:20 [info     ] database.initialized
+2026-06-21 12:02:20 [debug    ] monitor.no_positions
+2026-06-21 12:02:20 [info     ] database.disposed
+2026-06-21 12:02:50 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:02:50 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:02:50 [info     ] database.initialized
+2026-06-21 12:02:50 [debug    ] monitor.no_positions
+2026-06-21 12:02:50 [info     ] database.disposed
+2026-06-21 12:03:21 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:03:21 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:03:21 [info     ] database.initialized
+2026-06-21 12:03:21 [debug    ] monitor.no_positions
+2026-06-21 12:03:21 [info     ] database.disposed
+2026-06-21 12:03:51 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:03:51 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:03:51 [info     ] database.initialized
+2026-06-21 12:03:51 [debug    ] monitor.no_positions
+2026-06-21 12:03:51 [info     ] database.disposed
+2026-06-21 12:04:21 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:04:21 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:04:21 [info     ] database.initialized
+2026-06-21 12:04:21 [debug    ] monitor.no_positions
+2026-06-21 12:04:21 [info     ] database.disposed
+2026-06-21 12:04:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:04:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:04:52 [info     ] database.initialized
+2026-06-21 12:04:52 [debug    ] monitor.no_positions
+2026-06-21 12:04:52 [info     ] database.disposed
+2026-06-21 12:05:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:05:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:05:22 [info     ] database.initialized
+2026-06-21 12:05:22 [debug    ] monitor.no_positions
+2026-06-21 12:05:22 [info     ] database.disposed
+2026-06-21 12:05:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:05:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:05:53 [info     ] database.initialized
+2026-06-21 12:05:53 [debug    ] monitor.no_positions
+2026-06-21 12:05:53 [info     ] database.disposed
+2026-06-21 12:06:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:06:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:06:23 [info     ] database.initialized
+2026-06-21 12:06:23 [debug    ] monitor.no_positions
+2026-06-21 12:06:23 [info     ] database.disposed
+2026-06-21 12:06:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:06:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:06:53 [info     ] database.initialized
+2026-06-21 12:06:53 [debug    ] monitor.no_positions
+2026-06-21 12:06:53 [info     ] database.disposed
+2026-06-21 12:07:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:07:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:07:24 [info     ] database.initialized
+2026-06-21 12:07:24 [debug    ] monitor.no_positions
+2026-06-21 12:07:24 [info     ] database.disposed
+2026-06-21 12:07:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:07:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:07:54 [info     ] database.initialized
+2026-06-21 12:07:54 [debug    ] monitor.no_positions
+2026-06-21 12:07:54 [info     ] database.disposed
+2026-06-21 12:08:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:08:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:08:24 [info     ] database.initialized
+2026-06-21 12:08:24 [debug    ] monitor.no_positions
+2026-06-21 12:08:24 [info     ] database.disposed
+2026-06-21 12:08:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:08:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:08:55 [info     ] database.initialized
+2026-06-21 12:08:55 [debug    ] monitor.no_positions
+2026-06-21 12:08:55 [info     ] database.disposed
+2026-06-21 12:09:25 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:09:25 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:09:25 [info     ] database.initialized
+2026-06-21 12:09:25 [debug    ] monitor.no_positions
+2026-06-21 12:09:25 [info     ] database.disposed
+2026-06-21 12:09:55 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:09:55 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:09:55 [info     ] database.initialized
+2026-06-21 12:09:55 [debug    ] monitor.no_positions
+2026-06-21 12:09:55 [info     ] database.disposed
+2026-06-21 12:10:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:10:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:10:26 [info     ] database.initialized
+2026-06-21 12:10:26 [debug    ] monitor.no_positions
+2026-06-21 12:10:26 [info     ] database.disposed
+2026-06-21 12:10:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:10:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:10:56 [info     ] database.initialized
+2026-06-21 12:10:56 [debug    ] monitor.no_positions
+2026-06-21 12:10:56 [info     ] database.disposed
+2026-06-21 12:11:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:11:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:11:27 [info     ] database.initialized
+2026-06-21 12:11:27 [debug    ] monitor.no_positions
+2026-06-21 12:11:27 [info     ] database.disposed
+2026-06-21 12:11:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:11:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:11:57 [info     ] database.initialized
+2026-06-21 12:11:57 [debug    ] monitor.no_positions
+2026-06-21 12:11:57 [info     ] database.disposed
+2026-06-21 12:12:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:12:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:12:27 [info     ] database.initialized
+2026-06-21 12:12:27 [debug    ] monitor.no_positions
+2026-06-21 12:12:27 [info     ] database.disposed
+2026-06-21 12:12:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:12:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:12:58 [info     ] database.initialized
+2026-06-21 12:12:58 [debug    ] monitor.no_positions
+2026-06-21 12:12:58 [info     ] database.disposed
+2026-06-21 12:13:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:13:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:13:28 [info     ] database.initialized
+2026-06-21 12:13:28 [debug    ] monitor.no_positions
+2026-06-21 12:13:28 [info     ] database.disposed
+2026-06-21 12:13:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:13:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:13:59 [info     ] database.initialized
+2026-06-21 12:13:59 [debug    ] monitor.no_positions
+2026-06-21 12:13:59 [info     ] database.disposed
+2026-06-21 12:14:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:14:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:14:29 [info     ] database.initialized
+2026-06-21 12:14:29 [debug    ] monitor.no_positions
+2026-06-21 12:14:29 [info     ] database.disposed
+2026-06-21 12:14:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:14:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:15:00 [info     ] database.initialized
+2026-06-21 12:15:00 [debug    ] monitor.no_positions
+2026-06-21 12:15:00 [info     ] database.disposed
+2026-06-21 12:15:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:15:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:15:30 [info     ] database.initialized
+2026-06-21 12:15:30 [debug    ] monitor.no_positions
+2026-06-21 12:15:30 [info     ] database.disposed
+2026-06-21 12:16:01 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:16:01 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:16:01 [info     ] database.initialized
+2026-06-21 12:16:01 [debug    ] monitor.no_positions
+2026-06-21 12:16:01 [info     ] database.disposed
+2026-06-21 12:16:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:16:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:16:31 [info     ] database.initialized
+2026-06-21 12:16:31 [debug    ] monitor.no_positions
+2026-06-21 12:16:31 [info     ] database.disposed
+2026-06-21 12:17:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:17:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:17:03 [info     ] database.initialized
+2026-06-21 12:17:03 [debug    ] monitor.no_positions
+2026-06-21 12:17:03 [info     ] database.disposed
+2026-06-21 12:17:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:17:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:17:32 [info     ] database.initialized
+2026-06-21 12:17:32 [debug    ] monitor.no_positions
+2026-06-21 12:17:32 [info     ] database.disposed
+2026-06-21 12:18:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:18:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:18:04 [info     ] database.initialized
+2026-06-21 12:18:04 [debug    ] monitor.no_positions
+2026-06-21 12:18:04 [info     ] database.disposed
+2026-06-21 12:18:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:18:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:18:35 [info     ] database.initialized
+2026-06-21 12:18:35 [debug    ] monitor.no_positions
+2026-06-21 12:18:35 [info     ] database.disposed
+2026-06-21 12:19:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:19:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:19:05 [info     ] database.initialized
+2026-06-21 12:19:05 [debug    ] monitor.no_positions
+2026-06-21 12:19:05 [info     ] database.disposed
+2026-06-21 12:19:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:19:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:19:36 [info     ] database.initialized
+2026-06-21 12:19:36 [debug    ] monitor.no_positions
+2026-06-21 12:19:36 [info     ] database.disposed
+2026-06-21 12:20:06 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:20:06 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:20:07 [info     ] database.initialized
+2026-06-21 12:20:07 [debug    ] monitor.no_positions
+2026-06-21 12:20:07 [info     ] database.disposed
+2026-06-21 12:20:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:20:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:20:37 [info     ] database.initialized
+2026-06-21 12:20:37 [debug    ] monitor.no_positions
+2026-06-21 12:20:37 [info     ] database.disposed
+2026-06-21 12:21:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:21:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:21:08 [info     ] database.initialized
+2026-06-21 12:21:08 [debug    ] monitor.no_positions
+2026-06-21 12:21:08 [info     ] database.disposed
+2026-06-21 12:21:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:21:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:21:37 [info     ] database.initialized
+2026-06-21 12:21:37 [debug    ] monitor.no_positions
+2026-06-21 12:21:37 [info     ] database.disposed
+2026-06-21 12:22:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:22:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:22:09 [info     ] database.initialized
+2026-06-21 12:22:09 [debug    ] monitor.no_positions
+2026-06-21 12:22:09 [info     ] database.disposed
+2026-06-21 12:22:38 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:22:38 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:22:38 [info     ] database.initialized
+2026-06-21 12:22:38 [debug    ] monitor.no_positions
+2026-06-21 12:22:38 [info     ] database.disposed
+2026-06-21 12:23:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:23:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:23:09 [info     ] database.initialized
+2026-06-21 12:23:09 [debug    ] monitor.no_positions
+2026-06-21 12:23:09 [info     ] database.disposed
+2026-06-21 12:23:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:23:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:23:39 [info     ] database.initialized
+2026-06-21 12:23:39 [debug    ] monitor.no_positions
+2026-06-21 12:23:39 [info     ] database.disposed
+2026-06-21 12:24:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:24:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:24:09 [info     ] database.initialized
+2026-06-21 12:24:09 [debug    ] monitor.no_positions
+2026-06-21 12:24:09 [info     ] database.disposed
+2026-06-21 12:24:40 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:24:40 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:24:40 [info     ] database.initialized
+2026-06-21 12:24:40 [debug    ] monitor.no_positions
+2026-06-21 12:24:40 [info     ] database.disposed
+2026-06-21 12:25:10 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:25:10 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:25:10 [info     ] database.initialized
+2026-06-21 12:25:10 [debug    ] monitor.no_positions
+2026-06-21 12:25:10 [info     ] database.disposed
+2026-06-21 12:25:40 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:25:40 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:25:40 [info     ] database.initialized
+2026-06-21 12:25:40 [debug    ] monitor.no_positions
+2026-06-21 12:25:40 [info     ] database.disposed
+2026-06-21 12:26:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:26:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:26:12 [info     ] database.initialized
+2026-06-21 12:26:12 [debug    ] monitor.no_positions
+2026-06-21 12:26:12 [info     ] database.disposed
+2026-06-21 12:26:40 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:26:40 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:26:40 [info     ] database.initialized
+2026-06-21 12:26:40 [debug    ] monitor.no_positions
+2026-06-21 12:26:40 [info     ] database.disposed
+2026-06-21 12:27:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:27:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:27:12 [info     ] database.initialized
+2026-06-21 12:27:12 [debug    ] monitor.no_positions
+2026-06-21 12:27:12 [info     ] database.disposed
+2026-06-21 12:27:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:27:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:27:41 [info     ] database.initialized
+2026-06-21 12:27:41 [debug    ] monitor.no_positions
+2026-06-21 12:27:41 [info     ] database.disposed
+2026-06-21 12:28:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:28:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:28:13 [info     ] database.initialized
+2026-06-21 12:28:13 [debug    ] monitor.no_positions
+2026-06-21 12:28:13 [info     ] database.disposed
+2026-06-21 12:28:42 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:28:42 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:28:42 [info     ] database.initialized
+2026-06-21 12:28:42 [debug    ] monitor.no_positions
+2026-06-21 12:28:42 [info     ] database.disposed
+2026-06-21 12:29:11 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:29:11 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:29:11 [info     ] database.initialized
+2026-06-21 12:29:11 [debug    ] monitor.no_positions
+2026-06-21 12:29:11 [info     ] database.disposed
+2026-06-21 12:29:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:29:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:29:44 [info     ] database.initialized
+2026-06-21 12:29:44 [debug    ] monitor.no_positions
+2026-06-21 12:29:44 [info     ] database.disposed
+2026-06-21 12:30:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:30:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:30:13 [info     ] database.initialized
+2026-06-21 12:30:13 [debug    ] monitor.no_positions
+2026-06-21 12:30:13 [info     ] database.disposed
+2026-06-21 12:30:42 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:30:42 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:30:43 [info     ] database.initialized
+2026-06-21 12:30:43 [debug    ] monitor.no_positions
+2026-06-21 12:30:43 [info     ] database.disposed
+2026-06-21 12:31:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:31:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:31:13 [info     ] database.initialized
+2026-06-21 12:31:13 [debug    ] monitor.no_positions
+2026-06-21 12:31:13 [info     ] database.disposed
+2026-06-21 12:31:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:31:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:31:43 [info     ] database.initialized
+2026-06-21 12:31:43 [debug    ] monitor.no_positions
+2026-06-21 12:31:43 [info     ] database.disposed
+2026-06-21 12:32:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:32:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:32:13 [info     ] database.initialized
+2026-06-21 12:32:13 [debug    ] monitor.no_positions
+2026-06-21 12:32:13 [info     ] database.disposed
+2026-06-21 12:32:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:32:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:32:44 [info     ] database.initialized
+2026-06-21 12:32:45 [debug    ] monitor.no_positions
+2026-06-21 12:32:45 [info     ] database.disposed
+2026-06-21 12:33:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:33:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:33:13 [info     ] database.initialized
+2026-06-21 12:33:13 [debug    ] monitor.no_positions
+2026-06-21 12:33:13 [info     ] database.disposed
+2026-06-21 12:33:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:33:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:33:46 [info     ] database.initialized
+2026-06-21 12:33:46 [debug    ] monitor.no_positions
+2026-06-21 12:33:46 [info     ] database.disposed
+2026-06-21 12:34:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:34:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:34:13 [info     ] database.initialized
+2026-06-21 12:34:13 [debug    ] monitor.no_positions
+2026-06-21 12:34:13 [info     ] database.disposed
+2026-06-21 12:34:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:34:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:34:45 [info     ] database.initialized
+2026-06-21 12:34:45 [debug    ] monitor.no_positions
+2026-06-21 12:34:45 [info     ] database.disposed
+2026-06-21 12:35:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:35:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:35:14 [info     ] database.initialized
+2026-06-21 12:35:14 [debug    ] monitor.no_positions
+2026-06-21 12:35:14 [info     ] database.disposed
+2026-06-21 12:35:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:35:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:35:46 [info     ] database.initialized
+2026-06-21 12:35:46 [debug    ] monitor.no_positions
+2026-06-21 12:35:46 [info     ] database.disposed
+2026-06-21 12:36:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:36:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:36:15 [info     ] database.initialized
+2026-06-21 12:36:15 [debug    ] monitor.no_positions
+2026-06-21 12:36:15 [info     ] database.disposed
+2026-06-21 12:36:46 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:36:46 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:36:46 [info     ] database.initialized
+2026-06-21 12:36:46 [debug    ] monitor.no_positions
+2026-06-21 12:36:46 [info     ] database.disposed
+2026-06-21 12:37:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:37:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:37:16 [info     ] database.initialized
+2026-06-21 12:37:16 [debug    ] monitor.no_positions
+2026-06-21 12:37:16 [info     ] database.disposed
+2026-06-21 12:37:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:37:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:37:45 [info     ] database.initialized
+2026-06-21 12:37:45 [debug    ] monitor.no_positions
+2026-06-21 12:37:45 [info     ] database.disposed
+2026-06-21 12:38:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:38:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:38:15 [info     ] database.initialized
+2026-06-21 12:38:15 [debug    ] monitor.no_positions
+2026-06-21 12:38:15 [info     ] database.disposed
+2026-06-21 12:38:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:38:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:38:45 [info     ] database.initialized
+2026-06-21 12:38:45 [debug    ] monitor.no_positions
+2026-06-21 12:38:45 [info     ] database.disposed
+2026-06-21 12:39:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:39:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:39:15 [info     ] database.initialized
+2026-06-21 12:39:15 [debug    ] monitor.no_positions
+2026-06-21 12:39:15 [info     ] database.disposed
+2026-06-21 12:39:45 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:39:45 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:39:46 [info     ] database.initialized
+2026-06-21 12:39:46 [debug    ] monitor.no_positions
+2026-06-21 12:39:46 [info     ] database.disposed
+2026-06-21 12:40:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:40:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:40:16 [info     ] database.initialized
+2026-06-21 12:40:16 [debug    ] monitor.no_positions
+2026-06-21 12:40:16 [info     ] database.disposed
+2026-06-21 12:40:46 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:40:46 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:40:46 [info     ] database.initialized
+2026-06-21 12:40:46 [debug    ] monitor.no_positions
+2026-06-21 12:40:46 [info     ] database.disposed
+2026-06-21 12:41:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:41:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:41:17 [info     ] database.initialized
+2026-06-21 12:41:17 [debug    ] monitor.no_positions
+2026-06-21 12:41:17 [info     ] database.disposed
+2026-06-21 12:41:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:41:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:41:47 [info     ] database.initialized
+2026-06-21 12:41:47 [debug    ] monitor.no_positions
+2026-06-21 12:41:47 [info     ] database.disposed
+2026-06-21 12:42:18 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:42:18 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:42:18 [info     ] database.initialized
+2026-06-21 12:42:18 [debug    ] monitor.no_positions
+2026-06-21 12:42:18 [info     ] database.disposed
+2026-06-21 12:42:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:42:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:42:52 [info     ] database.initialized
+2026-06-21 12:42:52 [debug    ] monitor.no_positions
+2026-06-21 12:42:52 [info     ] database.disposed
+2026-06-21 12:43:23 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:43:23 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:43:23 [info     ] database.initialized
+2026-06-21 12:43:23 [debug    ] monitor.no_positions
+2026-06-21 12:43:23 [info     ] database.disposed
+2026-06-21 12:43:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:43:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:43:53 [info     ] database.initialized
+2026-06-21 12:43:53 [debug    ] monitor.no_positions
+2026-06-21 12:43:53 [info     ] database.disposed
+2026-06-21 12:44:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:44:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:44:24 [info     ] database.initialized
+2026-06-21 12:44:24 [debug    ] monitor.no_positions
+2026-06-21 12:44:24 [info     ] database.disposed
+2026-06-21 12:44:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:44:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:44:54 [info     ] database.initialized
+2026-06-21 12:44:54 [debug    ] monitor.no_positions
+2026-06-21 12:44:54 [info     ] database.disposed
+2026-06-21 12:45:25 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:45:25 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:45:25 [info     ] database.initialized
+2026-06-21 12:45:25 [debug    ] monitor.no_positions
+2026-06-21 12:45:25 [info     ] database.disposed
+2026-06-21 12:45:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:45:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:45:55 [info     ] database.initialized
+2026-06-21 12:45:55 [debug    ] monitor.no_positions
+2026-06-21 12:45:55 [info     ] database.disposed
+2026-06-21 12:46:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:46:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:46:25 [info     ] database.initialized
+2026-06-21 12:46:25 [debug    ] monitor.no_positions
+2026-06-21 12:46:25 [info     ] database.disposed
+2026-06-21 12:46:55 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:46:55 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:46:55 [info     ] database.initialized
+2026-06-21 12:46:55 [debug    ] monitor.no_positions
+2026-06-21 12:46:55 [info     ] database.disposed
+2026-06-21 12:47:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:47:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:47:26 [info     ] database.initialized
+2026-06-21 12:47:26 [debug    ] monitor.no_positions
+2026-06-21 12:47:26 [info     ] database.disposed
+2026-06-21 12:47:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:47:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:47:56 [info     ] database.initialized
+2026-06-21 12:47:56 [debug    ] monitor.no_positions
+2026-06-21 12:47:56 [info     ] database.disposed
+2026-06-21 12:48:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:48:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:48:26 [info     ] database.initialized
+2026-06-21 12:48:26 [debug    ] monitor.no_positions
+2026-06-21 12:48:26 [info     ] database.disposed
+2026-06-21 12:48:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:48:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:48:57 [info     ] database.initialized
+2026-06-21 12:48:57 [debug    ] monitor.no_positions
+2026-06-21 12:48:57 [info     ] database.disposed
+2026-06-21 12:49:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:49:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:49:27 [info     ] database.initialized
+2026-06-21 12:49:27 [debug    ] monitor.no_positions
+2026-06-21 12:49:27 [info     ] database.disposed
+2026-06-21 12:49:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:49:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:49:58 [info     ] database.initialized
+2026-06-21 12:49:58 [debug    ] monitor.no_positions
+2026-06-21 12:49:58 [info     ] database.disposed
+2026-06-21 12:50:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:50:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:50:28 [info     ] database.initialized
+2026-06-21 12:50:28 [debug    ] monitor.no_positions
+2026-06-21 12:50:28 [info     ] database.disposed
+2026-06-21 12:50:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:50:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:50:58 [info     ] database.initialized
+2026-06-21 12:50:58 [debug    ] monitor.no_positions
+2026-06-21 12:50:58 [info     ] database.disposed
+2026-06-21 12:51:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:51:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:51:29 [info     ] database.initialized
+2026-06-21 12:51:29 [debug    ] monitor.no_positions
+2026-06-21 12:51:29 [info     ] database.disposed
+2026-06-21 12:51:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:51:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:51:59 [info     ] database.initialized
+2026-06-21 12:51:59 [debug    ] monitor.no_positions
+2026-06-21 12:51:59 [info     ] database.disposed
+2026-06-21 12:52:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:52:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:52:29 [info     ] database.initialized
+2026-06-21 12:52:29 [debug    ] monitor.no_positions
+2026-06-21 12:52:29 [info     ] database.disposed
+2026-06-21 12:53:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:53:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:53:00 [info     ] database.initialized
+2026-06-21 12:53:00 [debug    ] monitor.no_positions
+2026-06-21 12:53:00 [info     ] database.disposed
+2026-06-21 12:53:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:53:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:53:30 [info     ] database.initialized
+2026-06-21 12:53:30 [debug    ] monitor.no_positions
+2026-06-21 12:53:30 [info     ] database.disposed
+2026-06-21 12:54:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:54:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:54:00 [info     ] database.initialized
+2026-06-21 12:54:00 [debug    ] monitor.no_positions
+2026-06-21 12:54:00 [info     ] database.disposed
+2026-06-21 12:54:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:54:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:54:30 [info     ] database.initialized
+2026-06-21 12:54:30 [debug    ] monitor.no_positions
+2026-06-21 12:54:30 [info     ] database.disposed
+2026-06-21 12:55:01 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:55:01 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:55:01 [info     ] database.initialized
+2026-06-21 12:55:01 [debug    ] monitor.no_positions
+2026-06-21 12:55:01 [info     ] database.disposed
+2026-06-21 12:55:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:55:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:55:31 [info     ] database.initialized
+2026-06-21 12:55:31 [debug    ] monitor.no_positions
+2026-06-21 12:55:31 [info     ] database.disposed
+2026-06-21 12:56:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:56:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:56:03 [info     ] database.initialized
+2026-06-21 12:56:03 [debug    ] monitor.no_positions
+2026-06-21 12:56:03 [info     ] database.disposed
+2026-06-21 12:56:32 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:56:32 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:56:32 [info     ] database.initialized
+2026-06-21 12:56:32 [debug    ] monitor.no_positions
+2026-06-21 12:56:32 [info     ] database.disposed
+2026-06-21 12:57:03 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:57:03 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:57:03 [info     ] database.initialized
+2026-06-21 12:57:03 [debug    ] monitor.no_positions
+2026-06-21 12:57:03 [info     ] database.disposed
+2026-06-21 12:57:33 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:57:33 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:57:33 [info     ] database.initialized
+2026-06-21 12:57:33 [debug    ] monitor.no_positions
+2026-06-21 12:57:33 [info     ] database.disposed
+2026-06-21 12:58:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:58:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:58:04 [info     ] database.initialized
+2026-06-21 12:58:04 [debug    ] monitor.no_positions
+2026-06-21 12:58:04 [info     ] database.disposed
+2026-06-21 12:58:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:58:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:58:34 [info     ] database.initialized
+2026-06-21 12:58:34 [debug    ] monitor.no_positions
+2026-06-21 12:58:34 [info     ] database.disposed
+2026-06-21 12:59:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:59:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:59:04 [info     ] database.initialized
+2026-06-21 12:59:04 [debug    ] monitor.no_positions
+2026-06-21 12:59:04 [info     ] database.disposed
+2026-06-21 12:59:34 [info     ] monitor.start                  mode=LIVE
+2026-06-21 12:59:34 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 12:59:35 [info     ] database.initialized
+2026-06-21 12:59:35 [debug    ] monitor.no_positions
+2026-06-21 12:59:35 [info     ] database.disposed
+2026-06-21 13:00:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:00:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:00:05 [info     ] database.initialized
+2026-06-21 13:00:05 [debug    ] monitor.no_positions
+2026-06-21 13:00:05 [info     ] database.disposed
+2026-06-21 13:00:35 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:00:35 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:00:35 [info     ] database.initialized
+2026-06-21 13:00:35 [debug    ] monitor.no_positions
+2026-06-21 13:00:35 [info     ] database.disposed
+2026-06-21 13:01:05 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:01:05 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:01:06 [info     ] database.initialized
+2026-06-21 13:01:06 [debug    ] monitor.no_positions
+2026-06-21 13:01:06 [info     ] database.disposed
+2026-06-21 13:01:36 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:01:36 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:01:37 [info     ] database.initialized
+2026-06-21 13:01:37 [debug    ] monitor.no_positions
+2026-06-21 13:01:37 [info     ] database.disposed
+2026-06-21 13:02:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:02:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:02:07 [info     ] database.initialized
+2026-06-21 13:02:07 [debug    ] monitor.no_positions
+2026-06-21 13:02:07 [info     ] database.disposed
+2026-06-21 13:02:37 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:02:37 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:02:37 [info     ] database.initialized
+2026-06-21 13:02:37 [debug    ] monitor.no_positions
+2026-06-21 13:02:37 [info     ] database.disposed
+2026-06-21 13:03:07 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:03:07 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:03:07 [info     ] database.initialized
+2026-06-21 13:03:07 [debug    ] monitor.no_positions
+2026-06-21 13:03:07 [info     ] database.disposed
+2026-06-21 13:03:38 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:03:38 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:03:38 [info     ] database.initialized
+2026-06-21 13:03:38 [debug    ] monitor.no_positions
+2026-06-21 13:03:38 [info     ] database.disposed
+2026-06-21 13:04:08 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:04:08 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:04:08 [info     ] database.initialized
+2026-06-21 13:04:08 [debug    ] monitor.no_positions
+2026-06-21 13:04:08 [info     ] database.disposed
+2026-06-21 13:04:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:04:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:04:39 [info     ] database.initialized
+2026-06-21 13:04:39 [debug    ] monitor.no_positions
+2026-06-21 13:04:39 [info     ] database.disposed
+2026-06-21 13:05:09 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:05:09 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:05:09 [info     ] database.initialized
+2026-06-21 13:05:09 [debug    ] monitor.no_positions
+2026-06-21 13:05:09 [info     ] database.disposed
+2026-06-21 13:05:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:05:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:05:39 [info     ] database.initialized
+2026-06-21 13:05:39 [debug    ] monitor.no_positions
+2026-06-21 13:05:39 [info     ] database.disposed
+2026-06-21 13:06:10 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:06:10 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:06:10 [info     ] database.initialized
+2026-06-21 13:06:10 [debug    ] monitor.no_positions
+2026-06-21 13:06:10 [info     ] database.disposed
+2026-06-21 13:06:39 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:06:39 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:06:40 [info     ] database.initialized
+2026-06-21 13:06:40 [debug    ] monitor.no_positions
+2026-06-21 13:06:40 [info     ] database.disposed
+2026-06-21 13:07:10 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:07:10 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:07:10 [info     ] database.initialized
+2026-06-21 13:07:10 [debug    ] monitor.no_positions
+2026-06-21 13:07:10 [info     ] database.disposed
+2026-06-21 13:07:41 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:07:41 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:07:41 [info     ] database.initialized
+2026-06-21 13:07:41 [debug    ] monitor.no_positions
+2026-06-21 13:07:41 [info     ] database.disposed
+2026-06-21 13:08:11 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:08:11 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:08:11 [info     ] database.initialized
+2026-06-21 13:08:11 [debug    ] monitor.no_positions
+2026-06-21 13:08:11 [info     ] database.disposed
+2026-06-21 13:08:42 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:08:42 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:08:42 [info     ] database.initialized
+2026-06-21 13:08:42 [debug    ] monitor.no_positions
+2026-06-21 13:08:42 [info     ] database.disposed
+2026-06-21 13:09:12 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:09:12 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:09:12 [info     ] database.initialized
+2026-06-21 13:09:12 [debug    ] monitor.no_positions
+2026-06-21 13:09:12 [info     ] database.disposed
+2026-06-21 13:09:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:09:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:09:43 [info     ] database.initialized
+2026-06-21 13:09:43 [debug    ] monitor.no_positions
+2026-06-21 13:09:43 [info     ] database.disposed
+2026-06-21 13:10:13 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:10:13 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:10:14 [info     ] database.initialized
+2026-06-21 13:10:14 [debug    ] monitor.no_positions
+2026-06-21 13:10:14 [info     ] database.disposed
+2026-06-21 13:10:43 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:10:43 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:10:43 [info     ] database.initialized
+2026-06-21 13:10:43 [debug    ] monitor.no_positions
+2026-06-21 13:10:43 [info     ] database.disposed
+2026-06-21 13:11:14 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:11:14 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:11:14 [info     ] database.initialized
+2026-06-21 13:11:14 [debug    ] monitor.no_positions
+2026-06-21 13:11:14 [info     ] database.disposed
+2026-06-21 13:11:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:11:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:11:44 [info     ] database.initialized
+2026-06-21 13:11:44 [debug    ] monitor.no_positions
+2026-06-21 13:11:44 [info     ] database.disposed
+2026-06-21 13:12:15 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:12:15 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:12:15 [info     ] database.initialized
+2026-06-21 13:12:15 [debug    ] monitor.no_positions
+2026-06-21 13:12:15 [info     ] database.disposed
+2026-06-21 13:12:44 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:12:44 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:12:45 [info     ] database.initialized
+2026-06-21 13:12:45 [debug    ] monitor.no_positions
+2026-06-21 13:12:45 [info     ] database.disposed
+2026-06-21 13:13:16 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:13:16 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:13:16 [info     ] database.initialized
+2026-06-21 13:13:16 [debug    ] monitor.no_positions
+2026-06-21 13:13:16 [info     ] database.disposed
+2026-06-21 13:13:46 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:13:46 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:13:46 [info     ] database.initialized
+2026-06-21 13:13:46 [debug    ] monitor.no_positions
+2026-06-21 13:13:46 [info     ] database.disposed
+2026-06-21 13:14:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:14:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:14:17 [info     ] database.initialized
+2026-06-21 13:14:17 [debug    ] monitor.no_positions
+2026-06-21 13:14:17 [info     ] database.disposed
+2026-06-21 13:14:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:14:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:14:47 [info     ] database.initialized
+2026-06-21 13:14:47 [debug    ] monitor.no_positions
+2026-06-21 13:14:47 [info     ] database.disposed
+2026-06-21 13:15:17 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:15:17 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:15:17 [info     ] database.initialized
+2026-06-21 13:15:17 [debug    ] monitor.no_positions
+2026-06-21 13:15:17 [info     ] database.disposed
+2026-06-21 13:15:47 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:15:47 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:15:47 [info     ] database.initialized
+2026-06-21 13:15:47 [debug    ] monitor.no_positions
+2026-06-21 13:15:47 [info     ] database.disposed
+2026-06-21 13:16:18 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:16:18 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:16:18 [info     ] database.initialized
+2026-06-21 13:16:18 [debug    ] monitor.no_positions
+2026-06-21 13:16:18 [info     ] database.disposed
+2026-06-21 13:16:48 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:16:48 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:16:48 [info     ] database.initialized
+2026-06-21 13:16:48 [debug    ] monitor.no_positions
+2026-06-21 13:16:48 [info     ] database.disposed
+2026-06-21 13:17:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:17:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:17:19 [info     ] database.initialized
+2026-06-21 13:17:19 [debug    ] monitor.no_positions
+2026-06-21 13:17:19 [info     ] database.disposed
+2026-06-21 13:17:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:17:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:17:49 [info     ] database.initialized
+2026-06-21 13:17:49 [debug    ] monitor.no_positions
+2026-06-21 13:17:49 [info     ] database.disposed
+2026-06-21 13:18:19 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:18:19 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:18:19 [info     ] database.initialized
+2026-06-21 13:18:19 [debug    ] monitor.no_positions
+2026-06-21 13:18:19 [info     ] database.disposed
+2026-06-21 13:18:49 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:18:49 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:18:49 [info     ] database.initialized
+2026-06-21 13:18:49 [debug    ] monitor.no_positions
+2026-06-21 13:18:49 [info     ] database.disposed
+2026-06-21 13:19:20 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:19:20 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:19:20 [info     ] database.initialized
+2026-06-21 13:19:20 [debug    ] monitor.no_positions
+2026-06-21 13:19:20 [info     ] database.disposed
+2026-06-21 13:19:50 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:19:50 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:19:50 [info     ] database.initialized
+2026-06-21 13:19:50 [debug    ] monitor.no_positions
+2026-06-21 13:19:50 [info     ] database.disposed
+2026-06-21 13:20:20 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:20:20 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:20:20 [info     ] database.initialized
+2026-06-21 13:20:20 [debug    ] monitor.no_positions
+2026-06-21 13:20:20 [info     ] database.disposed
+2026-06-21 13:20:51 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:20:51 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:20:51 [info     ] database.initialized
+2026-06-21 13:20:51 [debug    ] monitor.no_positions
+2026-06-21 13:20:51 [info     ] database.disposed
+2026-06-21 13:21:21 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:21:21 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:21:21 [info     ] database.initialized
+2026-06-21 13:21:21 [debug    ] monitor.no_positions
+2026-06-21 13:21:21 [info     ] database.disposed
+2026-06-21 13:21:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:21:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:21:52 [info     ] database.initialized
+2026-06-21 13:21:52 [debug    ] monitor.no_positions
+2026-06-21 13:21:52 [info     ] database.disposed
+2026-06-21 13:22:22 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:22:22 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:22:22 [info     ] database.initialized
+2026-06-21 13:22:22 [debug    ] monitor.no_positions
+2026-06-21 13:22:22 [info     ] database.disposed
+2026-06-21 13:22:52 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:22:52 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:22:52 [info     ] database.initialized
+2026-06-21 13:22:52 [debug    ] monitor.no_positions
+2026-06-21 13:22:52 [info     ] database.disposed
+2026-06-21 13:23:23 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:23:23 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:23:23 [info     ] database.initialized
+2026-06-21 13:23:23 [debug    ] monitor.no_positions
+2026-06-21 13:23:23 [info     ] database.disposed
+2026-06-21 13:23:53 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:23:53 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:23:53 [info     ] database.initialized
+2026-06-21 13:23:53 [debug    ] monitor.no_positions
+2026-06-21 13:23:53 [info     ] database.disposed
+2026-06-21 13:24:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:24:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:24:24 [info     ] database.initialized
+2026-06-21 13:24:24 [debug    ] monitor.no_positions
+2026-06-21 13:24:24 [info     ] database.disposed
+2026-06-21 13:24:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:24:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:24:54 [info     ] database.initialized
+2026-06-21 13:24:54 [debug    ] monitor.no_positions
+2026-06-21 13:24:54 [info     ] database.disposed
+2026-06-21 13:25:24 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:25:24 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:25:24 [info     ] database.initialized
+2026-06-21 13:25:24 [debug    ] monitor.no_positions
+2026-06-21 13:25:24 [info     ] database.disposed
+2026-06-21 13:25:54 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:25:54 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:25:55 [info     ] database.initialized
+2026-06-21 13:25:55 [debug    ] monitor.no_positions
+2026-06-21 13:25:55 [info     ] database.disposed
+2026-06-21 13:26:25 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:26:25 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:26:25 [info     ] database.initialized
+2026-06-21 13:26:25 [debug    ] monitor.no_positions
+2026-06-21 13:26:25 [info     ] database.disposed
+2026-06-21 13:26:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:26:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:26:56 [info     ] database.initialized
+2026-06-21 13:26:56 [debug    ] monitor.no_positions
+2026-06-21 13:26:56 [info     ] database.disposed
+2026-06-21 13:27:26 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:27:26 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:27:26 [info     ] database.initialized
+2026-06-21 13:27:26 [debug    ] monitor.no_positions
+2026-06-21 13:27:26 [info     ] database.disposed
+2026-06-21 13:27:56 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:27:56 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:27:56 [info     ] database.initialized
+2026-06-21 13:27:56 [debug    ] monitor.no_positions
+2026-06-21 13:27:56 [info     ] database.disposed
+2026-06-21 13:28:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:28:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:28:27 [info     ] database.initialized
+2026-06-21 13:28:27 [debug    ] monitor.no_positions
+2026-06-21 13:28:27 [info     ] database.disposed
+2026-06-21 13:28:57 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:28:57 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:28:57 [info     ] database.initialized
+2026-06-21 13:28:57 [debug    ] monitor.no_positions
+2026-06-21 13:28:57 [info     ] database.disposed
+2026-06-21 13:29:27 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:29:27 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:29:27 [info     ] database.initialized
+2026-06-21 13:29:27 [debug    ] monitor.no_positions
+2026-06-21 13:29:27 [info     ] database.disposed
+2026-06-21 13:29:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:29:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:29:58 [info     ] database.initialized
+2026-06-21 13:29:58 [debug    ] monitor.no_positions
+2026-06-21 13:29:58 [info     ] database.disposed
+2026-06-21 13:30:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:30:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:30:28 [info     ] database.initialized
+2026-06-21 13:30:28 [debug    ] monitor.no_positions
+2026-06-21 13:30:28 [info     ] database.disposed
+2026-06-21 13:30:58 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:30:58 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:30:58 [info     ] database.initialized
+2026-06-21 13:30:58 [debug    ] monitor.no_positions
+2026-06-21 13:30:58 [info     ] database.disposed
+2026-06-21 13:31:28 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:31:28 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:31:29 [info     ] database.initialized
+2026-06-21 13:31:29 [debug    ] monitor.no_positions
+2026-06-21 13:31:29 [info     ] database.disposed
+2026-06-21 13:31:59 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:31:59 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:31:59 [info     ] database.initialized
+2026-06-21 13:31:59 [debug    ] monitor.no_positions
+2026-06-21 13:31:59 [info     ] database.disposed
+2026-06-21 13:32:29 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:32:29 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:32:29 [info     ] database.initialized
+2026-06-21 13:32:30 [debug    ] monitor.no_positions
+2026-06-21 13:32:30 [info     ] database.disposed
+2026-06-21 13:33:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:33:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:33:00 [info     ] database.initialized
+2026-06-21 13:33:00 [debug    ] monitor.no_positions
+2026-06-21 13:33:00 [info     ] database.disposed
+2026-06-21 13:33:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:33:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:33:30 [info     ] database.initialized
+2026-06-21 13:33:30 [debug    ] monitor.no_positions
+2026-06-21 13:33:30 [info     ] database.disposed
+2026-06-21 13:34:00 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:34:00 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:34:00 [info     ] database.initialized
+2026-06-21 13:34:00 [debug    ] monitor.no_positions
+2026-06-21 13:34:00 [info     ] database.disposed
+2026-06-21 13:34:30 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:34:30 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:34:30 [info     ] database.initialized
+2026-06-21 13:34:30 [debug    ] monitor.no_positions
+2026-06-21 13:34:30 [info     ] database.disposed
+2026-06-21 13:35:01 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:35:01 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:35:01 [info     ] database.initialized
+2026-06-21 13:35:01 [debug    ] monitor.no_positions
+2026-06-21 13:35:01 [info     ] database.disposed
+2026-06-21 13:35:31 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:35:31 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:35:31 [info     ] database.initialized
+2026-06-21 13:35:31 [debug    ] monitor.no_positions
+2026-06-21 13:35:31 [info     ] database.disposed
+2026-06-21 13:36:04 [info     ] monitor.start                  mode=LIVE
+2026-06-21 13:36:04 [warning  ] monitor.live_mode              message='REAL MONEY TRADING ENABLED'
+2026-06-21 13:36:04 [info     ] database.initialized
+2026-06-21 13:36:04 [debug    ] monitor.no_positions
+2026-06-21 13:36:04 [info     ] database.disposed

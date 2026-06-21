@@ -15,11 +15,12 @@ class TestOrderRequest:
             quantity=5,
         )
         p = r.to_kalshi_payload()
-        assert p["action"] == "buy", f"Expected action=buy, got {p['action']}"
-        assert p["side"] == "yes", f"Expected side=yes, got {p['side']}"
+        assert p["side"] == "bid", f"Expected side=bid, got {p['side']}"
         assert p["ticker"] == "KXLOWTAUS-26JUN16-B70.5"
-        assert p["count"] == 5
-        assert p["yes_price"] == 85, f"Expected yes_price=85, got {p['yes_price']}"
+        assert p["count"] == "5.00"
+        assert p["price"] == "0.8500", f"Expected price=0.8500, got {p['price']}"
+        assert "time_in_force" in p
+        assert "self_trade_prevention_type" in p
 
     def test_sell_yes_payload(self):
         r = OrderRequest(
@@ -29,10 +30,10 @@ class TestOrderRequest:
             quantity=5,
         )
         p = r.to_kalshi_payload()
-        assert p["action"] == "sell", f"Expected action=sell, got {p['action']}"
-        assert p["side"] == "yes", f"Expected side=yes, got {p['side']}"
-        assert p["count"] == 5
-        assert p["yes_price"] == 35, f"Expected yes_price=35, got {p['yes_price']}"
+        assert p["side"] == "ask", f"Expected side=ask, got {p['side']}"
+        assert p["count"] == "5.00"
+        assert p["price"] == "0.3500", f"Expected price=0.3500, got {p['price']}"
+        assert "time_in_force" in p
 
     def test_sell_does_not_use_no_side(self):
         r = OrderRequest(
@@ -49,3 +50,4 @@ class TestOrderRequest:
         from core import types
         source = inspect.getsource(types.OrderRequest.to_kalshi_payload)
         assert "side_str" not in source, "side_str variable should not exist"
+
