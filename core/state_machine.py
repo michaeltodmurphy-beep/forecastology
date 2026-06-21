@@ -545,12 +545,32 @@ class TemperatureStrategy:
         for ticker, bracket in list(self.active_positions.items()):
             pos_data = api_positions.get(ticker)
             if not pos_data:
-                logger.warning("phase.c.position_not_in_api", ticker=ticker,
+                now_ts = asyncio.get_event_loop().time()
+                last_seen = getattr(bracket, '_last_seen_in_api', 0)
+                if last_seen == 0:
+                    # First check for this bracket; record time and skip removal
+                    bracket._last_seen_in_api = now_ts
+                    continue
+                grace = 30  # seconds grace period before considering the position gone
+                if now_ts - last_seen < grace:
+                    logger.debug("phase.c.position_missing_within_grace", ticker=ticker,
+                                 seconds_absent=int(now_ts - last_seen))
+                    continue
+                # Grace period expired – treat as settled
+                logger.warning("phase.c.position_not_in_api_after_grace", ticker=ticker,
                                qty=bracket.position_quantity, phase=bracket.phase.name)
                 bracket.phase = Phase.CLOSED
                 self.active_positions.pop(ticker, None)
                 self.brackets.pop(ticker, None)
+                async with await self.db.get_session() as session:
+                    await session.execute(
+                        delete(PositionModel).where(PositionModel.market_ticker == ticker)
+                    )
+                    await session.commit()
                 continue
+
+            # Mark that we have a live API reading for this position
+            bracket._last_seen_in_api = asyncio.get_event_loop().time()
 
             # Check if Kalshi has already settled this position (count = 0).
             # If Kalshi says we hold zero, the market has closed and the
@@ -762,7 +782,8 @@ class TemperatureStrategy:
                         hedge_ticker=next_bracket_ticker, hedge_qty=result.fill_quantity,
                         hedge_price=result.fill_price)
 
-            # Update positions table
+            # Update positions table (original position's hedge fields)
+            # Also persist the hedge position itself so it survives restarts.
             async with await self.db.get_session() as session:
                 result_db = await session.execute(
                     select(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
@@ -771,7 +792,29 @@ class TemperatureStrategy:
                 if pos:
                     pos.hedge_market_ticker = next_bracket_ticker
                     pos.hedge_quantity = result.fill_quantity
-                    await session.commit()
+
+                # Upsert hedge position row so it survives restarts
+                existing_hedge = await session.execute(
+                    select(PositionModel).where(PositionModel.market_ticker == next_bracket_ticker)
+                )
+                hedge_pos = existing_hedge.scalar_one_or_none()
+                if hedge_pos:
+                    hedge_pos.quantity = hedge_pos.quantity + result.fill_quantity
+                    hedge_pos.avg_entry_price = result.fill_price
+                    hedge_pos.last_price = result.fill_price
+                else:
+                    hedge_pos = PositionModel(
+                        market_ticker=next_bracket_ticker,
+                        event_ticker=bracket.event_ticker,
+                        series_ticker=bracket.series_ticker,
+                        side="yes",
+                        quantity=result.fill_quantity,
+                        avg_entry_price=result.fill_price,
+                        last_price=result.fill_price,
+                    )
+                    session.add(hedge_pos)
+
+                await session.commit()
         else:
             logger.warning("phase.c.hedge_failed", ticker=bracket.market_ticker,
                            notes=result.notes)
@@ -806,24 +849,27 @@ class TemperatureStrategy:
             session.add(et)
             await session.commit()
 
-            # Remove from positions table
-            await session.execute(
-                delete(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
-            )
-            await session.commit()
-
         if result.success:
+            # Remove from positions table
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    delete(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
+                )
+                await session.commit()
             bracket.phase = Phase.CLOSED
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         price=result.fill_price, proceeds=-result.total_cost_cents)
         else:
-            # Mark as CLOSED anyway so we stop spamming stop-loss attempts
-            bracket.phase = Phase.CLOSED
-            self.active_positions.pop(bracket.market_ticker, None)
-            self.brackets.pop(bracket.market_ticker, None)
-            logger.warning("phase.c.stop_loss_failed_closed", ticker=bracket.market_ticker,
+            # Keep the position tracked; retry with a 60-second cooldown.
+            now = asyncio.get_event_loop().time()
+            last_attempt = getattr(bracket, '_last_stop_loss_attempt', 0)
+            if now - last_attempt < 60:
+                return  # wait before retrying
+            bracket._last_stop_loss_attempt = now
+            # Remain in HOLDING phase so we can try again later.
+            logger.warning("phase.c.stop_loss_failed_retry", ticker=bracket.market_ticker,
                            notes=result.notes, last_price=bracket.last_price)
 
     async def _find_next_bracket(self, bracket: MarketBracket) -> Optional[str]:
