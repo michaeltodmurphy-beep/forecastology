@@ -123,6 +123,7 @@ class PaperTradeExecutor(BaseExecutor):
 
     async def get_active_markets(self, series_prefix: str = "") -> list[dict]:
         import httpx
+        import datetime
         from app.config import AppConfig
         from app.signing import load_private_key, build_auth_headers
         
@@ -153,23 +154,30 @@ class PaperTradeExecutor(BaseExecutor):
             "KXHIGHTDC", "KXLOWTDC",
         ]
         
+        # Build today's event tickers (e.g., KXHIGHTATL-25MAR05)
+        months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+        # Use US Eastern Time (UTC-4 is typical for Kalshi; adjust if needed)
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=-4)
+        today_prefix = f"{now.strftime('%y')}{months[now.month-1]}{now.strftime('%d')}"
+        event_tickers = [f"{series}-{today_prefix}" for series in series_list]
+        
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{config.rest_base_url}{markets_path}"
         
         all_markets = []
         async with httpx.AsyncClient() as client:
-            for series in series_list:
+            for event_ticker in event_tickers:
                 m_headers = build_auth_headers(private_key, config.kalshi_api_key, "GET", markets_path)
                 resp = await client.get(
                     markets_url,
                     headers=m_headers,
-                    params={"series_ticker": series, "limit": 100}
+                    params={"event_ticker": event_ticker, "limit": 100}
                 )
                 if resp.status_code == 200:
                     mkts = resp.json().get("markets", [])
                     all_markets.extend(mkts)
                 else:
-                    logger.warning("paper.api_error", series=series, status=resp.status_code)
+                    logger.warning("paper.api_error", event_ticker=event_ticker, status=resp.status_code)
             
             logger.info("paper.found_temp_markets", count=len(all_markets))
                             

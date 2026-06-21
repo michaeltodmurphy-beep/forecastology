@@ -162,9 +162,10 @@ class LiveTradeExecutor(BaseExecutor):
         ]
         all_markets = []
         import datetime
-        now = datetime.datetime.utcnow()
         months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-        today_prefix = f"{str(now.year)[-2:]}{months[now.month-1]}{now.day}"
+        # Use US Eastern Time (UTC-4 is typical for Kalshi; adjust if needed)
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=-4)
+        today_prefix = f"{now.strftime('%y')}{months[now.month-1]}{now.strftime('%d')}"
 
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{self.base_url}{markets_path}"
