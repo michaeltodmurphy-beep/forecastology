@@ -74,16 +74,31 @@ class OrderRequest:
     client_order_id: Optional[str] = None
     is_hedge: bool = False
 
-    def to_kalshi_payload(self) -> dict:
-        # Always side="yes" — we trade YES contracts.
-        # action="buy" to buy YES, action="sell" to sell YES (close position).
-        action = "sell" if self.side == OrderSide.SELL_YES else "buy"
+    def to_kalshi_payload(self, max_price: Optional[int] = None) -> dict:
+        # New V2 /portfolio/events/orders format
+        # side: "bid" for buying YES, "ask" for selling YES
+        # price: string dollars (e.g. "0.8900"), count: string (e.g. "1.00")
+        kalshi_side = "bid" if self.side == OrderSide.BUY_YES else "ask"
+        if not self.client_order_id:
+            import uuid
+            self.client_order_id = str(uuid.uuid4())
+        
+        # For buys: use max_price if given (allows crossing the spread to get filled)
+        # For sells: use the actual price
+        price_str = f"{self.price / 100:.4f}"
+        if kalshi_side == "bid" and max_price is not None and max_price > self.price:
+            price_str = f"{max_price / 100:.4f}"
+        
         return {
             "ticker": self.market_ticker,
+            "side": kalshi_side,
             "type": "limit",
-            "action": action,
-            "side": "yes",
-            "yes_price": self.price,
-            "count": self.quantity,
-            "client_order_id": self.client_order_id or "",
+            "price": price_str,
+            "count": f"{self.quantity}.00",
+            "client_order_id": self.client_order_id,
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+            "post_only": False,
+            "cancel_order_on_pause": False,
+            "reduce_only": False,
         }

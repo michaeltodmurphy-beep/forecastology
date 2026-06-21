@@ -207,24 +207,6 @@ class TemperatureStrategy:
         # Only track KXHIGH/KXLOW temperature markets
         if not ("KXHIGH" in market_ticker.upper() or "KXLOW" in market_ticker.upper()):
             return
-        # Only track today's markets — tomorrow's haven't settled yet
-        # Ticker format: KXHIGH|KXLOW+CITY-DDMMMYY-T## or B##.#
-        parts = market_ticker.split('-')
-        if len(parts) >= 2:
-            date_str = parts[1]
-            # Parse date like 26JUN19
-            import datetime
-            months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
-            try:
-                year = 2000 + int(date_str[:2])
-                month = months.get(date_str[2:5], 0)
-                day = int(date_str[5:])
-                ticker_date = datetime.date(year, month, day)
-                today = datetime.date.today()
-                if ticker_date != today:
-                    return  # Skip non-today markets
-            except (ValueError, IndexError):
-                pass
         self.brackets[market_ticker] = MarketBracket(
             market_ticker=market_ticker,
             event_ticker=event_ticker,
@@ -255,18 +237,6 @@ class TemperatureStrategy:
 
         if last_price is not None:
             self.cache.update_last_price(market_ticker, last_price)
-
-        # Log ticker to database
-        async with await self.db.get_session() as session:
-            st = StreamedTicker(
-                market_ticker=market_ticker,
-                last_price=last_price,
-                yes_bid=yes_bid,
-                yes_ask=yes_ask,
-                ticker_ts=datetime.datetime.utcnow(),
-            )
-            session.add(st)
-            await session.commit()
 
         # Update brackets in state
         if market_ticker in self.brackets:
@@ -352,11 +322,47 @@ class TemperatureStrategy:
 
         if event_type == "created":
             market_ticker = data.get("market_ticker", "")
+            event_ticker = data.get("event_ticker", "")
+            series_ticker = data.get("series_ticker", "")
+
+            # Before adding the bracket, check if this is a NEW event
+            # that we don't have brackets for yet. If so, fetch ALL of them.
+            if event_ticker and series_ticker:
+                known_events = {b.event_ticker for b in self.brackets.values() if b.event_ticker}
+                if event_ticker not in known_events:
+                    import httpx
+                    from app.signing import load_private_key, build_auth_headers
+                    private_key = load_private_key(self.config.kalshi_private_key_path)
+                    headers = build_auth_headers(private_key, self.config.kalshi_api_key, "GET", "/trade-api/v2/markets")
+                    url = f"{self.config.rest_base_url}/trade-api/v2/markets"
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            resp = await client.get(url, headers=headers, params={"event_ticker": event_ticker, "limit": 100})
+                            if resp.status_code in (200, 201):
+                                all_markets = resp.json().get("markets", [])
+                                count = 0
+                                for m in all_markets:
+                                    t = m.get("ticker", "")
+                                    if t and t not in self.brackets:
+                                        self.brackets[t] = MarketBracket(
+                                            market_ticker=t,
+                                            event_ticker=event_ticker,
+                                            series_ticker=series_ticker,
+                                            bracket_label=m.get("title", ""),
+                                            phase=Phase.MONITORING,
+                                        )
+                                        count += 1
+                                logger.info("strategy.new_event_brackets",
+                                            event_ticker=event_ticker, count=count)
+                    except Exception as e:
+                        logger.error("strategy.new_event_brackets_error",
+                                      event_ticker=event_ticker, error=str(e))
+
             if market_ticker:
                 await self._ensure_bracket(
                     market_ticker,
-                    event_ticker=data.get("event_ticker", ""),
-                    series_ticker=data.get("series_ticker", ""),
+                    event_ticker=event_ticker,
+                    series_ticker=series_ticker,
                     bracket_label=data.get("title", ""),
                 )
 
@@ -402,25 +408,31 @@ class TemperatureStrategy:
         """
         Simple entry check: every cycle, loop all brackets.
         Uses WebSocket ticker/orderbook cache for prices (instant).
-        If price >= buy_trigger and spread <= minimum_spread,
-        and we haven't already bought this market -> buy.
-        No REST calls — if cache doesn't have price data, skip.
+        Falls back to REST for brackets that have no cached price data.
+        Max 5 REST calls per cycle to avoid rate limits.
         """
+        rest_calls_this_cycle = 0
+        max_rest_per_cycle = 5
+
         for ticker, bracket in list(self.brackets.items()):
             if bracket.crossed_buy or bracket.phase != Phase.MONITORING:
                 continue
 
-            # Use WebSocket cache only (fast, no REST calls)
+            # Use WebSocket cache only (fast)
             ob = self.cache.get_orderbook(ticker)
             price = ob.best_ask if ob and ob.best_ask is not None else None
             spread = ob.spread if ob and ob.spread is not None else 0
 
             if price is None:
-                # Check ticker cache (also from WebSocket)
                 price = self.cache.get_last_price(ticker)
 
+            if price is None and rest_calls_this_cycle < max_rest_per_cycle:
+                price = await self._fetch_market_price_via_rest(ticker)
+                if price is not None:
+                    rest_calls_this_cycle += 1
+
             if price is None:
-                continue  # No cache data yet, try next cycle
+                continue
 
             bracket.last_price = price
 
@@ -1025,16 +1037,11 @@ class TemperatureStrategy:
                     phase_details={t: (b.phase.name, b.crossed_buy) for t, b in self.brackets.items() if b.phase != Phase.MONITORING or b.crossed_buy})
 
     async def _db_cleanup_loop(self):
-        """Delete old streaming data every hour to prevent disk bloat."""
+        """Delete old trades every hour to prevent disk bloat."""
         while self._running:
             try:
                 async with await self.db.get_session() as session:
                     cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
-                    
-                    # Delete tickers older than 24 hours
-                    await session.execute(
-                        delete(StreamedTicker).where(StreamedTicker.ticker_ts < cutoff)
-                    )
                     
                     # Delete trades older than 24 hours
                     await session.execute(
