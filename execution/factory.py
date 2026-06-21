@@ -14,7 +14,12 @@ def create_executor(
 ) -> BaseExecutor:
     """Factory that returns the appropriate executor based on trading mode."""
     if trading_mode.upper() == "PAPER":
-        return PaperTradeExecutor(ticker_cache)
+        return PaperTradeExecutor(
+            ticker_cache,
+            rest_base_url=rest_base_url,
+            api_key=api_key,
+            private_key_path=private_key_path,
+        )
     elif trading_mode.upper() == "LIVE":
         return LiveTradeExecutor(rest_base_url, api_key, private_key_path)
     else:

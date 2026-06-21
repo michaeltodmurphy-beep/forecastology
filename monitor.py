@@ -154,7 +154,7 @@ async def _sell_position(
     order_id = str(uuid.uuid4())
     payload = {
         "ticker": ticker,
-        "side": "offer",
+        "side": "ask",
         "type": "limit",
         "price": f"{price_cents / 100:.4f}",
         "count": f"{qty}.00",

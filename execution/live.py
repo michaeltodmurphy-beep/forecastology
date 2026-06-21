@@ -9,7 +9,7 @@ from execution.base import BaseExecutor, ExecutionResult
 from core.types import OrderRequest, OrderSide
 from core.constants import (
     REST_PORTFOLIO_BALANCE, REST_PORTFOLIO_ORDERS,
-    REST_PORTFOLIO_POSITIONS,
+    REST_PORTFOLIO_POSITIONS, SERIES_LIST,
 )
 
 logger = structlog.get_logger(__name__)
@@ -40,9 +40,8 @@ class LiveTradeExecutor(BaseExecutor):
         headers["Content-Type"] = "application/json"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                data = resp.json()
+            resp = await self._client.post(url, json=payload, headers=headers)
+            data = resp.json()
 
             if resp.status_code in (200, 201):
                 fill = data.get("fill", {})
@@ -88,9 +87,8 @@ class LiveTradeExecutor(BaseExecutor):
         headers["Content-Type"] = "application/json"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                data = resp.json()
+            resp = await self._client.post(url, json=payload, headers=headers)
+            data = resp.json()
 
             if resp.status_code in (200, 201):
                 fill = data.get("fill", {})
@@ -138,29 +136,6 @@ class LiveTradeExecutor(BaseExecutor):
 
     async def get_active_markets(self, series_prefix: str = "") -> list[dict]:
         from core.constants import get_eastern_today_date_prefix
-        # All 20 cities and their Kalshi ticker codes
-        series_list = [
-            "KXHIGHTATL", "KXLOWTATL",
-            "KXHIGHAUS", "KXLOWTAUS",
-            "KXHIGHTBOS", "KXLOWTBOS",
-            "KXHIGHCHI", "KXLOWTCHI",
-            "KXHIGHTDAL", "KXLOWTDAL",
-            "KXHIGHDEN", "KXLOWTDEN",
-            "KXHIGHTHOU", "KXLOWTHOU",
-            "KXHIGHTLV", "KXLOWTLV",
-            "KXHIGHLAX", "KXLOWTLAX",
-            "KXHIGHMIA", "KXLOWTMIA",
-            "KXHIGHTMIN", "KXLOWTMIN",
-            "KXHIGHTNOLA", "KXLOWTNOLA",
-            "KXHIGHNY", "KXLOWTNYC",
-            "KXHIGHTOKC", "KXLOWTOKC",
-            "KXHIGHPHIL", "KXLOWTPHIL",
-            "KXHIGHTPHX", "KXLOWTPHX",
-            "KXHIGHTSATX", "KXLOWTSATX",
-            "KXHIGHTSFO", "KXLOWTSFO",
-            "KXHIGHTSEA", "KXLOWTSEA",
-            "KXHIGHTDC", "KXLOWTDC",
-        ]
         all_markets = []
         today_prefix = get_eastern_today_date_prefix(days_offset=0)
         tomorrow_prefix = get_eastern_today_date_prefix(days_offset=1)
@@ -169,8 +144,8 @@ class LiveTradeExecutor(BaseExecutor):
         markets_url = f"{self.base_url}{markets_path}"
 
         # Query markets for today and tomorrow (tomorrow's may already be created)
-        event_tickers = [f"{s}-{today_prefix}" for s in series_list] + \
-                         [f"{s}-{tomorrow_prefix}" for s in series_list]
+        event_tickers = [f"{s}-{today_prefix}" for s in SERIES_LIST] + \
+                         [f"{s}-{tomorrow_prefix}" for s in SERIES_LIST]
 
         async def _fetch_event_markets(event_ticker: str):
             """Fetch markets for one event (no pagination needed, <100 per event)."""

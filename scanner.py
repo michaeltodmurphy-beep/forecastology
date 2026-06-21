@@ -125,7 +125,7 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
         )
         held_tickers = {row[0] for row in result.fetchall()}
 
-    buy_trigger = config.buy_trigger_price      # 82
+    buy_trigger = config.buy_trigger_price      # 85
     min_spread = config.minimum_spread            # 7
 
     # Track which tickers we attempt to buy (max 3 per cycle)

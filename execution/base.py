@@ -1,5 +1,6 @@
 # execution/base.py
 from abc import ABC, abstractmethod
+from typing import Optional
 from core.types import OrderRequest
 
 
@@ -36,7 +37,7 @@ class BaseExecutor(ABC):
     """Abstract base for trade execution."""
 
     @abstractmethod
-    async def buy_yes(self, order: OrderRequest) -> ExecutionResult:
+    async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         ...
 
     @abstractmethod
@@ -51,4 +52,9 @@ class BaseExecutor(ABC):
     @abstractmethod
     async def get_active_markets(self, series_prefix: str = "") -> list[dict]:
         """Fetch currently active markets, optionally filtered by series prefix."""
+        ...
+
+    @abstractmethod
+    async def get_positions(self) -> dict[str, dict]:
+        """Return current positions keyed by market ticker."""
         ...

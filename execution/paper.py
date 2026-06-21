@@ -4,6 +4,7 @@ import structlog
 from typing import Optional
 from execution.base import BaseExecutor, ExecutionResult
 from core.types import OrderRequest, OrderSide
+from core.constants import SERIES_LIST
 from data.ticker_cache import TickerCache
 
 logger = structlog.get_logger(__name__)
@@ -16,8 +17,18 @@ class PaperTradeExecutor(BaseExecutor):
     All fills are logged to the database.
     """
 
-    def __init__(self, ticker_cache: TickerCache, initial_balance_cents: int = 100_000_00):
+    def __init__(
+        self,
+        ticker_cache: TickerCache,
+        rest_base_url: str = "",
+        api_key: str = "",
+        private_key_path: str = "",
+        initial_balance_cents: int = 100_000_00,
+    ):
         self.ticker_cache = ticker_cache
+        self.rest_base_url = rest_base_url
+        self.api_key = api_key
+        self.private_key_path = private_key_path
         self.balance_cents = initial_balance_cents
         self.positions: dict[str, dict] = {}
 
@@ -27,8 +38,12 @@ class PaperTradeExecutor(BaseExecutor):
         fill_price = order.price  # default to requested price
 
         if ob and ob.yes_asks:
-            # Fill at the lowest ask, but not above our limit price
-            fill_price = min(order.price, ob.yes_asks[0].price)
+            ask_price = ob.yes_asks[0].price
+            # Fill at ask if it is at or below our limit; otherwise use limit price
+            if ask_price <= order.price:
+                fill_price = ask_price
+            else:
+                fill_price = order.price
 
         total_cost = fill_price * order.quantity
 
@@ -123,50 +138,24 @@ class PaperTradeExecutor(BaseExecutor):
 
     async def get_active_markets(self, series_prefix: str = "") -> list[dict]:
         import httpx
-        from app.config import AppConfig
         from app.signing import load_private_key, build_auth_headers
         from core.constants import get_eastern_today_date_prefix
-        
-        config = AppConfig.from_env()
-        private_key = load_private_key(config.kalshi_private_key_path)
-        
-        # All 40 series (20 cities × low/high) with their exact Kalshi series tickers
-        series_list = [
-            "KXHIGHTATL", "KXLOWTATL",
-            "KXHIGHAUS", "KXLOWTAUS",
-            "KXHIGHTBOS", "KXLOWTBOS",
-            "KXHIGHCHI", "KXLOWTCHI",
-            "KXHIGHTDAL", "KXLOWTDAL",
-            "KXHIGHDEN", "KXLOWTDEN",
-            "KXHIGHTHOU", "KXLOWTHOU",
-            "KXHIGHTLV", "KXLOWTLV",
-            "KXHIGHLAX", "KXLOWTLAX",
-            "KXHIGHMIA", "KXLOWTMIA",
-            "KXHIGHTMIN", "KXLOWTMIN",
-            "KXHIGHTNOLA", "KXLOWTNOLA",
-            "KXHIGHNY", "KXLOWTNYC",
-            "KXHIGHTOKC", "KXLOWTOKC",
-            "KXHIGHPHIL", "KXLOWTPHIL",
-            "KXHIGHTPHX", "KXLOWTPHX",
-            "KXHIGHTSATX", "KXLOWTSATX",
-            "KXHIGHTSFO", "KXLOWTSFO",
-            "KXHIGHTSEA", "KXLOWTSEA",
-            "KXHIGHTDC", "KXLOWTDC",
-        ]
-        
+
+        private_key = load_private_key(self.private_key_path)
+
         # Build event tickers for today and tomorrow in US Eastern time.
         today_prefix = get_eastern_today_date_prefix(days_offset=0)
         tomorrow_prefix = get_eastern_today_date_prefix(days_offset=1)
-        event_tickers = [f"{series}-{today_prefix}" for series in series_list] + \
-                         [f"{series}-{tomorrow_prefix}" for series in series_list]
-        
+        event_tickers = [f"{series}-{today_prefix}" for series in SERIES_LIST] + \
+                         [f"{series}-{tomorrow_prefix}" for series in SERIES_LIST]
+
         markets_path = "/trade-api/v2/markets"
-        markets_url = f"{config.rest_base_url}{markets_path}"
-        
+        markets_url = f"{self.rest_base_url}{markets_path}"
+
         all_markets = []
         async with httpx.AsyncClient() as client:
             for event_ticker in event_tickers:
-                m_headers = build_auth_headers(private_key, config.kalshi_api_key, "GET", markets_path)
+                m_headers = build_auth_headers(private_key, self.api_key, "GET", markets_path)
                 try:
                     resp = await client.get(
                         markets_url,
@@ -181,9 +170,9 @@ class PaperTradeExecutor(BaseExecutor):
                     all_markets.extend(mkts)
                 else:
                     logger.warning("paper.api_error", event_ticker=event_ticker, status=resp.status_code)
-            
+
             logger.info("paper.found_temp_markets", count=len(all_markets))
-                            
+
         return all_markets
 
     async def get_positions(self) -> dict[str, dict]:
@@ -192,7 +181,7 @@ class PaperTradeExecutor(BaseExecutor):
             qty = pos.get("quantity", 0)
             entry_price = pos.get("avg_entry_price", 0)  # cents
             # Use cached last price if available
-            last_price = self.cache.get_last_price(ticker)
+            last_price = self.ticker_cache.get_last_price(ticker)
             if last_price is None:
                 last_price = 0
             result[ticker] = {

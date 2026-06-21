@@ -85,9 +85,9 @@ class OrderRequest:
         
         # For buys: use max_price if given (allows crossing the spread to get filled)
         # For sells: use the actual price
-        price_str = f"{self.price / 100:.2f}"
+        price_str = f"{self.price / 100:.4f}"
         if kalshi_side == "bid" and max_price is not None and max_price > self.price:
-            price_str = f"{max_price / 100:.2f}"
+            price_str = f"{max_price / 100:.4f}"
         
         return {
             "ticker": self.market_ticker,

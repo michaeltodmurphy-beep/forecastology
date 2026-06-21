@@ -1,6 +1,11 @@
 .cecli*
 .env
+*.pem
+*.bak
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.egg-info/
 logs/
+/dev/shm/
