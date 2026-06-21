@@ -236,3 +236,72 @@ async def test_execute_hedge_caps_quantity(monkeypatch, avg_entry, position_quan
     assert hedge_log["raw_qty"] > expected_qty
     assert hedge_log["capped_qty"] == expected_qty
     assert hedge_log["cap_reason"] == expected_reason
+
+
+@pytest.mark.asyncio
+async def test_ensure_bracket_filters_non_today_tickers(monkeypatch):
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine, "get_eastern_today_date_prefix", lambda days_offset=0: "26JUN21")
+
+    strategy = make_strategy(monkeypatch)
+
+    await strategy._ensure_bracket("KXLOWTSEA-26JUN22-B53.5")
+    await strategy._ensure_bracket("KXLOWTSEA-26JUN21-B53.5")
+
+    assert "KXLOWTSEA-26JUN22-B53.5" not in strategy.brackets
+    assert "KXLOWTSEA-26JUN21-B53.5" in strategy.brackets
+
+
+@pytest.mark.asyncio
+async def test_handle_lifecycle_ignores_non_today_event_markets(monkeypatch):
+    import app.signing
+    import core.state_machine as state_machine
+    import httpx
+
+    class FakeLifecycleResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "markets": [
+                    {"ticker": "KXLOWTSEA-26JUN21-B53.5", "title": "today primary"},
+                    {"ticker": "KXLOWTSEA-26JUN21-T54", "title": "today secondary"},
+                    {"ticker": "KXLOWTSEA-26JUN22-B54.5", "title": "tomorrow"},
+                    {"ticker": "NOTTEMP-26JUN21-X1", "title": "other"},
+                ]
+            }
+
+    class FakeLifecycleClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return FakeLifecycleResponse()
+
+    monkeypatch.setattr(state_machine, "get_eastern_today_date_prefix", lambda days_offset=0: "26JUN21")
+    monkeypatch.setattr(app.signing, "load_private_key", lambda _path: object())
+    monkeypatch.setattr(app.signing, "build_auth_headers", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(httpx, "AsyncClient", FakeLifecycleClient)
+
+    strategy = make_strategy(monkeypatch, rest_base_url="https://example.test")
+
+    await strategy._handle_lifecycle(
+        {
+            "msg": {
+                "type": "created",
+                "market_ticker": "KXLOWTSEA-26JUN21-B53.5",
+                "event_ticker": "KXLOWTSEA-26JUN21",
+                "series_ticker": "KXLOWTSEA",
+                "title": "created market",
+            }
+        }
+    )
+
+    assert "KXLOWTSEA-26JUN21-B53.5" in strategy.brackets
+    assert "KXLOWTSEA-26JUN21-T54" in strategy.brackets
+    assert "KXLOWTSEA-26JUN22-B54.5" not in strategy.brackets
+    assert "NOTTEMP-26JUN21-X1" not in strategy.brackets

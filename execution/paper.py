@@ -143,11 +143,8 @@ class PaperTradeExecutor(BaseExecutor):
 
         private_key = load_private_key(self.private_key_path)
 
-        # Build event tickers for today and tomorrow in US Eastern time.
         today_prefix = get_eastern_today_date_prefix(days_offset=0)
-        tomorrow_prefix = get_eastern_today_date_prefix(days_offset=1)
-        event_tickers = [f"{series}-{today_prefix}" for series in SERIES_LIST] + \
-                         [f"{series}-{tomorrow_prefix}" for series in SERIES_LIST]
+        event_tickers = [f"{series}-{today_prefix}" for series in SERIES_LIST]
 
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{self.rest_base_url}{markets_path}"
