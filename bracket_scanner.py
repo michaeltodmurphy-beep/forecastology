@@ -24,23 +24,11 @@ from datetime import datetime, timezone, timedelta
 import websockets
 from app.config import AppConfig
 from app.signing import load_private_key, build_ws_headers, build_auth_headers
+from core.constants import SERIES_LIST
 
 logger = structlog.get_logger(__name__)
 
 MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-
-SERIES_LIST = [
-    "KXHIGHTATL", "KXLOWTATL", "KXHIGHAUS", "KXLOWTAUS",
-    "KXHIGHTBOS", "KXLOWTBOS", "KXHIGHCHI", "KXLOWTCHI",
-    "KXHIGHTDAL", "KXLOWTDAL", "KXHIGHDEN", "KXLOWTDEN",
-    "KXHIGHTHOU", "KXLOWTHOU", "KXHIGHTLV", "KXLOWTLV",
-    "KXHIGHLAX", "KXLOWTLAX", "KXHIGHMIA", "KXLOWTMIA",
-    "KXHIGHTMIN", "KXLOWTMIN", "KXHIGHTNOLA", "KXLOWTNOLA",
-    "KXHIGHNY", "KXLOWTNYC", "KXHIGHTOKC", "KXLOWTOKC",
-    "KXHIGHPHIL", "KXLOWTPHIL", "KXHIGHTPHX", "KXLOWTPHX",
-    "KXHIGHTSATX", "KXLOWTSATX", "KXHIGHTSFO", "KXLOWTSFO",
-    "KXHIGHTSEA", "KXLOWTSEA", "KXHIGHTDC", "KXLOWTDC",
-]
 
 
 class BracketScanner:

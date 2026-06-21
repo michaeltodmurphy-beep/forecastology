@@ -6,6 +6,30 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 
+# All 40 temperature series (20 cities × high/low) with their Kalshi series tickers
+SERIES_LIST = [
+    "KXHIGHTATL", "KXLOWTATL",
+    "KXHIGHAUS", "KXLOWTAUS",
+    "KXHIGHTBOS", "KXLOWTBOS",
+    "KXHIGHCHI", "KXLOWTCHI",
+    "KXHIGHTDAL", "KXLOWTDAL",
+    "KXHIGHDEN", "KXLOWTDEN",
+    "KXHIGHTHOU", "KXLOWTHOU",
+    "KXHIGHTLV", "KXLOWTLV",
+    "KXHIGHLAX", "KXLOWTLAX",
+    "KXHIGHMIA", "KXLOWTMIA",
+    "KXHIGHTMIN", "KXLOWTMIN",
+    "KXHIGHTNOLA", "KXLOWTNOLA",
+    "KXHIGHNY", "KXLOWTNYC",
+    "KXHIGHTOKC", "KXLOWTOKC",
+    "KXHIGHPHIL", "KXLOWTPHIL",
+    "KXHIGHTPHX", "KXLOWTPHX",
+    "KXHIGHTSATX", "KXLOWTSATX",
+    "KXHIGHTSFO", "KXLOWTSFO",
+    "KXHIGHTSEA", "KXLOWTSEA",
+    "KXHIGHTDC", "KXLOWTDC",
+]
+
 def get_eastern_today_date_prefix(days_offset: int = 0) -> str:
     """Return today's (or offset day) date in US Eastern time formatted as YYMMMDD,
     e.g., 250305 for March 5, 2025."""

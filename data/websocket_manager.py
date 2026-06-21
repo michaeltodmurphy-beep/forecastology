@@ -129,6 +129,7 @@ class WebSocketManager:
         if self.websocket:
             await self.websocket.close()
         await self.connect()
+        self._running = True
         for channel, markets in self._subscriptions.items():
             await self.subscribe(channel, markets)
 
