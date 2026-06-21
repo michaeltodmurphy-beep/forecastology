@@ -165,10 +165,8 @@ class TemperatureStrategy:
                     bracket.crossed_buy = True
                     bracket.position_quantity = qty
                     entry = pos_data.get("average_fill_cost_cents", 0) or 0
-                    # If we got a real entry price from the API, use it;
-                    # otherwise the DB restore will fill it in below
+                    bracket.avg_entry = entry if entry > 0 else 0   # never None
                     if entry > 0:
-                        bracket.avg_entry = entry
                         bracket.last_price = entry
                     self.active_positions[ticker] = bracket
                     logger.info("strategy.restored_live_position", ticker=ticker,
@@ -754,6 +752,13 @@ class TemperatureStrategy:
                           stop_loss=self.config.stop_loss_price)
             return
 
+
+        # Guard: skip hedging if we don't have a valid entry price
+        if not bracket.avg_entry or bracket.avg_entry <= 0:
+            logger.warning("phase.c.hedge_no_entry_price",
+                           ticker=bracket.market_ticker,
+                           qty=bracket.position_quantity)
+            return
 
         # Calculate expected loss if price continues to stop loss
         expected_loss = bracket.position_quantity * (bracket.avg_entry - self.config.stop_loss_price)

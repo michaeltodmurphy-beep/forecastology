@@ -60,7 +60,7 @@ class MarketBracket:
     pending_entry: bool = False  # crossed 85 but spread was too wide, still waiting
     orderbook: Optional[OrderBook] = None
     position_quantity: int = 0
-    avg_entry: Optional[int] = None
+    avg_entry: int = 0
     hedge_market: Optional[str] = None
     hedge_quantity: int = 0
 
