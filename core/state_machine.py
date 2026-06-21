@@ -113,6 +113,7 @@ class TemperatureStrategy:
         logger.info("strategy.started",
                      monitor_start=self.config.monitor_start_price,
                      buy_trigger=self.config.buy_trigger_price,
+                     minimum_spread=self.config.minimum_spread,
                      spread_monitor=self.config.spread_monitor_price,
                      hedge_trigger=self.config.hedge_trigger_price,
                      stop_loss=self.config.stop_loss_price,
@@ -452,8 +453,10 @@ class TemperatureStrategy:
 
             if spread <= self.config.minimum_spread:
                 bracket.crossed_buy = True
+                spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
                 logger.info("phase.b.buying", ticker=ticker,
-                            label=bracket.bracket_label, price=price, spread=spread)
+                            label=bracket.bracket_label, price=price, spread=spread,
+                            spread_note=spread_note)
                 await self._execute_entry(bracket)
             else:
                 logger.info("phase.b.spread_too_wide", ticker=ticker,
@@ -737,13 +740,33 @@ class TemperatureStrategy:
 
         # Calculate expected loss if price continues to stop loss
         expected_loss = bracket.position_quantity * (bracket.avg_entry - self.config.stop_loss_price)
-        
+
         # Calculate hedge quantity to break even
         hedge_profit_per_contract = 100 - hedge_price
         if hedge_profit_per_contract > 0 and expected_loss > 0:
-            hedge_qty = (expected_loss + hedge_profit_per_contract - 1) // hedge_profit_per_contract  # ceiling
+            raw_hedge_qty = (expected_loss + hedge_profit_per_contract - 1) // hedge_profit_per_contract  # ceiling
         else:
-            hedge_qty = bracket.position_quantity  # fallback
+            raw_hedge_qty = bracket.position_quantity  # fallback
+
+        max_by_quantity = bracket.position_quantity
+        original_cost = bracket.position_quantity * bracket.avg_entry
+        max_by_cost = original_cost // hedge_price if hedge_price > 0 else bracket.position_quantity
+        capped_hedge_qty = min(raw_hedge_qty, max_by_quantity, max_by_cost)
+        hedge_qty = max(capped_hedge_qty, 1)
+        if capped_hedge_qty == raw_hedge_qty:
+            cap_reason = "formula"
+        elif capped_hedge_qty == max_by_quantity and max_by_quantity <= max_by_cost:
+            cap_reason = "quantity"
+        else:
+            cap_reason = "cost"
+
+        logger.info("phase.c.hedge_quantity_calc",
+                    ticker=bracket.market_ticker,
+                    expected_loss=expected_loss,
+                    hedge_price=hedge_price,
+                    raw_qty=raw_hedge_qty,
+                    capped_qty=hedge_qty,
+                    cap_reason=cap_reason)
         import uuid
         order = OrderRequest(
             market_ticker=next_bracket_ticker,
