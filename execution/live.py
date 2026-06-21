@@ -138,14 +138,11 @@ class LiveTradeExecutor(BaseExecutor):
         from core.constants import get_eastern_today_date_prefix
         all_markets = []
         today_prefix = get_eastern_today_date_prefix(days_offset=0)
-        tomorrow_prefix = get_eastern_today_date_prefix(days_offset=1)
 
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{self.base_url}{markets_path}"
 
-        # Query markets for today and tomorrow (tomorrow's may already be created)
-        event_tickers = [f"{s}-{today_prefix}" for s in SERIES_LIST] + \
-                         [f"{s}-{tomorrow_prefix}" for s in SERIES_LIST]
+        event_tickers = [f"{s}-{today_prefix}" for s in SERIES_LIST]
 
         async def _fetch_event_markets(event_ticker: str):
             """Fetch markets for one event (no pagination needed, <100 per event)."""

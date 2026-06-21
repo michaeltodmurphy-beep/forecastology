@@ -7,7 +7,7 @@ from typing import Optional
 from core.types import (
     Phase, MarketBracket, OrderRequest, OrderSide, OrderBook, OrderBookLevel,
 )
-from core.constants import WEATHER_CATEGORY
+from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -205,6 +205,9 @@ class TemperatureStrategy:
         """Create a new MarketBracket if the ticker is a temperature market and unknown."""
         if market_ticker in self.brackets:
             return
+        today_prefix = get_eastern_today_date_prefix(days_offset=0)
+        if today_prefix not in market_ticker:
+            return
         # Only track KXHIGH/KXLOW temperature markets
         if not ("KXHIGH" in market_ticker.upper() or "KXLOW" in market_ticker.upper()):
             return
@@ -325,6 +328,10 @@ class TemperatureStrategy:
             market_ticker = data.get("market_ticker", "")
             event_ticker = data.get("event_ticker", "")
             series_ticker = data.get("series_ticker", "")
+            today_prefix = get_eastern_today_date_prefix(days_offset=0)
+
+            if market_ticker and today_prefix not in market_ticker:
+                return
 
             # Before adding the bracket, check if this is a NEW event
             # that we don't have brackets for yet. If so, fetch ALL of them.
@@ -344,15 +351,16 @@ class TemperatureStrategy:
                                 count = 0
                                 for m in all_markets:
                                     t = m.get("ticker", "")
-                                    if t and t not in self.brackets:
-                                        self.brackets[t] = MarketBracket(
-                                            market_ticker=t,
+                                    if t:
+                                        existed = t in self.brackets
+                                        await self._ensure_bracket(
+                                            t,
                                             event_ticker=event_ticker,
                                             series_ticker=series_ticker,
                                             bracket_label=m.get("title", ""),
-                                            phase=Phase.MONITORING,
                                         )
-                                        count += 1
+                                        if not existed and t in self.brackets:
+                                            count += 1
                                 logger.info("strategy.new_event_brackets",
                                             event_ticker=event_ticker, count=count)
                     except Exception as e:
