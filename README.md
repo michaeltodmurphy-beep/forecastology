@@ -88,6 +88,15 @@ python monitor.py
 python bracket_scanner.py --min-spread 7 --buy-trigger 85
 ```
 
+## Testing
+
+Install the test dependencies and run the unit test suite:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
+
 ## Trading Strategy
 
 1. **Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 4¢)
