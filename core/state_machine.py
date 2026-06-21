@@ -230,8 +230,9 @@ class TemperatureStrategy:
         await self._ensure_bracket(market_ticker)
 
         last_price_raw = ticker_data.get("last_price")
-        yes_bid_raw = ticker_data.get("yes_bid")
-        yes_ask_raw = ticker_data.get("yes_ask")
+        # Prefer *_dollars variants (authoritative); fall back to bare fields
+        yes_bid_raw = ticker_data.get("yes_bid_dollars") or ticker_data.get("yes_bid")
+        yes_ask_raw = ticker_data.get("yes_ask_dollars") or ticker_data.get("yes_ask")
 
         # Convert dollars to cents
         last_price = round(float(last_price_raw) * 100) if last_price_raw is not None else None
@@ -240,6 +241,10 @@ class TemperatureStrategy:
 
         if last_price is not None:
             self.cache.update_last_price(market_ticker, last_price)
+
+        # Cache YES bid/ask from ticker channel — this is the authoritative price source
+        if yes_bid is not None and yes_ask is not None:
+            self.cache.update_quote(market_ticker, yes_bid, yes_ask)
 
         # Update brackets in state
         if market_ticker in self.brackets:
@@ -417,8 +422,8 @@ class TemperatureStrategy:
     async def _evaluate_watchlist(self):
         """
         Simple entry check: every cycle, loop all brackets.
-        Uses WebSocket ticker/orderbook cache for prices (instant).
-        Falls back to REST for brackets that have no cached price data.
+        Uses WebSocket ticker quote for prices (primary, instant).
+        Falls back to REST for brackets that have no cached quote data.
         Max 5 REST calls per cycle to avoid rate limits.
         """
         rest_calls_this_cycle = 0
@@ -428,33 +433,41 @@ class TemperatureStrategy:
             if bracket.crossed_buy or bracket.phase != Phase.MONITORING:
                 continue
 
-            # Use WebSocket cache only (fast)
-            ob = self.cache.get_orderbook(ticker)
-            # Determine price: best ask from order book, or fallbacks
-            price = ob.best_ask if ob and ob.best_ask is not None else None
-
-            if price is None:
-                price = self.cache.get_last_price(ticker)
-
+            price = None
+            spread = None
             rest_data = None
+
+            # Primary source: ticker channel quote (yes_ask as price, yes_ask - yes_bid as spread)
+            quote = self.cache.get_quote(ticker)
+            if quote is not None:
+                yes_bid_q, yes_ask_q = quote
+                price = yes_ask_q
+                spread = yes_ask_q - yes_bid_q
+
+            # Fallback: REST endpoint
             if price is None and rest_calls_this_cycle < max_rest_per_cycle:
                 rest_data = await self._fetch_market_data_via_rest(ticker)
+                rest_calls_this_cycle += 1
                 if rest_data:
-                    price = rest_data.get("price")
-                    rest_calls_this_cycle += 1
+                    if "yes_ask" in rest_data and "yes_bid" in rest_data:
+                        price = rest_data["yes_ask"]
+                        spread = rest_data["yes_ask"] - rest_data["yes_bid"]
+                    elif "yes_ask" in rest_data:
+                        price = rest_data["yes_ask"]
+                    elif "price" in rest_data:
+                        price = rest_data["price"]
+                    if spread is None and rest_data and "spread" in rest_data:
+                        spread = rest_data["spread"]
 
-            if price is None:
+            # Skip if we don't have both price (yes_ask) and spread
+            if price is None or spread is None:
                 continue
 
-            if ob is not None and ob.spread is not None:
-                spread = ob.spread
-            elif rest_data and "spread" in rest_data:
-                spread = rest_data["spread"]
-            else:
-                continue
             bracket.last_price = price
 
             if price < self.config.buy_trigger_price:
+                logger.debug("phase.b.below_trigger", ticker=ticker, price=price,
+                             buy_trigger=self.config.buy_trigger_price)
                 continue
 
             if price > self.config.spread_monitor_price:
@@ -1033,10 +1046,6 @@ class TemperatureStrategy:
                     yb = mkt.get("yes_bid_dollars") or mkt.get("yes_bid")
                     if yb and float(yb) > 0:
                         result["yes_bid"] = round(float(yb) * 100)
-                    else:
-                        na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
-                        if na and float(na) > 0:
-                            result["yes_bid"] = 100 - round(float(na) * 100)
 
                     lp = mkt.get("last_price_dollars") or mkt.get("last_price")
                     if lp and float(lp) > 0:

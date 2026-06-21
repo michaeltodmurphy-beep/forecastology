@@ -173,10 +173,8 @@ async def test_evaluate_watchlist_logs_spread_note(monkeypatch, spread, expected
         phase=Phase.MONITORING,
     )
     strategy.brackets[bracket.market_ticker] = bracket
-    strategy.cache.orderbooks[bracket.market_ticker] = OrderBook(
-        yes_bids=[OrderBookLevel(price=82 - spread, quantity=1, order_count=1)],
-        yes_asks=[OrderBookLevel(price=82, quantity=1, order_count=1)],
-    )
+    # Drive prices via ticker-quote cache (yes_ask=82, yes_bid=82-spread)
+    strategy.cache.update_quote(bracket.market_ticker, 82 - spread, 82)
     strategy._execute_entry = AsyncMock()
 
     await strategy._evaluate_watchlist()
@@ -205,6 +203,66 @@ async def test_evaluate_watchlist_uses_rest_spread_when_orderbook_missing(monkey
     assert bracket.crossed_buy is True
     assert bracket.last_price == 89
     strategy._execute_entry.assert_awaited_once_with(bracket)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_watchlist_ticker_quote_triggers_entry(monkeypatch):
+    """Market with yes_ask >= buy_trigger and tight spread enters via ticker quote."""
+    import core.state_machine as state_machine
+
+    logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda event, **kwargs: logged.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTPHX-26JUN22-B84.5",
+        event_ticker="EVT1",
+        series_ticker="SER1",
+        bracket_label="phoenix",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    # yes_ask=84 >= buy_trigger=82, spread=6 <= minimum_spread=7 (override below)
+    strategy.cache.update_quote(bracket.market_ticker, 78, 84)
+    strategy._execute_entry = AsyncMock()
+    # Use minimum_spread=7 so spread of 6 passes
+    strategy.config.minimum_spread = 7
+
+    await strategy._evaluate_watchlist()
+
+    assert bracket.crossed_buy is True
+    strategy._execute_entry.assert_awaited_once_with(bracket)
+    events = [event for event, _ in logged]
+    assert "phase.b.buying" in events
+
+
+@pytest.mark.asyncio
+async def test_evaluate_watchlist_wide_spread_blocked(monkeypatch):
+    """Market with wide spread is blocked by spread gate."""
+    import core.state_machine as state_machine
+
+    logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda event, **kwargs: logged.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTPHX-26JUN22-B84.5",
+        event_ticker="EVT1",
+        series_ticker="SER1",
+        bracket_label="phoenix wide",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    # yes_ask=84 >= buy_trigger=82, but spread=10 > minimum_spread=4
+    strategy.cache.update_quote(bracket.market_ticker, 74, 84)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    assert bracket.crossed_buy is False
+    strategy._execute_entry.assert_not_awaited()
+    events = [event for event, _ in logged]
+    assert "phase.b.spread_too_wide" in events
 
 
 @pytest.mark.asyncio

@@ -19,9 +19,19 @@ class TickerCache:
         self.orderbooks: dict[str, OrderBook] = {}
         # market_ticker -> full market info (from lifecycle or REST)
         self.market_metadata: dict[str, dict] = {}
+        # market_ticker -> (yes_bid_cents, yes_ask_cents) from ticker channel
+        self.quotes: dict[str, tuple[int, int]] = {}
 
     def update_last_price(self, ticker: str, price: int):
         self.last_prices[ticker] = price
+
+    def update_quote(self, ticker: str, yes_bid: int, yes_ask: int):
+        """Cache yes_bid/yes_ask (in cents) from the ticker channel."""
+        self.quotes[ticker] = (yes_bid, yes_ask)
+
+    def get_quote(self, ticker: str) -> Optional[tuple[int, int]]:
+        """Return cached (yes_bid_cents, yes_ask_cents) or None if not yet seen."""
+        return self.quotes.get(ticker)
 
     def update_orderbook_snapshot(self, ticker: str, snapshot: dict):
         """Process an orderbook_snapshot message."""
@@ -38,15 +48,8 @@ class TickerCache:
             if qty > 0:
                 yes_bids.append(OrderBookLevel(price=price_cents, quantity=int(qty), order_count=0))
         
-        # "no" side in dollars_fp represents no bids
-        # A no bid at price X = a yes ask at price (100 - X)
-        no_fp = snapshot.get("no_dollars_fp", [])
-        for entry in no_fp:
-            price_dollars = float(entry[0])
-            qty = float(entry[1])
-            yes_ask_price = 100 - round(price_dollars * 100)
-            if qty > 0:
-                yes_asks.append(OrderBookLevel(price=yes_ask_price, quantity=int(qty), order_count=0))
+        # NOTE: The NO side is never used to derive YES asks.
+        # YES ask prices come exclusively from the ticker channel (yes_ask/yes_ask_dollars).
         
         yes_bids.sort(key=lambda x: x.price, reverse=True)  # highest first
         yes_asks.sort(key=lambda x: x.price)  # lowest first
@@ -81,17 +84,8 @@ class TickerCache:
                 ob.yes_bids.append(OrderBookLevel(price=price_cents, quantity=new_qty, order_count=0))
             ob.yes_bids.sort(key=lambda x: x.price, reverse=True)
             
-        elif side == "no":
-            # No bid change -> affects yes asks
-            yes_ask_price = 100 - price_cents
-            old_level = next((l for l in ob.yes_asks if l.price == yes_ask_price), None)
-            old_qty = old_level.quantity if old_level else 0
-            new_qty = old_qty + delta_qty
-            
-            ob.yes_asks = [l for l in ob.yes_asks if l.price != yes_ask_price]
-            if new_qty > 0:
-                ob.yes_asks.append(OrderBookLevel(price=yes_ask_price, quantity=new_qty, order_count=0))
-            ob.yes_asks.sort(key=lambda x: x.price)
+        # NOTE: "no" side deltas are intentionally ignored.
+        # YES ask prices come exclusively from the ticker channel (yes_ask/yes_ask_dollars).
 
     def get_last_price(self, ticker: str) -> Optional[int]:
         return self.last_prices.get(ticker)
