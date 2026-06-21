@@ -18,6 +18,8 @@ os.environ['SPREAD_MONITOR_PRICE'] = '0.90'
 class TestAppConfig:
 
     def test_from_env_loads_correctly(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
         from app.config import AppConfig
         cfg = AppConfig.from_env()
         assert cfg.kalshi_api_key == 'test_key'
