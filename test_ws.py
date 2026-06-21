@@ -1,7 +1,8 @@
 import asyncio
-import websockets
-import json
 import pytest
+import json
+pytest.importorskip("websockets")
+import websockets
 from app.signing import load_private_key, build_ws_headers
 from app.config import AppConfig
 

@@ -1,4 +1,6 @@
 import asyncio
+import pytest
+pytest.importorskip("httpx")
 import httpx
 from app.signing import load_private_key, build_auth_headers
 from app.config import AppConfig
