@@ -1,5 +1,19 @@
 # core/constants.py
 
+import datetime
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+def get_eastern_today_date_prefix(days_offset: int = 0) -> str:
+    """Return today's (or offset day) date in US Eastern time formatted as YYMMMDD,
+    e.g., 250305 for March 5, 2025."""
+    eastern = ZoneInfo("America/New_York")
+    now = datetime.datetime.now(eastern) + datetime.timedelta(days=days_offset)
+    months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+    return f"{now.strftime('%y')}{months[now.month-1]}{now.strftime('%d')}"
+
 # WebSocket channels
 CHANNEL_TICKER = "ticker"
 CHANNEL_TRADE = "trade"

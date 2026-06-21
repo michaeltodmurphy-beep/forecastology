@@ -123,9 +123,9 @@ class PaperTradeExecutor(BaseExecutor):
 
     async def get_active_markets(self, series_prefix: str = "") -> list[dict]:
         import httpx
-        import datetime
         from app.config import AppConfig
         from app.signing import load_private_key, build_auth_headers
+        from core.constants import get_eastern_today_date_prefix
         
         config = AppConfig.from_env()
         private_key = load_private_key(config.kalshi_private_key_path)
@@ -154,12 +154,11 @@ class PaperTradeExecutor(BaseExecutor):
             "KXHIGHTDC", "KXLOWTDC",
         ]
         
-        # Build today's event tickers (e.g., KXHIGHTATL-25MAR05)
-        months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-        # Use US Eastern Time (UTC-4 is typical for Kalshi; adjust if needed)
-        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=-4)
-        today_prefix = f"{now.strftime('%y')}{months[now.month-1]}{now.strftime('%d')}"
-        event_tickers = [f"{series}-{today_prefix}" for series in series_list]
+        # Build event tickers for today and tomorrow in US Eastern time.
+        today_prefix = get_eastern_today_date_prefix(days_offset=0)
+        tomorrow_prefix = get_eastern_today_date_prefix(days_offset=1)
+        event_tickers = [f"{series}-{today_prefix}" for series in series_list] + \
+                         [f"{series}-{tomorrow_prefix}" for series in series_list]
         
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{config.rest_base_url}{markets_path}"
@@ -168,11 +167,15 @@ class PaperTradeExecutor(BaseExecutor):
         async with httpx.AsyncClient() as client:
             for event_ticker in event_tickers:
                 m_headers = build_auth_headers(private_key, config.kalshi_api_key, "GET", markets_path)
-                resp = await client.get(
-                    markets_url,
-                    headers=m_headers,
-                    params={"event_ticker": event_ticker, "limit": 100}
-                )
+                try:
+                    resp = await client.get(
+                        markets_url,
+                        headers=m_headers,
+                        params={"event_ticker": event_ticker, "limit": 100}
+                    )
+                except Exception as e:
+                    logger.warning("paper.api_error", event_ticker=event_ticker, error=str(e))
+                    continue
                 if resp.status_code == 200:
                     mkts = resp.json().get("markets", [])
                     all_markets.extend(mkts)
@@ -186,10 +189,19 @@ class PaperTradeExecutor(BaseExecutor):
     async def get_positions(self) -> dict[str, dict]:
         result = {}
         for ticker, pos in self.positions.items():
-            entry_price_dollars = pos.get("avg_entry_price", 0) / 100
+            qty = pos.get("quantity", 0)
+            entry_price = pos.get("avg_entry_price", 0)  # cents
+            # Use cached last price if available
+            last_price = self.cache.get_last_price(ticker)
+            if last_price is None:
+                last_price = 0
             result[ticker] = {
-                **pos,
-                "average_fill_cost_dollars": f"{entry_price_dollars:.4f}",
-                "position_fp": str(pos.get("quantity", 0)),
+                "market_ticker": ticker,
+                "side": pos.get("side", "yes"),
+                "count": qty,
+                "average_fill_cost_cents": entry_price,
+                "last_price_cents": last_price,
+                "position_fp": str(qty),
+                "average_fill_cost_dollars": f"{entry_price/100:.4f}",
             }
         return result

@@ -420,8 +420,8 @@ class TemperatureStrategy:
 
             # Use WebSocket cache only (fast)
             ob = self.cache.get_orderbook(ticker)
+            # Determine price: best ask from order book, or fallbacks
             price = ob.best_ask if ob and ob.best_ask is not None else None
-            spread = ob.spread if ob and ob.spread is not None else 0
 
             if price is None:
                 price = self.cache.get_last_price(ticker)
@@ -434,13 +434,18 @@ class TemperatureStrategy:
             if price is None:
                 continue
 
+            # Must have a complete order book to evaluate the spread
+            if ob is None or ob.spread is None:
+                continue
+
+            spread = ob.spread
             bracket.last_price = price
 
             if price < self.config.buy_trigger_price:
                 continue
 
             if price > self.config.spread_monitor_price:
-                bracket.crossed_buy = True
+                # Price above the maximum we're willing to enter; log and skip
                 logger.info("phase.b.missed_entry", ticker=ticker,
                             price=price, max_price=self.config.spread_monitor_price)
                 continue

@@ -137,6 +137,7 @@ class LiveTradeExecutor(BaseExecutor):
         return int(float(data.get("balance", 0)) * 100)
 
     async def get_active_markets(self, series_prefix: str = "") -> list[dict]:
+        from core.constants import get_eastern_today_date_prefix
         # All 20 cities and their Kalshi ticker codes
         series_list = [
             "KXHIGHTATL", "KXLOWTATL",
@@ -161,17 +162,15 @@ class LiveTradeExecutor(BaseExecutor):
             "KXHIGHTDC", "KXLOWTDC",
         ]
         all_markets = []
-        import datetime
-        months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
-        # Use US Eastern Time (UTC-4 is typical for Kalshi; adjust if needed)
-        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=-4)
-        today_prefix = f"{now.strftime('%y')}{months[now.month-1]}{now.strftime('%d')}"
+        today_prefix = get_eastern_today_date_prefix(days_offset=0)
+        tomorrow_prefix = get_eastern_today_date_prefix(days_offset=1)
 
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{self.base_url}{markets_path}"
 
-        # Only query today's markets (tomorrow's are tracked via lifecycle events)
-        event_tickers = [f"{s}-{today_prefix}" for s in series_list]
+        # Query markets for today and tomorrow (tomorrow's may already be created)
+        event_tickers = [f"{s}-{today_prefix}" for s in series_list] + \
+                         [f"{s}-{tomorrow_prefix}" for s in series_list]
 
         async def _fetch_event_markets(event_ticker: str):
             """Fetch markets for one event (no pagination needed, <100 per event)."""
@@ -187,7 +186,7 @@ class LiveTradeExecutor(BaseExecutor):
                 pass
             return []
 
-        # Fetch all 80 events in parallel (40 today + 40 tomorrow)
+        # Fetch all events in parallel
         import asyncio
         results = await asyncio.gather(
             *[_fetch_event_markets(et) for et in event_tickers],
