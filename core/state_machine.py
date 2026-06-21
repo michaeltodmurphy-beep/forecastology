@@ -435,19 +435,22 @@ class TemperatureStrategy:
             if price is None:
                 price = self.cache.get_last_price(ticker)
 
+            rest_data = None
             if price is None and rest_calls_this_cycle < max_rest_per_cycle:
-                price = await self._fetch_market_price_via_rest(ticker)
-                if price is not None:
+                rest_data = await self._fetch_market_data_via_rest(ticker)
+                if rest_data:
+                    price = rest_data.get("price")
                     rest_calls_this_cycle += 1
 
             if price is None:
                 continue
 
-            # Must have a complete order book to evaluate the spread
-            if ob is None or ob.spread is None:
+            if ob is not None and ob.spread is not None:
+                spread = ob.spread
+            elif rest_data and "spread" in rest_data:
+                spread = rest_data["spread"]
+            else:
                 continue
-
-            spread = ob.spread
             bracket.last_price = price
 
             if price < self.config.buy_trigger_price:
@@ -640,7 +643,8 @@ class TemperatureStrategy:
                 last_rest = getattr(bracket, '_last_rest_price_fetch', 0)
                 if now - last_rest >= 60:
                     bracket._last_rest_price_fetch = now
-                    ob = await self._fetch_market_price_via_rest(ticker)
+                    rest_data = await self._fetch_market_data_via_rest(ticker)
+                    ob = rest_data.get("price") if rest_data else None
                 else:
                     ob = None
                 if ob is not None:
@@ -723,7 +727,8 @@ class TemperatureStrategy:
                 ask = ob.best_ask if ob and ob.best_ask is not None else None
                 if ask is None:
                     # Try REST for this market
-                    ask = await self._fetch_market_price_via_rest(ticker)
+                    rest_data = await self._fetch_market_data_via_rest(ticker)
+                    ask = rest_data.get("price") if rest_data else None
                 if ask is not None and ask > best_price:
                     best_price = ask
                     next_bracket_ticker = ticker
@@ -995,11 +1000,10 @@ class TemperatureStrategy:
                        ticker=ticker, event_ticker=event_ticker)
         return None
 
-    async def _fetch_market_price_via_rest(self, ticker: str) -> Optional[int]:
+    async def _fetch_market_data_via_rest(self, ticker: str) -> Optional[dict]:
         """
-        Fetch current market price via Kalshi REST /markets/{ticker} endpoint.
-        Returns price in cents, or None if unavailable.
-        Uses last_price_dollars, yes_ask, or no_ask to derive a YES price.
+        Fetch current market data via Kalshi REST /markets/{ticker} endpoint.
+        Returns dict with price, yes_ask, yes_bid, spread in cents, or None.
         """
         import httpx
         from app.signing import build_auth_headers
@@ -1011,18 +1015,30 @@ class TemperatureStrategy:
                 resp = await client.get(markets_url, headers=rest_headers)
                 if resp.status_code == 200:
                     mkt = resp.json().get("market", {})
-                    # Try last_price_dollars first (most reliable for thin markets)
-                    lp = mkt.get("last_price_dollars")
-                    if lp and float(lp) > 0:
-                        return round(float(lp) * 100)
-                    # Then try yes_ask (may be empty string, not None)
+                    result = {}
+
                     ya = mkt.get("yes_ask")
                     if ya and float(ya) > 0:
-                        return round(float(ya) * 100)
-                    # Finally derive from no_ask: YES price = 100 - NO_ask
-                    na = mkt.get("no_ask")
-                    if na and float(na) > 0:
-                        return 100 - round(float(na) * 100)
+                        result["yes_ask"] = round(float(ya) * 100)
+
+                    yb = mkt.get("yes_bid")
+                    if yb and float(yb) > 0:
+                        result["yes_bid"] = round(float(yb) * 100)
+                    else:
+                        na = mkt.get("no_ask")
+                        if na and float(na) > 0:
+                            result["yes_bid"] = 100 - round(float(na) * 100)
+
+                    lp = mkt.get("last_price_dollars")
+                    if lp and float(lp) > 0:
+                        result["price"] = round(float(lp) * 100)
+                    elif "yes_ask" in result:
+                        result["price"] = result["yes_ask"]
+
+                    if "yes_ask" in result and "yes_bid" in result:
+                        result["spread"] = result["yes_ask"] - result["yes_bid"]
+
+                    return result if result else None
         except Exception:
             pass
         return None
