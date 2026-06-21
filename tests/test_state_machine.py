@@ -187,6 +187,27 @@ async def test_evaluate_watchlist_logs_spread_note(monkeypatch, spread, expected
 
 
 @pytest.mark.asyncio
+async def test_evaluate_watchlist_uses_rest_spread_when_orderbook_missing(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHLAX-26JUN22-B71.5",
+        event_ticker="EVT1",
+        series_ticker="SER1",
+        bracket_label="thin bracket",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"price": 89, "spread": 2})
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    assert bracket.crossed_buy is True
+    assert bracket.last_price == 89
+    strategy._execute_entry.assert_awaited_once_with(bracket)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("avg_entry", "position_quantity", "hedge_price", "expected_qty", "expected_reason"),
     [
