@@ -213,6 +213,8 @@ async def test_evaluate_watchlist_uses_rest_spread_when_orderbook_missing(monkey
     [
         (90, 10, 90, 10, "quantity"),
         (82, 10, 90, 9, "cost"),
+        (0, 10, 90, 9, "cost"),
+        (None, 10, 90, 9, "cost"),
     ],
 )
 async def test_execute_hedge_caps_quantity(monkeypatch, avg_entry, position_quantity, hedge_price, expected_qty, expected_reason):

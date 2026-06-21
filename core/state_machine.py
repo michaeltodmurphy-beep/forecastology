@@ -756,7 +756,8 @@ class TemperatureStrategy:
 
 
         # Calculate expected loss if price continues to stop loss
-        expected_loss = bracket.position_quantity * (bracket.avg_entry - self.config.stop_loss_price)
+        entry_price = bracket.avg_entry or bracket.last_price or self.config.buy_trigger_price
+        expected_loss = bracket.position_quantity * (entry_price - self.config.stop_loss_price)
 
         # Calculate hedge quantity to break even
         hedge_profit_per_contract = 100 - hedge_price
@@ -766,7 +767,7 @@ class TemperatureStrategy:
             raw_hedge_qty = bracket.position_quantity  # fallback
 
         max_by_quantity = bracket.position_quantity
-        original_cost = bracket.position_quantity * bracket.avg_entry
+        original_cost = bracket.position_quantity * entry_price
         max_by_cost = original_cost // hedge_price if hedge_price > 0 else bracket.position_quantity
         capped_hedge_qty = min(raw_hedge_qty, max_by_quantity, max_by_cost)
         hedge_qty = max(capped_hedge_qty, 1)
