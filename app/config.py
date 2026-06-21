@@ -15,12 +15,12 @@ class AppConfig(BaseSettings):
     mysql_database_url: str = 'mysql+aiomysql://user:pass@localhost:3306/forecastology'
     trading_mode: Literal['PAPER', 'LIVE'] = 'PAPER'
     initial_contract_count: int = 1
-    monitor_start_price: int = 80
-    buy_trigger_price: int = 85
-    spread_monitor_price: int = 90
-    minimum_spread: int = 4
-    hedge_trigger_price: int = 50
-    stop_loss_price: int = 25
+    monitor_start_price: int
+    buy_trigger_price: int
+    spread_monitor_price: int
+    minimum_spread: int
+    hedge_trigger_price: int
+    stop_loss_price: int
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
