@@ -294,6 +294,9 @@ async def test_handle_lifecycle_ignores_non_today_event_markets(monkeypatch):
             }
 
     class FakeLifecycleClient:
+        def __init__(self, **_kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 

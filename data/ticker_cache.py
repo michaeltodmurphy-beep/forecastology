@@ -34,7 +34,7 @@ class TickerCache:
         for entry in yes_fp:
             price_dollars = float(entry[0])
             qty = float(entry[1])
-            price_cents = int(price_dollars * 100)
+            price_cents = round(price_dollars * 100)
             if qty > 0:
                 yes_bids.append(OrderBookLevel(price=price_cents, quantity=int(qty), order_count=0))
         
@@ -44,7 +44,7 @@ class TickerCache:
         for entry in no_fp:
             price_dollars = float(entry[0])
             qty = float(entry[1])
-            yes_ask_price = 100 - int(price_dollars * 100)
+            yes_ask_price = 100 - round(price_dollars * 100)
             if qty > 0:
                 yes_asks.append(OrderBookLevel(price=yes_ask_price, quantity=int(qty), order_count=0))
         
@@ -67,7 +67,7 @@ class TickerCache:
         if price_dollars is None or delta_fp is None or side is None:
             return
             
-        price_cents = int(float(price_dollars) * 100)
+        price_cents = round(float(price_dollars) * 100)
         delta_qty = int(float(delta_fp))  # can be negative
         
         if side == "yes":

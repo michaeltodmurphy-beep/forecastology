@@ -170,6 +170,7 @@ class TemperatureStrategy:
                     if entry > 0:
                         bracket.avg_entry = entry
                         bracket.last_price = entry
+                    self.active_positions[ticker] = bracket
                     logger.info("strategy.restored_live_position", ticker=ticker,
                                 qty=qty, entry=entry)
             except Exception as e:
@@ -344,7 +345,7 @@ class TemperatureStrategy:
                     headers = build_auth_headers(private_key, self.config.kalshi_api_key, "GET", "/trade-api/v2/markets")
                     url = f"{self.config.rest_base_url}/trade-api/v2/markets"
                     try:
-                        async with httpx.AsyncClient() as client:
+                        async with httpx.AsyncClient(timeout=5.0) as client:
                             resp = await client.get(url, headers=headers, params={"event_ticker": event_ticker, "limit": 100})
                             if resp.status_code in (200, 201):
                                 all_markets = resp.json().get("markets", [])
@@ -382,9 +383,11 @@ class TemperatureStrategy:
         """
         while self._running:
             try:
-                await self._evaluate_watchlist()       # Phase A -> B
-                await self._evaluate_held_positions()  # Phase C
-                await self._log_periodic_snapshot()
+                await asyncio.wait_for(self._evaluate_watchlist(), timeout=30.0)
+                await asyncio.wait_for(self._evaluate_held_positions(), timeout=30.0)
+                await asyncio.wait_for(self._log_periodic_snapshot(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.error("strategy.loop_timeout", msg="A strategy step timed out and was skipped")
             except Exception as e:
                 logger.error("strategy.loop_error", error=str(e), exc_info=True)
             await asyncio.sleep(1)
@@ -570,7 +573,8 @@ class TemperatureStrategy:
 
         try:
             api_positions = await self.executor.get_positions()
-        except Exception:
+        except Exception as e:
+            logger.error("phase.c.get_positions_failed", error=str(e))
             return
 
         for ticker, bracket in list(self.active_positions.items()):
@@ -1011,25 +1015,25 @@ class TemperatureStrategy:
         markets_url = f"{self.config.rest_base_url}{markets_path}"
         try:
             rest_headers = build_auth_headers(self._private_key, self.config.kalshi_api_key, "GET", markets_path)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(markets_url, headers=rest_headers)
                 if resp.status_code == 200:
                     mkt = resp.json().get("market", {})
                     result = {}
 
-                    ya = mkt.get("yes_ask")
+                    ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
                     if ya and float(ya) > 0:
                         result["yes_ask"] = round(float(ya) * 100)
 
-                    yb = mkt.get("yes_bid")
+                    yb = mkt.get("yes_bid_dollars") or mkt.get("yes_bid")
                     if yb and float(yb) > 0:
                         result["yes_bid"] = round(float(yb) * 100)
                     else:
-                        na = mkt.get("no_ask")
+                        na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
                         if na and float(na) > 0:
                             result["yes_bid"] = 100 - round(float(na) * 100)
 
-                    lp = mkt.get("last_price_dollars")
+                    lp = mkt.get("last_price_dollars") or mkt.get("last_price")
                     if lp and float(lp) > 0:
                         result["price"] = round(float(lp) * 100)
                     elif "yes_ask" in result:
@@ -1039,8 +1043,8 @@ class TemperatureStrategy:
                         result["spread"] = result["yes_ask"] - result["yes_bid"]
 
                     return result if result else None
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("rest.fetch_failed", ticker=ticker, error=str(e))
         return None
 
     async def _log_periodic_snapshot(self):
