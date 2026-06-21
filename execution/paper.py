@@ -1,6 +1,7 @@
 # execution/paper.py
 import time
 import structlog
+from typing import Optional
 from execution.base import BaseExecutor, ExecutionResult
 from core.types import OrderRequest, OrderSide
 from data.ticker_cache import TickerCache
@@ -20,7 +21,7 @@ class PaperTradeExecutor(BaseExecutor):
         self.balance_cents = initial_balance_cents
         self.positions: dict[str, dict] = {}
 
-    async def buy_yes(self, order: OrderRequest) -> ExecutionResult:
+    async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         # Simulate: fill at the lowest available ask from cache
         ob = self.ticker_cache.get_orderbook(order.market_ticker)
         fill_price = order.price  # default to requested price
@@ -175,4 +176,12 @@ class PaperTradeExecutor(BaseExecutor):
         return all_markets
 
     async def get_positions(self) -> dict[str, dict]:
-        return self.positions
+        result = {}
+        for ticker, pos in self.positions.items():
+            entry_price_dollars = pos.get("avg_entry_price", 0) / 100
+            result[ticker] = {
+                **pos,
+                "average_fill_cost_dollars": f"{entry_price_dollars:.4f}",
+                "position_fp": str(pos.get("quantity", 0)),
+            }
+        return result

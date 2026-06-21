@@ -3,6 +3,7 @@ import json
 import uuid
 import httpx
 import structlog
+from typing import Optional
 from app.signing import load_private_key, build_auth_headers
 from execution.base import BaseExecutor, ExecutionResult
 from core.types import OrderRequest, OrderSide
@@ -29,23 +30,19 @@ class LiveTradeExecutor(BaseExecutor):
     def _headers(self, method: str, path: str) -> dict:
         return build_auth_headers(self._private_key, self.api_key, method, path)
 
-    async def buy_yes(self, order: OrderRequest) -> ExecutionResult:
+    async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
-        payload = order.to_kalshi_payload()
+        payload = order.to_kalshi_payload(max_price)
         logger.info("live.buy_yes_payload", ticker=order.market_ticker,
                      payload=json.dumps(payload), price=order.price)
         headers = self._headers("POST", path)
         headers["Content-Type"] = "application/json"
-        
-        # Log raw request for debugging
-        logger.info("live.buy_yes_raw", ticker=order.market_ticker,
-                    url=url, payload=json.dumps(payload),
-                    auth_header=json.dumps(headers.get("Kalshi-Auth",""))[:200])
 
         try:
-            resp = await self._client.post(url, json=payload, headers=headers)
-            data = resp.json()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                data = resp.json()
 
             if resp.status_code in (200, 201):
                 fill = data.get("fill", {})
@@ -86,19 +83,14 @@ class LiveTradeExecutor(BaseExecutor):
     async def sell_yes(self, order: OrderRequest) -> ExecutionResult:
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
-        payload = order.to_kalshi_payload()
-        # For selling YES contracts, use action="sell" with side="yes"
-        payload["action"] = "sell"
-        # Ensure count is present (Kalshi validates this strictly)
-        if "count" not in payload or not payload.get("count"):
-            payload["count"] = order.quantity
-        # Add the count_fp as string pennies as required by Kalshi sell API
-        payload["count_fp"] = f"{payload.get('count', order.quantity)}.00"
+        payload = order.to_kalshi_payload()  # side="offer" for selling
         headers = self._headers("POST", path)
+        headers["Content-Type"] = "application/json"
 
         try:
-            resp = await self._client.post(url, json=payload, headers=headers)
-            data = resp.json()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                data = resp.json()
 
             if resp.status_code in (200, 201):
                 fill = data.get("fill", {})
@@ -177,52 +169,35 @@ class LiveTradeExecutor(BaseExecutor):
         markets_path = "/trade-api/v2/markets"
         markets_url = f"{self.base_url}{markets_path}"
 
-        async def _fetch_all_series_markets(series: str):
-            """Fetch ALL markets for a series via pagination, filter to today+ only."""
-            collected = []
-            cursor = None
-            while True:
-                headers = self._headers("GET", markets_path)
-                params = {"series_ticker": series, "limit": 100}
-                if cursor:
-                    params["cursor"] = cursor
-                try:
-                    resp = await self._client.get(markets_url, headers=headers, params=params)
-                    if resp.status_code not in (200, 201):
-                        break
-                    mkts = resp.json().get("markets", [])
-                    if not mkts:
-                        break
-                    for m in mkts:
-                        ticker = m.get("ticker", "")
-                        if not ticker:
-                            continue
-                        try:
-                            parts = ticker.split("-")
-                            if len(parts) >= 2:
-                                ticker_date = parts[1]
-                                if ticker_date >= today_prefix:
-                                    collected.append(m)
-                        except Exception:
-                            collected.append(m)
-                    cursor = resp.json().get("cursor")
-                    if not cursor:
-                        break
-                except Exception:
-                    break
-            return collected
+        # Only query today's markets (tomorrow's are tracked via lifecycle events)
+        event_tickers = [f"{s}-{today_prefix}" for s in series_list]
 
-        # Fetch all 40 series in parallel
+        async def _fetch_event_markets(event_ticker: str):
+            """Fetch markets for one event (no pagination needed, <100 per event)."""
+            headers = self._headers("GET", markets_path)
+            try:
+                resp = await self._client.get(
+                    markets_url, headers=headers,
+                    params={"event_ticker": event_ticker, "limit": 100}
+                )
+                if resp.status_code in (200, 201):
+                    return resp.json().get("markets", [])
+            except Exception:
+                pass
+            return []
+
+        # Fetch all 80 events in parallel (40 today + 40 tomorrow)
         import asyncio
         results = await asyncio.gather(
-            *[_fetch_all_series_markets(s) for s in series_list],
+            *[_fetch_event_markets(et) for et in event_tickers],
             return_exceptions=True
         )
         for mkts in results:
             if isinstance(mkts, list):
                 all_markets.extend(mkts)
 
-        logger.info("live.found_temp_markets", count=len(all_markets))
+        logger.info("live.found_temp_markets", count=len(all_markets),
+                     event_count=len(event_tickers))
         return all_markets
 
     async def get_positions(self) -> dict[str, dict]:
@@ -235,11 +210,31 @@ class LiveTradeExecutor(BaseExecutor):
         for pos in data.get("market_positions", []):
             ticker = pos.get("ticker", "")
             if ticker:
+                # Parse position quantity — can be an int or string float
                 count = pos.get("position_fp", "0")
                 try:
                     pos["count"] = int(float(count))
                 except (ValueError, TypeError):
                     pos["count"] = 0
+                # Normalize average fill cost: Kalshi may return it as
+                # "average_fill_cost_dollars" (e.g. "0.8400") or in cents
+                cost_str = pos.get("average_fill_cost_dollars", "")
+                if cost_str:
+                    try:
+                        pos["average_fill_cost_cents"] = round(float(cost_str) * 100)
+                    except (ValueError, TypeError):
+                        pos["average_fill_cost_cents"] = 0
+                else:
+                    pos["average_fill_cost_cents"] = 0
+                # Extract current market price from last_price field (in dollars)
+                last_price_str = pos.get("last_price", "")
+                if last_price_str:
+                    try:
+                        pos["last_price_cents"] = round(float(last_price_str) * 100)
+                    except (ValueError, TypeError):
+                        pos["last_price_cents"] = 0
+                else:
+                    pos["last_price_cents"] = 0
                 pos["market_ticker"] = ticker
                 positions[ticker] = pos
         return positions
