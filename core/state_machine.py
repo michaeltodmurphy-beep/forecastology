@@ -474,6 +474,11 @@ class TemperatureStrategy:
 
             bracket.last_price = price
 
+            # Skip near-dead brackets early (quietly) — they will never reach buy_trigger.
+            # Data still flows via WebSocket so hedge/top-off logic is unaffected.
+            if price <= self.config.eval_price_floor:
+                continue
+
             if price < self.config.buy_trigger_price:
                 logger.debug("phase.b.below_trigger", ticker=ticker, price=price,
                              buy_trigger=self.config.buy_trigger_price)

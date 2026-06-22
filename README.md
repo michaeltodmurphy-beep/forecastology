@@ -130,6 +130,14 @@ A safety cap prevents a single event from draining the account. Configured via `
 - Basis: **gross spend** (sum of all BUY and HEDGE costs). Stop-loss proceeds do NOT restore headroom.
 - When any hedge or top-off order would push gross spend over the cap: the order is not placed, `phase.c.hedge_cap_reached` is logged (with `event_ticker`, `gross_spend_cents`, `max_event_spend_cents`, and `attempted_spend`), and that event stops receiving hedge/top-off orders for the remainder of the day. Other events are unaffected.
 
+### Watchlist Evaluation Floor (`EVAL_PRICE_FLOOR`)
+Reduces log noise and speeds up the watchlist loop by silently skipping brackets whose YES ask price is at or below the floor. Configured via `EVAL_PRICE_FLOOR` (default `5` cents; dollar format `0.05` is also accepted).
+
+- Brackets priced ≤ floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Their `last_price` is still updated.
+- Brackets priced above the floor but below `BUY_TRIGGER_PRICE` continue to emit `phase.b.below_trigger` exactly as before.
+- **WebSocket subscriptions are unchanged**: all market data keeps flowing so hedge/top-off logic (`_execute_hedge`, `_execute_topoff`, `_find_next_bracket`) can still see every sibling bracket in an event.
+- The default 5¢ floor only suppresses truly inert brackets; any bracket that could realistically recover toward the 82¢ buy trigger remains fully evaluated and logged.
+
 ## Security
 
 - **Never commit your private key** (`*.pem` is in `.gitignore`)

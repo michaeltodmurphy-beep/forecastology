@@ -857,3 +857,99 @@ async def test_independent_events_high_and_low_tracked_separately(monkeypatch):
     # LOW event remains unaffected — no ledger or hedge state
     assert low_event not in strategy._hedged_events
     assert low_event not in strategy._cap_reached_events
+
+
+@pytest.mark.asyncio
+async def test_evaluate_watchlist_skips_below_floor_quietly(monkeypatch):
+    """MONITORING bracket with price <= eval_price_floor is skipped without logging below_trigger."""
+    import core.state_machine as state_machine
+
+    debug_logged = []
+    monkeypatch.setattr(state_machine.logger, "debug", lambda event, **kwargs: debug_logged.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTPHX-26JUN22-T98",
+        event_ticker="EVT1",
+        series_ticker="SER1",
+        bracket_label="near-dead bracket",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    # yes_ask=1 <= eval_price_floor=5
+    strategy.cache.update_quote(bracket.market_ticker, 0, 1)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    # last_price should still be updated
+    assert bracket.last_price == 1
+    # No below_trigger log emitted for floor-skipped brackets
+    events = [event for event, _ in debug_logged]
+    assert "phase.b.below_trigger" not in events
+    # Entry must not have been triggered
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_watchlist_logs_below_trigger_above_floor(monkeypatch):
+    """MONITORING bracket with price above floor but below buy_trigger still logs below_trigger."""
+    import core.state_machine as state_machine
+
+    debug_logged = []
+    monkeypatch.setattr(state_machine.logger, "debug", lambda event, **kwargs: debug_logged.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTDC-26JUN22-T71",
+        event_ticker="EVT1",
+        series_ticker="SER1",
+        bracket_label="live-but-below-trigger bracket",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    # yes_ask=45 > eval_price_floor=5, but < buy_trigger=82
+    strategy.cache.update_quote(bracket.market_ticker, 2, 45)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    # below_trigger should be logged for above-floor brackets
+    events = [event for event, _ in debug_logged]
+    assert "phase.b.below_trigger" in events
+    # Entry must not have been triggered
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price,expect_log", [
+    (5, False),   # exactly at floor — silently skipped
+    (6, True),    # one cent above floor — logged as below_trigger
+])
+async def test_evaluate_watchlist_floor_boundary(monkeypatch, price, expect_log):
+    """Verify the floor boundary: price==floor is skipped; price==floor+1 is logged."""
+    import core.state_machine as state_machine
+
+    debug_logged = []
+    monkeypatch.setattr(state_machine.logger, "debug", lambda event, **kwargs: debug_logged.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTDC-26JUN22-B88.5",
+        event_ticker="EVT1",
+        series_ticker="SER1",
+        bracket_label="boundary bracket",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 0, price)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    events = [event for event, _ in debug_logged]
+    if expect_log:
+        assert "phase.b.below_trigger" in events
+    else:
+        assert "phase.b.below_trigger" not in events
+    strategy._execute_entry.assert_not_awaited()
