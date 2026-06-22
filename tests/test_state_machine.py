@@ -1048,7 +1048,7 @@ async def test_phase_c_price_from_yes_bid_not_stale_last_price(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase_c_stop_loss_skips_when_cost_basis_unknown(monkeypatch):
+async def test_phase_c_stop_loss_fires_when_cost_basis_unknown(monkeypatch):
     import core.state_machine as state_machine
 
     warn_logged = []
@@ -1073,6 +1073,7 @@ async def test_phase_c_stop_loss_skips_when_cost_basis_unknown(monkeypatch):
     strategy.brackets[ticker] = bracket
     strategy.active_positions[ticker] = bracket
     strategy.cache.update_quote(ticker, 25, 26)
+    strategy.executor.succeed = True
 
     monkeypatch.setattr(strategy.executor, "get_positions",
                         _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 25}}))
@@ -1080,9 +1081,55 @@ async def test_phase_c_stop_loss_skips_when_cost_basis_unknown(monkeypatch):
     await strategy._evaluate_held_positions()
 
     events = [event for event, _ in warn_logged]
-    assert "phase.c.stop_loss_skipped_no_cost_basis" in events
-    assert "phase.c.stop_loss_triggered" not in events
-    assert len(strategy.executor.orders) == 0
+    assert "phase.c.stop_loss_triggered" in events
+    assert "phase.c.stop_loss_skipped_no_cost_basis" not in events
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1
+    assert sell_orders[0].price == 1  # sells at 1¢ to guarantee fill
+
+
+@pytest.mark.asyncio
+async def test_phase_c_stop_loss_fires_with_zero_entry_seattle_scenario(monkeypatch):
+    """Regression test: replays the exact production failure where KXHIGHTSEA-26JUN22-B83.5
+    had avg_entry=0 and rode from 35¢ to 1¢ because the stop-loss was skipped."""
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTSEA-26JUN22-B83.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXHIGHTSEA-26JUN22",
+        series_ticker="KXHIGHTSEA",
+        bracket_label="sea high 83.5",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+        last_price=30,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 29, 30)
+    strategy.executor.succeed = True
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 29}}))
+
+    await strategy._evaluate_held_positions()
+
+    events = [event for event, _ in warn_logged]
+    assert "phase.c.stop_loss_triggered" in events
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1
+    assert sell_orders[0].price == 1  # sells at 1¢ to guarantee fill
 
 
 @pytest.mark.asyncio

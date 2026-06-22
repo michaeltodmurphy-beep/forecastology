@@ -817,12 +817,10 @@ class TemperatureStrategy:
                                    last_price=current_price,
                                    qty=bracket.position_quantity)
                     continue
-                if bracket.avg_entry is None or bracket.avg_entry <= 0:
-                    logger.warning("phase.c.stop_loss_skipped_no_cost_basis",
-                                   ticker=ticker,
-                                   last_price=current_price,
-                                   qty=bracket.position_quantity)
-                    continue
+                # NOTE: cost-basis guard intentionally removed. A hard stop is an absolute
+                # price floor: if price <= stop_loss_price we exit regardless of whether the
+                # entry price is known. _execute_stop_loss sells position_quantity at 1¢ and
+                # does not require avg_entry.
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
                                last_price=current_price, stop_loss=self.config.stop_loss_price)
                 await self._execute_stop_loss(bracket)
