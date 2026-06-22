@@ -27,6 +27,7 @@ class AppConfig(BaseSettings):
     hedge_max_factor: float = 5.0
     eval_price_floor: int = 5
     hedge_buy: int = 60
+    dry_run: bool = False
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
@@ -61,4 +62,6 @@ class AppConfig(BaseSettings):
         Prices in .env may be in dollar format (e.g. 0.85) or already in cents.
         Field validators convert them to integer cents automatically.
         """
-        return cls()
+        dry_run_raw = os.getenv("DRY_RUN", "")
+        dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
+        return cls(dry_run=dry_run)

@@ -45,9 +45,10 @@ class LiveTradeExecutor(BaseExecutor):
     NEVER connects to demo/sandbox URLs.
     """
 
-    def __init__(self, base_url: str, api_key: str, private_key_path: str):
+    def __init__(self, base_url: str, api_key: str, private_key_path: str, dry_run: bool = False):
         self.base_url = base_url
         self.api_key = api_key
+        self.dry_run = dry_run
         self._private_key = load_private_key(private_key_path)
         self._client = httpx.AsyncClient(timeout=30.0)
 
@@ -55,6 +56,27 @@ class LiveTradeExecutor(BaseExecutor):
         return build_auth_headers(self._private_key, self.api_key, method, path)
 
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
+        if self.dry_run:
+            logger.warning(
+                "live.dry_run_skip_order",
+                ticker=order.market_ticker,
+                side="buy_yes",
+                price=order.price,
+                quantity=order.quantity,
+                max_price=max_price,
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="DRY_RUN",
+                notes="dry_run",
+            )
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
         payload = order.to_kalshi_payload(max_price)
@@ -118,6 +140,26 @@ class LiveTradeExecutor(BaseExecutor):
             )
 
     async def sell_yes(self, order: OrderRequest) -> ExecutionResult:
+        if self.dry_run:
+            logger.warning(
+                "live.dry_run_skip_order",
+                ticker=order.market_ticker,
+                side="sell_yes",
+                price=order.price,
+                quantity=order.quantity,
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="DRY_RUN",
+                notes="dry_run",
+            )
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
         payload = order.to_kalshi_payload(
@@ -243,16 +285,40 @@ class LiveTradeExecutor(BaseExecutor):
                     pos["count"] = int(float(count))
                 except (ValueError, TypeError):
                     pos["count"] = 0
-                # Normalize average fill cost: Kalshi may return it as
-                # "average_fill_cost_dollars" (e.g. "0.8400") or in cents
+                cost_cents = 0
+                cost_source = "none"
+
                 cost_str = pos.get("average_fill_cost_dollars", "")
                 if cost_str:
                     try:
-                        pos["average_fill_cost_cents"] = round(float(cost_str) * 100)
+                        parsed_dollars = round(float(cost_str) * 100)
+                        if parsed_dollars > 0:
+                            cost_cents = parsed_dollars
+                            cost_source = "average_fill_cost_dollars"
                     except (ValueError, TypeError):
-                        pos["average_fill_cost_cents"] = 0
-                else:
-                    pos["average_fill_cost_cents"] = 0
+                        pass
+
+                if cost_cents <= 0:
+                    average_fill_cost = _to_cents_int(pos.get("average_fill_cost"))
+                    if average_fill_cost > 0:
+                        cost_cents = average_fill_cost
+                        cost_source = "average_fill_cost"
+
+                if cost_cents <= 0 and pos["count"] > 0:
+                    for total_field in ("market_exposure", "total_traded"):
+                        total_cents = _to_cents_int(pos.get(total_field))
+                        if total_cents > 0:
+                            cost_cents = round(total_cents / pos["count"])
+                            cost_source = total_field
+                            break
+
+                pos["average_fill_cost_cents"] = cost_cents if cost_cents > 0 else 0
+                logger.debug(
+                    "live.position_cost_basis",
+                    ticker=ticker,
+                    source=cost_source,
+                    cents=pos["average_fill_cost_cents"],
+                )
                 # Extract current market price from last_price field (in dollars)
                 last_price_str = pos.get("last_price", "")
                 if last_price_str:

@@ -13,6 +13,7 @@ os.environ['INITIAL_CONTRACT_COUNT'] = '1'
 os.environ['MINIMUM_SPREAD'] = '0.04'
 os.environ['MONITOR_START_PRICE'] = '0.80'
 os.environ['SPREAD_MONITOR_PRICE'] = '0.90'
+os.environ['DRY_RUN'] = 'true'
 
 
 class TestAppConfig:
@@ -31,3 +32,4 @@ class TestAppConfig:
         assert cfg.minimum_spread == 4
         assert cfg.monitor_start_price == 80
         assert cfg.spread_monitor_price == 90
+        assert cfg.dry_run is True

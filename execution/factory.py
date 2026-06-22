@@ -11,6 +11,7 @@ def create_executor(
     rest_base_url: str,
     api_key: str,
     private_key_path: str,
+    dry_run: bool = False,
 ) -> BaseExecutor:
     """Factory that returns the appropriate executor based on trading mode."""
     if trading_mode.upper() == "PAPER":
@@ -21,6 +22,6 @@ def create_executor(
             private_key_path=private_key_path,
         )
     elif trading_mode.upper() == "LIVE":
-        return LiveTradeExecutor(rest_base_url, api_key, private_key_path)
+        return LiveTradeExecutor(rest_base_url, api_key, private_key_path, dry_run=dry_run)
     else:
         raise ValueError(f"Unknown trading mode: {trading_mode}")

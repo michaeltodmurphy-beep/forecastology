@@ -20,23 +20,29 @@ class FakeResponse:
 
 
 class FakeClient:
-    def __init__(self, responses):
-        self.responses = list(responses)
+    def __init__(self, responses=None, get_responses=None):
+        self.responses = list(responses or [])
+        self.get_responses = list(get_responses or [])
         self.post_payloads = []
+        self.get_urls = []
 
     async def post(self, _url, json=None, headers=None):
         self.post_payloads.append(json)
         return self.responses.pop(0)
 
+    async def get(self, url, headers=None):
+        self.get_urls.append(url)
+        return self.get_responses.pop(0)
+
     async def aclose(self):
         return None
 
 
-def _make_executor(monkeypatch, responses):
+def _make_executor(monkeypatch, responses=None, *, get_responses=None, dry_run=False):
     monkeypatch.setattr(live, "load_private_key", lambda _path: object())
     monkeypatch.setattr(live, "build_auth_headers", lambda *_args, **_kwargs: {})
-    executor = LiveTradeExecutor("https://example.test", "test-key", "unused.pem")
-    executor._client = FakeClient(responses)
+    executor = LiveTradeExecutor("https://example.test", "test-key", "unused.pem", dry_run=dry_run)
+    executor._client = FakeClient(responses, get_responses)
     return executor
 
 
@@ -103,3 +109,78 @@ async def test_buy_yes_partial_fill_uses_actual_fill_fields(monkeypatch):
     assert result.fill_quantity == 1
     assert result.fill_price == 82
     assert result.total_cost_cents == 82
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("position_payload", "expected_cost", "expected_source"),
+    [
+        (
+            {
+                "ticker": "TICKER",
+                "position_fp": "2.00",
+                "market_exposure": "164",
+                "last_price": "0.35",
+            },
+            82,
+            "market_exposure",
+        ),
+        (
+            {
+                "ticker": "TICKER",
+                "position_fp": "2.00",
+                "average_fill_cost_dollars": "0.8400",
+                "last_price": "0.35",
+            },
+            84,
+            "average_fill_cost_dollars",
+        ),
+        (
+            {
+                "ticker": "TICKER",
+                "position_fp": "2.00",
+                "last_price": "0.35",
+            },
+            0,
+            "none",
+        ),
+    ],
+)
+async def test_get_positions_cost_basis_fallbacks(monkeypatch, position_payload, expected_cost, expected_source):
+    debug_logged = []
+    monkeypatch.setattr(live.logger, "debug", lambda event, **kwargs: debug_logged.append((event, kwargs)))
+    executor = _make_executor(
+        monkeypatch,
+        get_responses=[FakeResponse(200, {"market_positions": [position_payload]})],
+    )
+
+    positions = await executor.get_positions()
+
+    assert positions["TICKER"]["average_fill_cost_cents"] == expected_cost
+    assert positions["TICKER"]["count"] == 2
+    assert positions["TICKER"]["last_price_cents"] == 35
+    cost_log = next(kwargs for event, kwargs in debug_logged if event == "live.position_cost_basis")
+    assert cost_log["source"] == expected_source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "order", "kwargs"),
+    [
+        ("buy_yes", OrderRequest("TICKER", OrderSide.BUY_YES, 80, 2), {"max_price": 90}),
+        ("sell_yes", OrderRequest("TICKER", OrderSide.SELL_YES, 20, 2), {}),
+    ],
+)
+async def test_dry_run_skips_live_orders(monkeypatch, method_name, order, kwargs):
+    warning_logged = []
+    monkeypatch.setattr(live.logger, "warning", lambda event, **kwargs: warning_logged.append((event, kwargs)))
+    executor = _make_executor(monkeypatch, dry_run=True)
+
+    result = await getattr(executor, method_name)(order, **kwargs)
+
+    assert result.success is False
+    assert result.status == "DRY_RUN"
+    assert result.fill_quantity == 0
+    assert executor._client.post_payloads == []
+    dry_run_log = next(kwargs for event, kwargs in warning_logged if event == "live.dry_run_skip_order")
+    assert dry_run_log["ticker"] == "TICKER"

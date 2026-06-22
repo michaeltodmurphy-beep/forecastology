@@ -1,5 +1,6 @@
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,7 +27,7 @@ class FakeSessionResult:
         self._items = items or []
 
     def scalar_one_or_none(self):
-        return None
+        return self._items[0] if self._items else None
 
     def scalars(self):
         return self
@@ -36,8 +37,9 @@ class FakeSessionResult:
 
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, items=None):
         self.added = []
+        self._items = items or []
 
     def add(self, item):
         self.added.append(item)
@@ -46,7 +48,7 @@ class FakeSession:
         return None
 
     async def execute(self, *_args, **_kwargs):
-        return FakeSessionResult()
+        return FakeSessionResult(self._items)
 
     async def rollback(self):
         return None
@@ -64,8 +66,8 @@ class FakeSessionContext:
 
 
 class FakeDB:
-    def __init__(self):
-        self.session = FakeSession()
+    def __init__(self, items=None):
+        self.session = FakeSession(items)
 
     async def get_session(self):
         return FakeSessionContext(self.session)
@@ -153,13 +155,14 @@ def make_config(**overrides):
         minimum_spread=4,
         hedge_trigger_price=48,
         stop_loss_price=35,
+        dry_run=False,
     )
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
 
 
-def make_strategy(monkeypatch, **config_overrides):
+def make_strategy(monkeypatch, db_items=None, **config_overrides):
     import core.state_machine as state_machine
 
     monkeypatch.setattr(state_machine, "load_private_key", lambda _path: object())
@@ -168,7 +171,7 @@ def make_strategy(monkeypatch, **config_overrides):
         TickerCache(),
         FakeWSManager(),
         FakeExecutor(),
-        FakeDB(),
+        FakeDB(db_items),
     )
 
 
@@ -1045,6 +1048,82 @@ async def test_phase_c_price_from_yes_bid_not_stale_last_price(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_phase_c_stop_loss_skips_when_cost_basis_unknown(monkeypatch):
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTCHI-26JUN22-T59"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTCHI-26JUN22",
+        series_ticker="KXLOWTCHI",
+        bracket_label="chi low 59",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+        last_price=20,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 25, 26)
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 25}}))
+
+    await strategy._evaluate_held_positions()
+
+    events = [event for event, _ in warn_logged]
+    assert "phase.c.stop_loss_skipped_no_cost_basis" in events
+    assert "phase.c.stop_loss_triggered" not in events
+    assert len(strategy.executor.orders) == 0
+
+
+@pytest.mark.asyncio
+async def test_phase_c_stop_loss_skips_resolved_market(monkeypatch):
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    ticker = "KXLOWTSEA-26JUN22-T59"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSEA-26JUN22",
+        series_ticker="KXLOWTSEA",
+        bracket_label="sea low 59",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+        last_price=10,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 1, 2)
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 1}}))
+
+    await strategy._evaluate_held_positions()
+
+    events = [event for event, _ in warn_logged]
+    assert "phase.c.stop_loss_skipped_resolved_market" in events
+    assert "phase.c.stop_loss_triggered" not in events
+    assert len(strategy.executor.orders) == 0
+
+
+@pytest.mark.asyncio
 async def test_phase_c_no_live_price_skips_trading_no_invented_fallback(monkeypatch):
     """
     When no real price is available, log phase.c.no_live_price and skip trading.
@@ -1088,6 +1167,41 @@ async def test_phase_c_no_live_price_skips_trading_no_invented_fallback(monkeypa
 
     # Must NOT have placed any order (no invented price above triggers)
     assert len(strategy.executor.orders) == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_positions_uses_db_cost_basis_when_api_entry_missing(monkeypatch):
+    import core.state_machine as state_machine
+
+    info_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "error", lambda *_a, **_kw: None)
+
+    ticker = "KXLOWTBOS-26JUN22-T59"
+    db_position = SimpleNamespace(
+        market_ticker=ticker,
+        event_ticker="KXLOWTBOS-26JUN22",
+        series_ticker="KXLOWTBOS",
+        quantity=2,
+        avg_entry_price=82,
+        last_price=80,
+        hedge_market_ticker=None,
+        hedge_quantity=0,
+        hedge_pending=0,
+    )
+
+    strategy = make_strategy(monkeypatch, db_items=[db_position], trading_mode="LIVE")
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "average_fill_cost_cents": 0}}))
+
+    await strategy._restore_positions()
+
+    restored = strategy.active_positions[ticker]
+    live_log = next(kwargs for event, kwargs in info_logged if event == "strategy.restored_live_position")
+    assert restored.avg_entry == 82
+    assert live_log["entry"] == 82
+    assert live_log["entry_source"] == "db"
 
 
 @pytest.mark.asyncio
