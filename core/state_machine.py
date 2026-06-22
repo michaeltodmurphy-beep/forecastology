@@ -1153,6 +1153,12 @@ class TemperatureStrategy:
 
     async def _execute_stop_loss(self, bracket: MarketBracket):
         """Execute a stop-loss: sell position at market (1¢) to guarantee fill."""
+        now = asyncio.get_event_loop().time()
+        last_attempt = getattr(bracket, '_last_stop_loss_attempt', 0)
+        if now - last_attempt < 60:
+            return
+        bracket._last_stop_loss_attempt = now
+
         price = 1  # Sell at minimum price to guarantee fill at stop loss
 
         import uuid
@@ -1181,7 +1187,19 @@ class TemperatureStrategy:
             session.add(et)
             await session.commit()
 
-        if result.success:
+        live_count = bracket.position_quantity
+        try:
+            positions = await self.executor.get_positions()
+            live_position = positions.get(bracket.market_ticker)
+            if not live_position:
+                live_count = 0
+            else:
+                live_count = max(int(live_position.get("count", 0) or 0), 0)
+        except Exception as e:
+            logger.warning("phase.c.stop_loss_verify_failed", ticker=bracket.market_ticker, error=str(e))
+            live_count = max(bracket.position_quantity - result.fill_quantity, 0)
+
+        if live_count == 0:
             # Remove from positions table
             async with await self.db.get_session() as session:
                 await session.execute(
@@ -1198,15 +1216,16 @@ class TemperatureStrategy:
             # bought at HEDGE_BUY (60¢) on a subsequent cycle via the secondary loop.
             # The DB row is gone, so in-memory retention is the only state source now.
         else:
-            # Keep the position tracked; retry with a 60-second cooldown.
-            now = asyncio.get_event_loop().time()
-            last_attempt = getattr(bracket, '_last_stop_loss_attempt', 0)
-            if now - last_attempt < 60:
-                return  # wait before retrying
-            bracket._last_stop_loss_attempt = now
-            # Remain in HOLDING phase so we can try again later.
-            logger.warning("phase.c.stop_loss_failed_retry", ticker=bracket.market_ticker,
-                           notes=result.notes, last_price=bracket.last_price)
+            bracket.position_quantity = live_count
+            logger.warning(
+                "phase.c.stop_loss_partial_or_unfilled",
+                ticker=bracket.market_ticker,
+                attempted_qty=order.quantity,
+                filled_qty=result.fill_quantity,
+                remaining_count=live_count,
+                notes=result.notes,
+                last_price=bracket.last_price,
+            )
 
     async def _event_ledger(self, event_ticker: str) -> dict:
         """

@@ -74,7 +74,12 @@ class OrderRequest:
     client_order_id: Optional[str] = None
     is_hedge: bool = False
 
-    def to_kalshi_payload(self, max_price: Optional[int] = None) -> dict:
+    def to_kalshi_payload(
+        self,
+        max_price: Optional[int] = None,
+        time_in_force: Optional[str] = None,
+        reduce_only: bool = False,
+    ) -> dict:
         # New V2 /portfolio/events/orders format
         # side: "bid" for buying YES, "ask" for selling YES
         # price: string dollars (e.g. "0.8900"), count: string (e.g. "1.00")
@@ -96,9 +101,9 @@ class OrderRequest:
             "price": price_str,
             "count": f"{self.quantity}.00",
             "client_order_id": self.client_order_id,
-            "time_in_force": "good_till_canceled",
+            "time_in_force": time_in_force or "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
             "post_only": False,
             "cancel_order_on_pause": False,
-            "reduce_only": False,
+            "reduce_only": reduce_only,
         }
