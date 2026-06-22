@@ -21,6 +21,9 @@ class TestOrderRequest:
         assert p["price"] == "0.8500", f"Expected price=0.8500, got {p['price']}"
         assert "time_in_force" in p
         assert "self_trade_prevention_type" in p
+        assert p["time_in_force"] == "good_till_canceled"
+        assert p["post_only"] is False
+        assert p["reduce_only"] is False
 
     def test_sell_yes_payload(self):
         r = OrderRequest(
@@ -34,6 +37,22 @@ class TestOrderRequest:
         assert p["count"] == "5.00"
         assert p["price"] == "0.3500", f"Expected price=0.3500, got {p['price']}"
         assert "time_in_force" in p
+        assert p["time_in_force"] == "good_till_canceled"
+        assert p["post_only"] is False
+        assert p["reduce_only"] is False
+
+    def test_stop_loss_sell_payload_uses_ioc_and_reduce_only(self):
+        r = OrderRequest(
+            market_ticker="KXLOWTAUS-26JUN16-B70.5",
+            side=OrderSide.SELL_YES,
+            price=1,
+            quantity=2,
+        )
+        p = r.to_kalshi_payload(time_in_force="immediate_or_cancel", reduce_only=True)
+        assert p["side"] == "ask"
+        assert p["time_in_force"] == "immediate_or_cancel"
+        assert p["post_only"] is False
+        assert p["reduce_only"] is True
 
     def test_sell_does_not_use_no_side(self):
         r = OrderRequest(
@@ -50,4 +69,3 @@ class TestOrderRequest:
         from core import types
         source = inspect.getsource(types.OrderRequest.to_kalshi_payload)
         assert "side_str" not in source, "side_str variable should not exist"
-

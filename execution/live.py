@@ -15,6 +15,30 @@ from core.constants import (
 logger = structlog.get_logger(__name__)
 
 
+def _to_cents_int(value) -> int:
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_fill(data: dict) -> tuple[int, int]:
+    fill = data.get("fill") or {}
+    fill_count = _to_cents_int(
+        fill.get("count")
+        or fill.get("filled_count")
+        or data.get("fill_count")
+        or data.get("filled_count")
+    )
+    fill_price = _to_cents_int(
+        fill.get("price")
+        or fill.get("avg_price")
+        or data.get("fill_price")
+        or data.get("avg_price")
+    )
+    return fill_count, fill_price
+
+
 class LiveTradeExecutor(BaseExecutor):
     """
     Routes real orders to the Kalshi Production REST API.
@@ -44,7 +68,21 @@ class LiveTradeExecutor(BaseExecutor):
             data = resp.json()
 
             if resp.status_code in (200, 201):
-                fill = data.get("fill", {})
+                fill_quantity, fill_price = _extract_fill(data)
+                if fill_quantity <= 0:
+                    logger.warning("live.buy_yes_no_fill", ticker=order.market_ticker, response=data)
+                    return ExecutionResult(
+                        success=False,
+                        market_ticker=order.market_ticker,
+                        side="yes",
+                        price=order.price,
+                        quantity=order.quantity,
+                        fill_price=0,
+                        fill_quantity=0,
+                        total_cost_cents=0,
+                        status="NO_FILL",
+                        notes=json.dumps(data),
+                    )
                 order_id = data.get("order_id", "")
                 logger.info("live.buy_yes_filled",
                             ticker=order.market_ticker, price=order.price, qty=order.quantity)
@@ -54,9 +92,9 @@ class LiveTradeExecutor(BaseExecutor):
                     side="yes",
                     price=order.price,
                     quantity=order.quantity,
-                    fill_price=fill.get("price", order.price),
-                    fill_quantity=fill.get("count", order.quantity),
-                    total_cost_cents=fill.get("price", order.price) * fill.get("count", order.quantity),
+                    fill_price=fill_price,
+                    fill_quantity=fill_quantity,
+                    total_cost_cents=fill_price * fill_quantity,
                     order_id=order_id,
                     status="FILLED",
                     notes=json.dumps(data),
@@ -82,7 +120,10 @@ class LiveTradeExecutor(BaseExecutor):
     async def sell_yes(self, order: OrderRequest) -> ExecutionResult:
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
-        payload = order.to_kalshi_payload()  # side="offer" for selling
+        payload = order.to_kalshi_payload(
+            time_in_force="immediate_or_cancel",
+            reduce_only=True,
+        )  # side="ask" for selling YES
         headers = self._headers("POST", path)
         headers["Content-Type"] = "application/json"
 
@@ -91,19 +132,33 @@ class LiveTradeExecutor(BaseExecutor):
             data = resp.json()
 
             if resp.status_code in (200, 201):
-                fill = data.get("fill", {})
+                fill_quantity, fill_price = _extract_fill(data)
+                if fill_quantity <= 0:
+                    logger.warning("live.sell_yes_no_fill", ticker=order.market_ticker, response=data)
+                    return ExecutionResult(
+                        success=False,
+                        market_ticker=order.market_ticker,
+                        side="yes",
+                        price=order.price,
+                        quantity=order.quantity,
+                        fill_price=0,
+                        fill_quantity=0,
+                        total_cost_cents=0,
+                        status="NO_FILL",
+                        notes=json.dumps(data),
+                    )
                 order_id = data.get("order_id", "")
                 logger.info("live.sell_yes_filled",
                             ticker=order.market_ticker, price=order.price, qty=order.quantity)
                 return ExecutionResult(
                     success=True,
                     market_ticker=order.market_ticker,
-                    side="no",
+                    side="yes",
                     price=order.price,
                     quantity=order.quantity,
-                    fill_price=fill.get("price", order.price),
-                    fill_quantity=fill.get("count", order.quantity),
-                    total_cost_cents=-(fill.get("price", order.price) * fill.get("count", order.quantity)),
+                    fill_price=fill_price,
+                    fill_quantity=fill_quantity,
+                    total_cost_cents=-(fill_price * fill_quantity),
                     order_id=order_id,
                     status="FILLED",
                     notes=json.dumps(data),
@@ -113,7 +168,7 @@ class LiveTradeExecutor(BaseExecutor):
                              status=resp.status_code, response=data)
                 return ExecutionResult(
                     success=False, market_ticker=order.market_ticker,
-                    side="no", price=order.price, quantity=order.quantity,
+                    side="yes", price=order.price, quantity=order.quantity,
                     fill_price=0, fill_quantity=0, total_cost_cents=0,
                     status="REJECTED", notes=json.dumps(data),
                 )
@@ -121,7 +176,7 @@ class LiveTradeExecutor(BaseExecutor):
             logger.error("live.sell_yes_error", error=str(e))
             return ExecutionResult(
                 success=False, market_ticker=order.market_ticker,
-                side="no", price=order.price, quantity=order.quantity,
+                side="yes", price=order.price, quantity=order.quantity,
                 fill_price=0, fill_quantity=0, total_cost_cents=0,
                 status="REJECTED", notes=str(e),
             )

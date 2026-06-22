@@ -1084,6 +1084,7 @@ async def test_phase_c_no_live_price_skips_trading_no_invented_fallback(monkeypa
     # Must log no_live_price
     no_price_events = [ev for ev, _ in warn_logged if ev == "phase.c.no_live_price"]
     assert len(no_price_events) == 1
+    strategy._fetch_market_data_via_rest.assert_awaited_once_with(ticker)
 
     # Must NOT have placed any order (no invented price above triggers)
     assert len(strategy.executor.orders) == 0
@@ -1555,8 +1556,16 @@ async def test_dc_disaster_replay(monkeypatch):
     # Reset cooldown so stop-loss fires immediately
     original._last_hedge_attempt = 0
 
-    monkeypatch.setattr(strategy.executor, "get_positions",
-                        _make_fake_get_positions({orig_ticker: {"count": 2, "last_price_cents": 30}}))
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_positions",
+        _make_sequenced_get_positions(
+            [
+                {orig_ticker: {"count": 2, "last_price_cents": 30}},
+                {},
+            ]
+        ),
+    )
 
     await strategy._evaluate_held_positions()
 
@@ -1886,3 +1895,239 @@ async def test_stop_loss_fires_while_event_armed_no_qualifying_sibling(monkeypat
     buy_orders = [o for o, _ in strategy.executor.orders
                   if o.market_ticker == sib_ticker and o.side.name == "BUY_YES"]
     assert len(buy_orders) == 0, "Weak sibling (30¢ < 48¢) must never be bought"
+
+
+def _make_sequenced_get_positions(sequence):
+    calls = {"idx": 0}
+
+    async def _fake():
+        idx = calls["idx"]
+        calls["idx"] += 1
+        if idx >= len(sequence):
+            return sequence[-1]
+        return sequence[idx]
+
+    return _fake
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_no_fill_keeps_position_and_retries(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTSEA-26JUN22-B72.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXHIGHTSEA-26JUN22",
+        series_ticker="KXHIGHTSEA",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 20, 22)
+
+    monkeypatch.setattr(
+        strategy.executor,
+        "sell_yes",
+        AsyncMock(
+            return_value=ExecutionResult(
+                success=False,
+                market_ticker=ticker,
+                side="yes",
+                price=1,
+                quantity=2,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="NO_FILL",
+                notes="{}",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_positions",
+        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 20}}),
+    )
+
+    await strategy._evaluate_held_positions()
+    assert ticker in strategy.active_positions
+    assert strategy.executor.sell_yes.await_count == 1
+
+    bracket._last_stop_loss_attempt = 0
+    await strategy._evaluate_held_positions()
+    assert ticker in strategy.active_positions
+    assert strategy.executor.sell_yes.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_partial_fill_updates_remaining_and_retries(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTSEA-26JUN22-B72.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXHIGHTSEA-26JUN22",
+        series_ticker="KXHIGHTSEA",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 20, 22)
+
+    attempted_quantities = []
+
+    async def _fake_sell(order):
+        attempted_quantities.append(order.quantity)
+        if len(attempted_quantities) == 1:
+            return ExecutionResult(
+                success=True,
+                market_ticker=ticker,
+                side="yes",
+                price=1,
+                quantity=order.quantity,
+                fill_price=6,
+                fill_quantity=1,
+                total_cost_cents=-6,
+                status="FILLED",
+                notes="{}",
+            )
+        return ExecutionResult(
+            success=False,
+            market_ticker=ticker,
+            side="yes",
+            price=1,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            status="NO_FILL",
+            notes="{}",
+        )
+
+    monkeypatch.setattr(strategy.executor, "sell_yes", _fake_sell)
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_positions",
+        _make_fake_get_positions({ticker: {"count": 1, "last_price_cents": 20}}),
+    )
+
+    await strategy._evaluate_held_positions()
+    assert ticker in strategy.active_positions
+    assert bracket.position_quantity == 1
+
+    bracket._last_stop_loss_attempt = 0
+    await strategy._evaluate_held_positions()
+    assert attempted_quantities == [2, 1]
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_closes_only_after_positions_confirm_zero(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTSEA-26JUN22-B72.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXHIGHTSEA-26JUN22",
+        series_ticker="KXHIGHTSEA",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 20, 22)
+
+    monkeypatch.setattr(
+        strategy.executor,
+        "sell_yes",
+        AsyncMock(
+            return_value=ExecutionResult(
+                success=True,
+                market_ticker=ticker,
+                side="yes",
+                price=1,
+                quantity=2,
+                fill_price=6,
+                fill_quantity=2,
+                total_cost_cents=-12,
+                status="FILLED",
+                notes="{}",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_positions",
+        _make_sequenced_get_positions(
+            [
+                {ticker: {"count": 2, "last_price_cents": 20}},
+                {},
+            ]
+        ),
+    )
+
+    await strategy._evaluate_held_positions()
+
+    assert ticker not in strategy.active_positions
+    assert ticker not in strategy.brackets
+    assert bracket.phase == Phase.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_success_but_still_held_keeps_position(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTSEA-26JUN22-B72.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXHIGHTSEA-26JUN22",
+        series_ticker="KXHIGHTSEA",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 20, 22)
+
+    monkeypatch.setattr(
+        strategy.executor,
+        "sell_yes",
+        AsyncMock(
+            return_value=ExecutionResult(
+                success=True,
+                market_ticker=ticker,
+                side="yes",
+                price=1,
+                quantity=2,
+                fill_price=6,
+                fill_quantity=1,
+                total_cost_cents=-6,
+                status="FILLED",
+                notes="{}",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_positions",
+        _make_sequenced_get_positions(
+            [
+                {ticker: {"count": 2, "last_price_cents": 20}},
+                {ticker: {"count": 1, "last_price_cents": 20}},
+            ]
+        ),
+    )
+
+    await strategy._evaluate_held_positions()
+
+    assert ticker in strategy.active_positions
+    assert bracket.position_quantity == 1
