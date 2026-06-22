@@ -26,11 +26,12 @@ class AppConfig(BaseSettings):
     weather_series_prefix: str = 'KXWEATHER'
     hedge_max_factor: float = 5.0
     eval_price_floor: int = 5
+    hedge_buy: int = 60
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
         'hedge_trigger_price', 'stop_loss_price', 'monitor_start_price',
-        'eval_price_floor',
+        'eval_price_floor', 'hedge_buy',
         mode='before'
     )
     @classmethod

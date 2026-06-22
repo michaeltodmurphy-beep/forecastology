@@ -87,6 +87,10 @@ class Position(Base):
     hedge_quantity = Column(Integer, nullable=True)
     last_price = Column(Integer, nullable=True)
     unrealized_pnl = Column(Integer, nullable=True)
+    # 1 = hedge is armed/deferred for this event; 0 or NULL = not armed.
+    # Integer (not Boolean) for broad DB compatibility. Set on the original
+    # bracket's row when a hedge is deferred, cleared on fill or close.
+    hedge_pending = Column(Integer, nullable=True, default=0)
     position_ts = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
