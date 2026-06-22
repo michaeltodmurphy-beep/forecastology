@@ -1,6 +1,7 @@
 # core/state_machine.py
 import asyncio
 import datetime
+import math
 import re
 import structlog
 from typing import Optional
@@ -64,6 +65,14 @@ class TemperatureStrategy:
 
         # Running flag
         self._running = False
+
+        # Per-event hedge state: set of event_tickers that have been hedged at least once.
+        # Only events in this set get top-off / break-even logic applied.
+        self._hedged_events: set[str] = set()
+
+        # Per-event circuit-breaker: once an event's gross spend would exceed
+        # hedge_max_factor * initial_cost, add it here to stop further hedging/top-off.
+        self._cap_reached_events: set[str] = set()
 
     async def start(self):
         """Register WebSocket handlers and start the strategy loop."""
@@ -684,10 +693,29 @@ class TemperatureStrategy:
                             entry=bracket.avg_entry,
                             hedge_trigger=self.config.hedge_trigger_price)
 
-            # Check Hedge trigger FIRST (higher price threshold — triggers before stop loss)
+            # Check Phase-2 top-off for hedged events (fires at HIGH price, before stop-loss/hedge checks)
+            if (bracket.event_ticker in self._hedged_events
+                    and bracket.event_ticker not in self._cap_reached_events
+                    and bracket.phase == Phase.HOLDING):
+                quote = self.cache.get_quote(ticker)
+                topoff_ask = quote[1] if quote else None
+                if (topoff_ask is not None
+                        and topoff_ask >= self.config.buy_trigger_price
+                        and topoff_ask <= self.config.spread_monitor_price):
+                    # Only top-off when all other event brackets are already closed
+                    open_siblings = [t for t, b in self.active_positions.items()
+                                     if b.event_ticker == bracket.event_ticker and t != ticker]
+                    if not open_siblings:
+                        now_topoff = asyncio.get_event_loop().time()
+                        last_topoff = getattr(bracket, '_last_topoff_attempt', 0)
+                        if now_topoff - last_topoff >= 60:
+                            bracket._last_topoff_attempt = now_topoff
+                            await self._execute_topoff(bracket, topoff_ask)
+
+            # Check Hedge trigger (multi-hedge: allowed for HOLDING and HEDGED brackets)
             if (current_price <= self.config.hedge_trigger_price
-                    and bracket.phase == Phase.HOLDING
-                    and not bracket.hedge_market
+                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
+                    and bracket.event_ticker not in self._cap_reached_events
                     and current_price > 0):
                 # Cooldown: only try hedge once per 60 seconds to prevent spam
                 now = asyncio.get_event_loop().time()
@@ -698,8 +726,7 @@ class TemperatureStrategy:
                 logger.info("phase.c.hedge_triggered", ticker=ticker,
                             last_price=current_price, hedge_trigger=self.config.hedge_trigger_price)
                 await self._execute_hedge(bracket)
-                if bracket.phase == Phase.HEDGED:
-                    continue
+                continue
 
             # Check Stop Loss (lower price threshold — only if hedge already placed or price collapsed)
             if current_price <= self.config.stop_loss_price:
@@ -734,16 +761,16 @@ class TemperatureStrategy:
             return
 
         # Find the highest-priced bracket ticker in the same event (most likely to win).
-        # Scan ALL brackets in this event (including crossed_buy ones) for the highest ask.
+        # Use YES ask from ticker-quote cache (authoritative source); fall back to REST yes_ask.
+        # Never use orderbook best_ask because it may be empty when the NO side is ignored.
         best_price = -1
         for ticker, b in self.brackets.items():
             if b.event_ticker == bracket.event_ticker and ticker != bracket.market_ticker:
-                ob = self.cache.get_orderbook(ticker)
-                ask = ob.best_ask if ob and ob.best_ask is not None else None
+                quote = self.cache.get_quote(ticker)
+                ask = quote[1] if quote else None  # yes_ask_cents from ticker channel
                 if ask is None:
-                    # Try REST for this market
                     rest_data = await self._fetch_market_data_via_rest(ticker)
-                    ask = rest_data.get("price") if rest_data else None
+                    ask = rest_data.get("yes_ask") if rest_data else None
                 if ask is not None and ask > best_price:
                     best_price = ask
                     next_bracket_ticker = ticker
@@ -802,6 +829,22 @@ class TemperatureStrategy:
                     raw_qty=raw_hedge_qty,
                     capped_qty=hedge_qty,
                     cap_reason=cap_reason)
+
+        # Circuit-breaker: check per-event spend cap before placing the order
+        order_cost = hedge_qty * hedge_price
+        ledger = await self._event_ledger(bracket.event_ticker)
+        initial_cost = ledger["initial_cost_cents"]
+        if initial_cost > 0:
+            max_event_spend = int(self.config.hedge_max_factor * initial_cost)
+            if ledger["gross_spend_cents"] + order_cost > max_event_spend:
+                self._cap_reached_events.add(bracket.event_ticker)
+                logger.warning("phase.c.hedge_cap_reached",
+                               event_ticker=bracket.event_ticker,
+                               gross_spend_cents=ledger["gross_spend_cents"],
+                               max_event_spend_cents=max_event_spend,
+                               attempted_spend=order_cost)
+                return
+
         import uuid
         order = OrderRequest(
             market_ticker=next_bracket_ticker,
@@ -833,6 +876,9 @@ class TemperatureStrategy:
             bracket.phase = Phase.HEDGED
             bracket.hedge_market = next_bracket_ticker
             bracket.hedge_quantity = result.fill_quantity
+
+            # Register this event as hedged so the ledger/top-off logic activates
+            self._hedged_events.add(bracket.event_ticker)
 
             # Add the hedge bracket as its own position in active_positions
             # so it gets stop-loss monitoring and portfolio tracking.
@@ -946,6 +992,185 @@ class TemperatureStrategy:
             # Remain in HOLDING phase so we can try again later.
             logger.warning("phase.c.stop_loss_failed_retry", ticker=bracket.market_ticker,
                            notes=result.notes, last_price=bracket.last_price)
+
+    async def _event_ledger(self, event_ticker: str) -> dict:
+        """
+        Build a cash ledger for an event from executed_trades.
+
+        Returns a dict with:
+          - initial_cost_cents: total_cost_cents of the first BUY for this event
+          - gross_spend_cents: sum of total_cost_cents for BUY and HEDGE actions
+          - stop_loss_proceeds_cents: sum of proceeds from STOP_LOSS actions
+          - open_tickers: set of market tickers still in active_positions
+          - closed_tickers: set of market tickers known for this event but not open
+        """
+        # Collect all known market tickers for this event from in-memory state
+        event_market_tickers = [
+            t for t, b in self.brackets.items()
+            if b.event_ticker == event_ticker
+        ]
+        for t, b in self.active_positions.items():
+            if b.event_ticker == event_ticker and t not in event_market_tickers:
+                event_market_tickers.append(t)
+
+        if not event_market_tickers:
+            return {
+                "initial_cost_cents": 0,
+                "gross_spend_cents": 0,
+                "stop_loss_proceeds_cents": 0,
+                "open_tickers": set(),
+                "closed_tickers": set(),
+            }
+
+        async with await self.db.get_session() as session:
+            result = await session.execute(
+                select(ExecutedTrade).where(
+                    ExecutedTrade.market_ticker.in_(event_market_tickers)
+                ).order_by(ExecutedTrade.executed_at)
+            )
+            trades = result.scalars().all()
+
+        initial_cost_cents = 0
+        gross_spend_cents = 0
+        stop_loss_proceeds_cents = 0
+        first_buy_seen = False
+
+        for trade in trades:
+            if trade.action in (TradeAction.BUY, TradeAction.HEDGE):
+                cost = trade.total_cost_cents or 0
+                gross_spend_cents += cost
+                if not first_buy_seen and trade.action == TradeAction.BUY:
+                    initial_cost_cents = cost
+                    first_buy_seen = True
+            elif trade.action == TradeAction.STOP_LOSS:
+                # total_cost_cents for a sell is negative (proceeds returned);
+                # abs() gives the cash received.
+                stop_loss_proceeds_cents += abs(trade.total_cost_cents or 0)
+
+        open_tickers = set(self.active_positions.keys()) & set(event_market_tickers)
+        closed_tickers = set(event_market_tickers) - open_tickers
+
+        return {
+            "initial_cost_cents": initial_cost_cents,
+            "gross_spend_cents": gross_spend_cents,
+            "stop_loss_proceeds_cents": stop_loss_proceeds_cents,
+            "open_tickers": open_tickers,
+            "closed_tickers": closed_tickers,
+        }
+
+    async def _execute_topoff(self, bracket: MarketBracket, yes_ask: int):
+        """
+        Phase 2: Top-off the surviving bracket so the event reaches break-even.
+
+        Sizes from the per-event ledger:
+          remaining_deficit = gross_spend_cents - (Q_current * 100)
+          topoff_qty = ceil(remaining_deficit / (100 - yes_ask))
+
+        Only fires when all other brackets in the event are closed and the
+        event's gross spend is not already covered.
+        """
+        event_ticker = bracket.event_ticker
+        ledger = await self._event_ledger(event_ticker)
+
+        gross_spend = ledger["gross_spend_cents"]
+        q_current = bracket.position_quantity
+        remaining_deficit = gross_spend - (q_current * 100)
+
+        if remaining_deficit <= 0:
+            logger.debug("phase.c.topoff_already_break_even",
+                         event_ticker=event_ticker,
+                         gross_spend=gross_spend,
+                         q_current=q_current)
+            return
+
+        profit_per_contract = 100 - yes_ask
+        if profit_per_contract <= 0:
+            logger.warning("phase.c.topoff_price_too_high",
+                           event_ticker=event_ticker,
+                           ticker=bracket.market_ticker,
+                           yes_ask=yes_ask)
+            return
+
+        topoff_qty = math.ceil(remaining_deficit / profit_per_contract)
+
+        # Circuit-breaker check
+        order_cost = topoff_qty * yes_ask
+        initial_cost = ledger["initial_cost_cents"]
+        if initial_cost > 0:
+            max_event_spend = int(self.config.hedge_max_factor * initial_cost)
+            if gross_spend + order_cost > max_event_spend:
+                self._cap_reached_events.add(event_ticker)
+                logger.warning("phase.c.hedge_cap_reached",
+                               event_ticker=event_ticker,
+                               gross_spend_cents=gross_spend,
+                               max_event_spend_cents=max_event_spend,
+                               attempted_spend=order_cost)
+                return
+
+        logger.info("phase.c.topoff_triggered",
+                    ticker=bracket.market_ticker,
+                    event_ticker=event_ticker,
+                    gross_spend=gross_spend,
+                    q_current=q_current,
+                    remaining_deficit=remaining_deficit,
+                    topoff_qty=topoff_qty,
+                    yes_ask=yes_ask)
+
+        order = OrderRequest(
+            market_ticker=bracket.market_ticker,
+            side=OrderSide.BUY_YES,
+            price=yes_ask,
+            quantity=topoff_qty,
+        )
+
+        result = await self.executor.buy_yes(order, max_price=self.config.spread_monitor_price)
+
+        async with await self.db.get_session() as session:
+            et = ExecutedTrade(
+                market_ticker=bracket.market_ticker,
+                action=TradeAction.BUY,
+                side="yes",
+                price=result.fill_price,
+                quantity=result.fill_quantity,
+                total_cost_cents=result.total_cost_cents,
+                trade_mode=self.config.trading_mode,
+                status=TradeStatus.FILLED if result.success else TradeStatus.REJECTED,
+                kalshi_order_id=result.order_id or None,
+                notes=result.notes,
+            )
+            session.add(et)
+            await session.commit()
+
+        if result.success:
+            old_qty = bracket.position_quantity
+            bracket.position_quantity = old_qty + result.fill_quantity
+            if bracket.position_quantity > 0:
+                bracket.avg_entry = (
+                    (bracket.avg_entry * old_qty + result.fill_price * result.fill_quantity)
+                    // bracket.position_quantity
+                )
+
+            logger.info("phase.c.topoff_filled",
+                        ticker=bracket.market_ticker,
+                        qty=result.fill_quantity,
+                        price=result.fill_price,
+                        new_qty=bracket.position_quantity)
+
+            # Sync updated quantity/price to positions table
+            async with await self.db.get_session() as session:
+                existing = await session.execute(
+                    select(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
+                )
+                pos = existing.scalar_one_or_none()
+                if pos:
+                    pos.quantity = bracket.position_quantity
+                    pos.avg_entry_price = bracket.avg_entry
+                    pos.last_price = result.fill_price
+                    await session.commit()
+        else:
+            logger.warning("phase.c.topoff_failed",
+                           ticker=bracket.market_ticker,
+                           notes=result.notes)
 
     async def _find_next_bracket(self, bracket: MarketBracket) -> Optional[str]:
         """

@@ -24,6 +24,7 @@ class AppConfig(BaseSettings):
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
+    hedge_max_factor: float = 5.0
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
