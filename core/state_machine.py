@@ -158,6 +158,7 @@ class TemperatureStrategy:
                 )
             )
             db_positions = result.scalars().all()
+        db_by_ticker = {pos.market_ticker: pos for pos in db_positions}
 
         # In LIVE mode, also fetch positions directly from Kalshi API
         if self.config.trading_mode == "LIVE":
@@ -182,12 +183,23 @@ class TemperatureStrategy:
                     bracket.crossed_buy = True
                     bracket.position_quantity = qty
                     entry = pos_data.get("average_fill_cost_cents", 0) or 0
-                    bracket.avg_entry = entry if entry > 0 else 0   # never None
+                    entry_source = "api"
+                    if entry <= 0:
+                        db_pos = db_by_ticker.get(ticker)
+                        db_entry = (db_pos.avg_entry_price or 0) if db_pos else 0
+                        if db_entry > 0:
+                            entry = db_entry
+                            entry_source = "db"
+                        else:
+                            entry_source = "none"
                     if entry > 0:
+                        bracket.avg_entry = entry
                         bracket.last_price = entry
+                    elif not bracket.avg_entry or bracket.avg_entry <= 0:
+                        bracket.avg_entry = 0
                     self.active_positions[ticker] = bracket
                     logger.info("strategy.restored_live_position", ticker=ticker,
-                                qty=qty, entry=entry)
+                                qty=qty, entry=bracket.avg_entry, entry_source=entry_source)
             except Exception as e:
                 logger.error("strategy.restore_positions_error", error=str(e))
 
@@ -797,6 +809,19 @@ class TemperatureStrategy:
                     self.active_positions.pop(ticker, None)
                     self.brackets.pop(ticker, None)
                     logger.info("phase.c.stop_loss_zero_qty", ticker=ticker)
+                    continue
+                eval_price_floor = getattr(self.config, "eval_price_floor", 2) or 2
+                if current_price <= eval_price_floor:
+                    logger.warning("phase.c.stop_loss_skipped_resolved_market",
+                                   ticker=ticker,
+                                   last_price=current_price,
+                                   qty=bracket.position_quantity)
+                    continue
+                if bracket.avg_entry is None or bracket.avg_entry <= 0:
+                    logger.warning("phase.c.stop_loss_skipped_no_cost_basis",
+                                   ticker=ticker,
+                                   last_price=current_price,
+                                   qty=bracket.position_quantity)
                     continue
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
                                last_price=current_price, stop_loss=self.config.stop_loss_price)
