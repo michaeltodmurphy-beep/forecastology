@@ -62,7 +62,7 @@ Key variables:
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
 | `HEDGE_TRIGGER_PRICE` | YES bid at or below this (cents) triggers the hedge/arm logic (default `0.48`) |
-| `HEDGE_BUY` | Maximum YES ask at which a sibling is bought as a recovery/deferred hedge (default `0.60`) |
+| `HEDGE_BUY` | Recovery threshold: deferred-hedge recovery fires only once a sibling's YES ask rises **strictly above** this value (default `0.60`). Normal immediate hedges (best sibling ≥ `HEDGE_TRIGGER_PRICE` at trigger time) are not gated by this value. |
 | `STOP_LOSS_PRICE` | YES bid at or below this (cents) triggers the guaranteed stop-loss sell (default `0.35`) |
 
 ## Running
@@ -120,23 +120,31 @@ The bot **never manufactures a price** (the old `avg_entry or 83` fallback has b
 #### Full lifecycle (sell loser → buy recovery → top-off to break-even)
 
 1. **Hedge trigger** (`HEDGE_TRIGGER_PRICE`, default 48¢): when a held bracket's YES bid falls
-   to ≤ 48¢, the bot scans siblings in the same event for the highest-priced one with
-   **YES ask ≤ `HEDGE_BUY`** (default 60¢).
-   - If one qualifies → **buy the hedge immediately** at its ask (≤ 60¢). Event is added to
-     `_hedged_events`; top-off logic activates.
-   - If none qualifies (all siblings > 60¢ or unpriced) → **arm the event** by setting
-     `hedge_pending = True` for that event (see *Armed/deferred state* below). Do NOT hedge yet.
+   to ≤ 48¢, the bot scans siblings in the same event for the **best (highest) valid YES ask**
+   (ignoring brackets priced at or below `EVAL_PRICE_FLOOR`):
+
+   | Best sibling YES ask at trigger time | Action |
+   |--------------------------------------|--------|
+   | **≥ `HEDGE_TRIGGER_PRICE` (48¢)** — credible winner exists | **Normal hedge**: buy that sibling immediately using break-even sizing (see below). Event added to `_hedged_events`. |
+   | **< `HEDGE_TRIGGER_PRICE` (48¢)** — all siblings weak, no credible winner | **Deferred**: arm the event (`hedge_pending`). Do NOT buy a weak sibling. Wait for a winner to emerge (see step 2). |
 
 2. **Armed/deferred state** (`hedge_pending`): every subsequent cycle, armed events are
-   re-scanned. As soon as a sibling's YES ask reaches ≤ `HEDGE_BUY` (60¢) → the deferred
-   hedge fires, `hedge_pending` is cleared, and the event enters the hedged state. The
-   60-second per-bracket cooldown prevents spam but does not permanently block.
+   re-scanned. As soon as a sibling's YES ask rises **strictly above `HEDGE_BUY` (60¢)** the
+   deferred hedge (recovery) fires: the single highest-priced qualifying sibling is bought at
+   `initial_contract_count` quantity. `hedge_pending` is cleared and the event enters the hedged
+   state. The 60-second per-event cooldown prevents spam.
+
+   > **Why the two thresholds?** `HEDGE_TRIGGER_PRICE` (48¢) is the "credible winner" bar at
+   > hedge time — if any sibling is already there, hedge immediately. `HEDGE_BUY` (60¢) is the
+   > "risen enough to be a real winner" bar for the deferred path — wait until a sibling climbs
+   > convincingly before committing to the recovery buy.
 
 3. **Stop-loss backstop** (`STOP_LOSS_PRICE`, default 35¢): whenever the original held
-   bracket's price ≤ 35¢, the bot **sells it at market (1¢ limit)** to realize the loss,
-   **regardless of `hedge_pending` or hedge state**. The armed state (`hedge_pending`) is
-   preserved after the stop-loss executes, so a recovery bracket can still be bought at 60¢
-   on a later cycle (via the secondary loop over armed events in `_evaluate_held_positions`).
+   bracket's price ≤ 35¢, the bot **sells it at market (1¢ limit, takes best available bid)**
+   to realize the loss, **regardless of `hedge_pending` or hedge state**. The armed state
+   (`hedge_pending`) is preserved after the stop-loss executes, so a recovery bracket can still
+   be bought on a later cycle once a sibling clears 60¢ (via the secondary loop in
+   `_evaluate_held_positions`, which runs even when `active_positions` is empty).
 
 4. **Top-off at 82¢** (`BUY_TRIGGER_PRICE`): when a bracket in a hedged event recovers to
    YES ask ≥ 82¢ and all other event brackets are closed, the ledger-based top-off fires.
@@ -146,38 +154,40 @@ The bot **never manufactures a price** (the old `avg_entry or 83` fallback has b
    - `remaining_deficit = gross_spend_cents − (Q_current × 100)`
    - `topoff_qty = ⌈remaining_deficit / (100 − yes_ask)⌉`
 
-#### Phase-1 Hedge (triggered at low price)
-When a held bracket's YES price drops to ≤ `HEDGE_TRIGGER_PRICE`, the strategy hedges by
-buying the highest-priced sibling bracket with **YES ask ≤ `HEDGE_BUY`** (default 60¢).
+**Single-order-per-event guarantee**: at most ONE hedge/recovery order is placed per event
+(until the top-off phase). Once an event is in `_hedged_events`, neither the main hedge branch
+nor the secondary recovery loop will place another hedge order; only `_execute_topoff` may
+buy more (into the same surviving bracket).
 
-- **`HEDGE_BUY` gate**: only consider siblings whose YES ask ≤ 60¢. This prevents hedging
-  into a bracket that is already a strong favourite (it would cost too much and offer
-  insufficient recovery upside). If no sibling is within the gate, the event is armed instead.
+**90¢ buy ceiling**: all buys (entry, hedge, recovery, top-off) submit at
+`max_price = SPREAD_MONITOR_PRICE` (default 90¢). Kalshi fills at the best available ask ≤ 90¢.
+If a winner has already risen above 90¢ when detected, the order will not fill at that level —
+do not chase. The stop-loss on the loser still protects the downside.
+
+**Floor guard**: brackets priced at or below `EVAL_PRICE_FLOOR` (default 5¢) are never
+chosen as hedge or recovery targets. This prevents buying dead/settled brackets.
+
+**Ledger honesty**: all sizing and break-even math uses the actual `result.fill_price`
+returned by the executor, never the 90¢ submit ceiling.
+
+#### Phase-1 Hedge (triggered at low price)
+When a held bracket's YES price drops to ≤ `HEDGE_TRIGGER_PRICE`, the strategy applies the
+**conditional hedge rule**:
+
+- **Normal hedge (best sibling ≥ 48¢)**: buy the highest-priced sibling immediately using
+  break-even sizing. Max buy price = `SPREAD_MONITOR_PRICE` (90¢).
+- **Deferred hedge (all siblings < 48¢)**: arm the event (`hedge_pending`); wait for a sibling
+  to rise strictly above `HEDGE_BUY` (60¢), then buy that sibling as a recovery bracket.
+
 - **Pricing**: the hedge target price is the **YES ask** from the ticker-quote cache
   (`yes_ask`/`yes_ask_dollars`), with a REST fallback using the `yes_ask` field only — no
   NO-derived values, no orderbook `best_ask`.
-- **Sizing** (break-even math):
+- **Sizing** (break-even math, normal hedge path only):
   - `expected_loss = Q × (avg_entry − stop_loss_price)`
   - `hedge_qty = ⌈expected_loss / (100 − hedge_price)⌉`
   - Capped to `min(raw_qty, original_qty, original_cost / hedge_price)` and floored at 1.
-- **Multi-hedge**: an event can be hedged multiple times. If the hedge bracket's price also
-  falls, a new hedge fires into the next highest qualifying sibling. The 60-second
-  per-bracket cooldown prevents spam but does not permanently block re-hedging.
 - **Ledger**: once an event is hedged, a per-event cash ledger (sourced from
   `executed_trades`) tracks gross spend and stop-loss proceeds for all brackets in that event.
-
-#### Armed/deferred hedge state (`hedge_pending`)
-When no sibling is available within the `HEDGE_BUY` gate, the event is *armed*:
-
-- `hedge_pending = 1` is set on the original bracket's `positions` row (persists across
-  restarts). The event is also added to the in-memory `_pending_hedge_events` set.
-- On every subsequent evaluation cycle, armed events are re-scanned. As soon as a sibling
-  reaches ≤ `HEDGE_BUY`, the deferred hedge fires and `hedge_pending` is cleared.
-- After the original bracket is stop-lossed (row deleted), the event **stays in
-  `_pending_hedge_events`** in memory. A secondary loop in `_evaluate_held_positions` will
-  place the recovery buy when a sibling qualifies, even with no active original bracket.
-- On restart, `_restore_positions` reads `hedge_pending = 1` rows to repopulate
-  `_pending_hedge_events`.
 
 #### Phase-2 Top-Off (triggered at high price, hedged events only)
 When a bracket in a **hedged** event recovers to YES ask ≥ `BUY_TRIGGER_PRICE`, and all
@@ -195,9 +205,11 @@ the surviving bracket to reach event break-even.
   realized loss automatically.
 
 #### Stop Loss
-If YES bid/ask drops to ≤ `STOP_LOSS_PRICE` (default 35¢), the position is sold at 1¢ (GTC)
-to guarantee a fill. This fires **independently of `hedge_pending`** — an armed/deferred hedge
-never delays or prevents the stop-loss backstop.
+If YES bid/ask drops to ≤ `STOP_LOSS_PRICE` (default 35¢), the position is **sold at 1¢
+(marketable limit — accepts the best available bid)** to guarantee a fill. This fires
+**independently of `hedge_pending`** — an armed/deferred hedge never delays or prevents the
+stop-loss backstop. After the stop-loss executes, the event stays armed so a recovery bracket
+can still be bought once a sibling clears 60¢.
 
 ### Per-Event Circuit-Breaker (`HEDGE_MAX_FACTOR`)
 A safety cap prevents a single event from draining the account. Configured via
