@@ -1090,11 +1090,13 @@ async def test_phase_c_no_live_price_skips_trading_no_invented_fallback(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_hedge_deferred_when_sibling_above_hedge_buy(monkeypatch):
+async def test_hedge_deferred_when_all_siblings_weak(monkeypatch):
     """
-    NYC scenario: original at ≤ hedge_trigger (45¢), only sibling priced at 70¢
-    which is > HEDGE_BUY (60¢).  No order should be placed; event must be added
-    to _pending_hedge_events; phase.c.hedge_deferred must be logged.
+    DC scenario: original at ≤ hedge_trigger (45¢), all siblings priced at 30¢
+    (below HEDGE_TRIGGER_PRICE=48¢) — no credible winner yet.  No order should be
+    placed; event must be added to _pending_hedge_events; phase.c.hedge_deferred
+    must be logged.  (Previously, when the gate was inverted, the bot would have
+    bought this 30¢ sibling — that was the bug.)
     """
     import core.state_machine as state_machine
 
@@ -1124,8 +1126,8 @@ async def test_hedge_deferred_when_sibling_above_hedge_buy(monkeypatch):
     strategy.brackets[original.market_ticker] = original
     strategy.brackets[sibling.market_ticker] = sibling
 
-    # Sibling priced above HEDGE_BUY gate
-    strategy.cache.update_quote(sibling.market_ticker, 68, 70)
+    # Sibling priced below HEDGE_TRIGGER_PRICE (48¢) — no credible winner
+    strategy.cache.update_quote(sibling.market_ticker, 28, 30)
 
     monkeypatch.setattr(strategy, "_find_next_bracket",
                         AsyncMock(return_value=sibling.market_ticker))
@@ -1247,9 +1249,9 @@ async def test_guaranteed_stop_loss_fires_even_when_hedge_deferred(monkeypatch):
     # Event is already armed
     strategy._pending_hedge_events.add(event_ticker)
 
-    # Original collapses below stop_loss; sibling still above HEDGE_BUY
-    strategy.cache.update_quote(ticker, 25, 27)        # bid=25 <= stop_loss=35
-    strategy.cache.update_quote(sibling_ticker, 68, 70)  # above HEDGE_BUY=60
+    # Original collapses below stop_loss; sibling still weak (below HEDGE_TRIGGER=48¢)
+    strategy.cache.update_quote(ticker, 25, 27)           # bid=25 <= stop_loss=35
+    strategy.cache.update_quote(sibling_ticker, 28, 30)   # below HEDGE_TRIGGER=48¢ → stays deferred
 
     monkeypatch.setattr(strategy, "_find_next_bracket",
                         AsyncMock(return_value=sibling_ticker))
@@ -1267,10 +1269,12 @@ async def test_guaranteed_stop_loss_fires_even_when_hedge_deferred(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hedge_buy_gate_55_fires_65_defers(monkeypatch):
+async def test_hedge_gate_fires_when_strong_defers_when_weak(monkeypatch):
     """
-    HEDGE_BUY gate: sibling at 55¢ (≤ 60¢) → hedge fires immediately;
-    sibling at 65¢ (> 60¢) → hedge deferred.
+    Conditional hedge gate:
+    Case A: best sibling at 55¢ (≥ HEDGE_TRIGGER_PRICE=48¢) → hedge fires immediately.
+    Case B: best sibling at 30¢ (< HEDGE_TRIGGER_PRICE=48¢) → all siblings weak,
+            hedge deferred (event armed).
     """
     import core.state_machine as state_machine
 
@@ -1299,7 +1303,7 @@ async def test_hedge_buy_gate_55_fires_65_defers(monkeypatch):
     )
     strategy_a.brackets[orig_a.market_ticker] = orig_a
     strategy_a.brackets[sib_a.market_ticker] = sib_a
-    strategy_a.cache.update_quote(sib_a.market_ticker, 53, 55)  # ask=55 ≤ HEDGE_BUY=60
+    strategy_a.cache.update_quote(sib_a.market_ticker, 53, 55)  # ask=55 >= HEDGE_TRIGGER=48
     monkeypatch.setattr(strategy_a, "_find_next_bracket",
                         AsyncMock(return_value=sib_a.market_ticker))
 
@@ -1310,7 +1314,7 @@ async def test_hedge_buy_gate_55_fires_65_defers(monkeypatch):
     assert strategy_a.executor.orders[0][0].price == 55
     assert "KXHIGHTCHI-26JUN22" not in strategy_a._pending_hedge_events
 
-    # --- Case B: sibling at 65¢ → should defer ---
+    # --- Case B: sibling at 30¢ (< HEDGE_TRIGGER=48¢) → should defer ---
     strategy_b = make_strategy(monkeypatch, hedge_buy=60)
 
     orig_b = MarketBracket(
@@ -1331,7 +1335,7 @@ async def test_hedge_buy_gate_55_fires_65_defers(monkeypatch):
     )
     strategy_b.brackets[orig_b.market_ticker] = orig_b
     strategy_b.brackets[sib_b.market_ticker] = sib_b
-    strategy_b.cache.update_quote(sib_b.market_ticker, 62, 65)  # ask=65 > HEDGE_BUY=60
+    strategy_b.cache.update_quote(sib_b.market_ticker, 28, 30)  # ask=30 < HEDGE_TRIGGER=48 → defer
     monkeypatch.setattr(strategy_b, "_find_next_bracket",
                         AsyncMock(return_value=sib_b.market_ticker))
 
@@ -1460,3 +1464,425 @@ async def test_evaluate_held_positions_retries_deferred_hedge_on_subsequent_cycl
     # Armed state must be cleared
     assert event_ticker not in strategy._pending_hedge_events
     assert event_ticker in strategy._hedged_events
+    assert event_ticker in strategy._hedged_events
+
+
+# ---------------------------------------------------------------------------
+# New tests: conditional hedge gate, DC disaster replay, guardrails
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dc_disaster_replay(monkeypatch):
+    """
+    DC disaster replay (the key regression test):
+    1. Original bracket weakens to hedge trigger; ALL siblings at 1¢ (below
+       eval_price_floor=5) → NO hedge placed, event armed, hedge_deferred logged.
+    2. Original hits stop-loss (≤ stop_loss_price) → stop-loss order placed,
+       event STAYS armed.
+    3. One sibling's YES ask rises to 70¢ (> HEDGE_BUY=60¢) while others stay
+       at 1¢ → exactly ONE recovery BUY for the 70¢ sibling; 1¢ corpses never
+       touched.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+    strategy.executor.succeed = True
+
+    event_ticker = "KXHIGHTDC-26JUN22"
+    orig_ticker = "KXHIGHTDC-26JUN22-B94.5"
+    sib_dead1 = "KXHIGHTDC-26JUN22-B87"
+    sib_dead2 = "KXHIGHTDC-26JUN22-B88.5"
+    sib_dead3 = "KXHIGHTDC-26JUN22-B90.5"
+    sib_dead4 = "KXHIGHTDC-26JUN22-B92.5"
+    sib_winner = "KXHIGHTDC-26JUN22-T96"
+
+    def _make_bracket(ticker, event, label):
+        return MarketBracket(
+            market_ticker=ticker,
+            event_ticker=event,
+            series_ticker="KXHIGHTDC",
+            bracket_label=label,
+            phase=Phase.MONITORING,
+        )
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTDC",
+        bracket_label="dc 94-95",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=83,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.active_positions[orig_ticker] = original
+    for t, lbl in [(sib_dead1, "dead1"), (sib_dead2, "dead2"),
+                   (sib_dead3, "dead3"), (sib_dead4, "dead4")]:
+        strategy.brackets[t] = _make_bracket(t, event_ticker, lbl)
+    strategy.brackets[sib_winner] = _make_bracket(sib_winner, event_ticker, "winner")
+
+    # Step 1: all siblings at 1¢ (below eval_price_floor=5)
+    strategy.cache.update_quote(orig_ticker, 45, 47)     # above stop_loss but at hedge trigger
+    for t in [sib_dead1, sib_dead2, sib_dead3, sib_dead4, sib_winner]:
+        strategy.cache.update_quote(t, 0, 1)
+
+    monkeypatch.setattr(strategy, "_find_next_bracket",
+                        AsyncMock(return_value=sib_dead1))
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({orig_ticker: {"count": 2, "last_price_cents": 45}}))
+
+    await strategy._evaluate_held_positions()
+
+    # No hedge order should be placed — all siblings are floor-priced (1¢ <= eval_price_floor=5)
+    buy_orders = [o for o, _ in strategy.executor.orders if o.side.name == "BUY_YES"]
+    assert len(buy_orders) == 0, "No hedge should fire when all siblings are at 1¢"
+    assert event_ticker in strategy._pending_hedge_events, "Event must be armed"
+    deferred = [ev for ev, _ in info_logged if ev == "phase.c.hedge_deferred"]
+    assert len(deferred) >= 1
+
+    # Step 2: original falls to stop_loss (30¢ bid ≤ stop_loss=35)
+    strategy.executor.orders.clear()
+    strategy.cache.update_quote(orig_ticker, 30, 32)  # bid=30 <= stop_loss=35
+
+    # Reset cooldown so stop-loss fires immediately
+    original._last_hedge_attempt = 0
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({orig_ticker: {"count": 2, "last_price_cents": 30}}))
+
+    await strategy._evaluate_held_positions()
+
+    sell_orders = [o for o, _ in strategy.executor.orders if o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1, "Stop-loss sell must fire when original bid <= stop_loss"
+    assert event_ticker in strategy._pending_hedge_events, "Event must stay armed after stop-loss"
+
+    # Step 3: winner (sib_winner) rises to 70¢ (> HEDGE_BUY=60¢); corpses stay at 1¢
+    strategy.executor.orders.clear()
+    strategy.cache.update_quote(sib_winner, 68, 70)  # 70 > hedge_buy=60 → qualifies
+
+    # Reset per-event recovery cooldown
+    strategy._pending_hedge_last_attempt.clear()
+
+    await strategy._evaluate_held_positions()
+
+    recovery_orders = [o for o, _ in strategy.executor.orders
+                       if o.side.name == "BUY_YES"]
+    assert len(recovery_orders) == 1, "Exactly ONE recovery buy should be placed"
+    assert recovery_orders[0].market_ticker == sib_winner, "Recovery must target the 70¢ winner"
+    for dead in [sib_dead1, sib_dead2, sib_dead3, sib_dead4]:
+        assert not any(o.market_ticker == dead for o, _ in strategy.executor.orders), \
+            f"Dead bracket {dead} must never be bought"
+    assert event_ticker not in strategy._pending_hedge_events
+    assert event_ticker in strategy._hedged_events
+
+
+@pytest.mark.asyncio
+async def test_normal_hedge_fires_immediately_when_strong_sibling(monkeypatch):
+    """
+    Normal hedge path: original weakens to trigger; best sibling at 52¢ (≥
+    HEDGE_TRIGGER_PRICE=48¢) → hedge into the 52¢ sibling immediately using
+    break-even sizing; event is NOT left armed.
+    """
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60)
+    strategy.executor.succeed = True
+
+    event_ticker = "KXHIGHTBOS-26JUN22"
+    orig_ticker = "KXHIGHTBOS-26JUN22-B84.5"
+    sib_ticker = "KXHIGHTBOS-26JUN22-T85"
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTBOS",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=4,
+        avg_entry=84,
+    )
+    sibling = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTBOS",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.brackets[sib_ticker] = sibling
+    strategy.cache.update_quote(sib_ticker, 50, 52)  # 52 >= HEDGE_TRIGGER=48 → normal hedge
+
+    monkeypatch.setattr(strategy, "_find_next_bracket",
+                        AsyncMock(return_value=sib_ticker))
+
+    result = await strategy._execute_hedge(original)
+
+    assert result is True
+    assert len(strategy.executor.orders) == 1
+    order, max_price = strategy.executor.orders[0]
+    assert order.market_ticker == sib_ticker
+    assert order.price == 52
+    assert max_price == strategy.config.spread_monitor_price
+    # Event is hedged, not armed
+    assert event_ticker in strategy._hedged_events
+    assert event_ticker not in strategy._pending_hedge_events
+
+
+@pytest.mark.asyncio
+async def test_deferred_recovery_respects_90_cent_ceiling(monkeypatch):
+    """
+    Armed event; a sibling rises to 95¢ (> HEDGE_BUY=60¢ but > SPREAD_MONITOR=90¢).
+    The order is submitted at max_price=90¢ ceiling; if it cannot fill at ≤ 90¢, the
+    executor returns failure and no recovery is recorded — event stays armed.
+    The test verifies: one order is attempted at the correct max_price ceiling;
+    after failure the event is still in _pending_hedge_events.
+    """
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, spread_monitor_price=90)
+    # Executor returns FAILURE (simulates no fill at ≤ 90¢ when ask=95¢)
+    strategy.executor.succeed = False
+
+    event_ticker = "KXHIGHTMIA-26JUN22"
+    sib_ticker = "KXHIGHTMIA-26JUN22-T96"
+
+    sib = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTMIA",
+        bracket_label="winner",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[sib_ticker] = sib
+
+    # Event already armed; sibling at 95¢ (> 60¢ but cannot fill at ≤ 90¢)
+    strategy._pending_hedge_events.add(event_ticker)
+    strategy.cache.update_quote(sib_ticker, 93, 95)  # ask=95 > hedge_buy=60 → qualifies
+
+    # No active original bracket → secondary recovery loop handles this
+    strategy._pending_hedge_last_attempt.clear()
+
+    await strategy._evaluate_held_positions()
+
+    # One buy attempt was made (at max_price = spread_monitor_price = 90)
+    buy_orders = [o for o, mp in strategy.executor.orders if o.side.name == "BUY_YES"]
+    assert len(buy_orders) == 1, "One buy attempt must be made"
+    _, max_price = strategy.executor.orders[0]
+    assert max_price == strategy.config.spread_monitor_price, "Buy must use spread_monitor_price ceiling"
+
+    # Since executor returned failure, event stays armed (not hedged)
+    assert event_ticker in strategy._pending_hedge_events, "Event must stay armed on fill failure"
+    assert event_ticker not in strategy._hedged_events, "Event must NOT be hedged on fill failure"
+
+
+@pytest.mark.asyncio
+async def test_single_order_per_event_guard(monkeypatch):
+    """
+    Once a recovery/hedge has filled for an event (event in _hedged_events), no
+    further hedge/recovery order is placed for that event on subsequent cycles,
+    even if another sibling crosses 60¢.  Only top-off may act.
+    """
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60)
+    strategy.executor.succeed = True
+
+    event_ticker = "KXHIGHTORD-26JUN22"
+    orig_ticker = "KXHIGHTORD-26JUN22-B84.5"
+    sib1_ticker = "KXHIGHTORD-26JUN22-T85"
+    sib2_ticker = "KXHIGHTORD-26JUN22-T86"
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTORD",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    sib1 = MarketBracket(
+        market_ticker=sib1_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTORD",
+        bracket_label="sib1",
+        phase=Phase.MONITORING,
+    )
+    sib2 = MarketBracket(
+        market_ticker=sib2_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTORD",
+        bracket_label="sib2",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.brackets[sib1_ticker] = sib1
+    strategy.brackets[sib2_ticker] = sib2
+    strategy.active_positions[orig_ticker] = original
+
+    # Mark event as already hedged (recovery already filled)
+    strategy._hedged_events.add(event_ticker)
+
+    # sib2 crosses 60¢ — but event is already hedged; no new order should fire
+    strategy.cache.update_quote(orig_ticker, 40, 42)
+    strategy.cache.update_quote(sib1_ticker, 50, 55)
+    strategy.cache.update_quote(sib2_ticker, 65, 70)
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({orig_ticker: {"count": 2, "last_price_cents": 40}}))
+    monkeypatch.setattr(strategy, "_execute_topoff", AsyncMock())
+
+    await strategy._evaluate_held_positions()
+
+    hedge_buys = [o for o, _ in strategy.executor.orders if o.side.name == "BUY_YES"]
+    assert len(hedge_buys) == 0, "No hedge/recovery order after event already hedged"
+
+
+@pytest.mark.asyncio
+async def test_floor_guard_never_selects_floor_priced_sibling(monkeypatch):
+    """
+    Floor guard: a sibling at exactly eval_price_floor and one just above are
+    evaluated.  The floor sibling is never chosen as a hedge/recovery target.
+    Only the sibling above the floor (and above hedge_trigger_price) is selected.
+    """
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+    strategy.executor.succeed = True
+
+    event_ticker = "KXHIGHTDEN-26JUN22"
+    orig_ticker = "KXHIGHTDEN-26JUN22-B84.5"
+    sib_floor = "KXHIGHTDEN-26JUN22-B85.5"   # at exactly eval_price_floor
+    sib_valid = "KXHIGHTDEN-26JUN22-T86"      # just above floor and above hedge_trigger
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTDEN",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    sibling_floor_bracket = MarketBracket(
+        market_ticker=sib_floor,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTDEN",
+        bracket_label="floor sib",
+        phase=Phase.MONITORING,
+    )
+    sibling_valid_bracket = MarketBracket(
+        market_ticker=sib_valid,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTDEN",
+        bracket_label="valid sib",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.brackets[sib_floor] = sibling_floor_bracket
+    strategy.brackets[sib_valid] = sibling_valid_bracket
+
+    # Floor sibling at exactly eval_price_floor (5¢) — must be ignored
+    strategy.cache.update_quote(sib_floor, 4, 5)
+    # Valid sibling at 52¢ (> floor=5¢ and >= hedge_trigger=48¢) — must be chosen
+    strategy.cache.update_quote(sib_valid, 50, 52)
+
+    monkeypatch.setattr(strategy, "_find_next_bracket",
+                        AsyncMock(return_value=sib_valid))
+
+    result = await strategy._execute_hedge(original)
+
+    assert result is True
+    assert len(strategy.executor.orders) == 1
+    order, _ = strategy.executor.orders[0]
+    assert order.market_ticker == sib_valid, "Must select the valid sibling, not the floor-priced one"
+    assert order.market_ticker != sib_floor, "Floor-priced sibling must never be the target"
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_fires_while_event_armed_no_qualifying_sibling(monkeypatch):
+    """
+    Stop-loss fires independently of armed/deferred state.
+    Event armed, no sibling > HEDGE_BUY (all at 30¢ < 48¢), original price ≤
+    stop_loss_price → stop-loss order placed for the original regardless.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60)
+    strategy.executor.succeed = True
+
+    event_ticker = "KXHIGHTPHX-26JUN22"
+    orig_ticker = "KXHIGHTPHX-26JUN22-B84.5"
+    sib_ticker = "KXHIGHTPHX-26JUN22-T85"
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTPHX",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=3,
+        avg_entry=84,
+    )
+    sibling = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTPHX",
+        bracket_label="sib",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.brackets[sib_ticker] = sibling
+    strategy.active_positions[orig_ticker] = original
+
+    # Event already armed
+    strategy._pending_hedge_events.add(event_ticker)
+
+    # Original at stop_loss level (bid=30 ≤ stop_loss=35); sibling weak (30¢ < 48¢)
+    strategy.cache.update_quote(orig_ticker, 30, 32)
+    strategy.cache.update_quote(sib_ticker, 28, 30)
+
+    monkeypatch.setattr(strategy, "_find_next_bracket",
+                        AsyncMock(return_value=sib_ticker))
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({orig_ticker: {"count": 3, "last_price_cents": 30}}))
+
+    await strategy._evaluate_held_positions()
+
+    # Stop-loss sell must have been placed
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == orig_ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1, "Stop-loss must fire while event is armed"
+    assert sell_orders[0].price == 1, "Stop-loss must sell at 1¢ (marketable)"
+
+    # No BUY orders for weak sibling
+    buy_orders = [o for o, _ in strategy.executor.orders
+                  if o.market_ticker == sib_ticker and o.side.name == "BUY_YES"]
+    assert len(buy_orders) == 0, "Weak sibling (30¢ < 48¢) must never be bought"

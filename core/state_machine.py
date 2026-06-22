@@ -606,15 +606,23 @@ class TemperatureStrategy:
         Phase C: Position Management.
         For each held position, get current price from positions API.
         Only trigger hedge/stop-loss on actively priced markets.
+
+        Also runs the secondary recovery loop for armed events whose original
+        bracket has already been stop-lossed (no longer in active_positions).
+        That loop does not need the positions API, so it runs even when
+        active_positions is empty.
         """
-        if not self.active_positions:
+        if not self.active_positions and not self._pending_hedge_events:
             return
 
-        try:
-            api_positions = await self.executor.get_positions()
-        except Exception as e:
-            logger.error("phase.c.get_positions_failed", error=str(e))
-            return
+        api_positions: dict = {}
+        if self.active_positions:
+            try:
+                api_positions = await self.executor.get_positions()
+            except Exception as e:
+                logger.error("phase.c.get_positions_failed", error=str(e))
+                # Fall through to secondary loop; skip main position loop below.
+                api_positions = {}
 
         for ticker, bracket in list(self.active_positions.items()):
             pos_data = api_positions.get(ticker)
@@ -750,16 +758,21 @@ class TemperatureStrategy:
             # Check Hedge trigger. Fires when:
             #   a) price has weakened to <= hedge_trigger (initial trigger), OR
             #   b) the event is already armed (hedge_pending) and we are retrying.
+            # Guard: never fire if the event already has a filled hedge/recovery — only
+            # _execute_topoff may place further buys after the event is hedged.
             hedge_triggered = (
-                (
-                    current_price <= self.config.hedge_trigger_price
-                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
-                    and bracket.event_ticker not in self._cap_reached_events
-                    and current_price > 0
-                ) or (
-                    bracket.event_ticker in self._pending_hedge_events
-                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
-                    and bracket.event_ticker not in self._cap_reached_events
+                bracket.event_ticker not in self._hedged_events
+                and (
+                    (
+                        current_price <= self.config.hedge_trigger_price
+                        and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
+                        and bracket.event_ticker not in self._cap_reached_events
+                        and current_price > 0
+                    ) or (
+                        bracket.event_ticker in self._pending_hedge_events
+                        and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
+                        and bracket.event_ticker not in self._cap_reached_events
+                    )
                 )
             )
 
@@ -811,9 +824,12 @@ class TemperatureStrategy:
                 continue
             self._pending_hedge_last_attempt[event_ticker] = now
 
-            # Scan for the highest-priced sibling with YES ask ≤ hedge_buy
+            # Scan for a qualifying sibling: YES ask strictly > hedge_buy (60¢) AND
+            # > eval_price_floor.  A cheap/weak sibling is never the right recovery
+            # target — we wait until a real winner emerges (rising above 60¢).
             best_ticker: Optional[str] = None
             best_ask = -1
+            best_seen_ask = -1  # track highest seen for logging even if none qualifies
             for t, b in self.brackets.items():
                 if b.event_ticker != event_ticker:
                     continue
@@ -822,14 +838,18 @@ class TemperatureStrategy:
                 if ask is None:
                     rest_d = await self._fetch_market_data_via_rest(t)
                     ask = rest_d.get("yes_ask") if rest_d else None
-                if ask is not None and 0 < ask <= self.config.hedge_buy and ask > best_ask:
-                    best_ask = ask
-                    best_ticker = t
+                if ask is not None and ask > 0:
+                    if ask > best_seen_ask:
+                        best_seen_ask = ask
+                    # Qualify only when ask has RISEN above hedge_buy and is above the floor.
+                    if ask > self.config.hedge_buy and ask > self.config.eval_price_floor and ask > best_ask:
+                        best_ask = ask
+                        best_ticker = t
 
             if best_ticker is None or best_ask <= 0:
                 logger.info("phase.c.hedge_deferred", event_ticker=event_ticker,
-                            reason="no_active_original_no_sibling",
-                            best_sibling_price=best_ask if best_ask > 0 else None)
+                            reason="no_qualifying_sibling_above_hedge_buy",
+                            best_sibling_price=best_seen_ask if best_seen_ask > 0 else None)
                 continue
 
             # Place recovery buy at initial_contract_count quantity
@@ -929,28 +949,31 @@ class TemperatureStrategy:
             logger.warning("phase.c.hedge_no_bracket_found", ticker=bracket.market_ticker)
             return False
 
-        # Scan all siblings for the highest-priced one with YES ask ≤ hedge_buy.
+        # Scan all siblings for the highest valid YES ask (ignore price <= eval_price_floor).
         # Use YES ask from ticker-quote cache (authoritative source); fall back to
         # REST yes_ask.  Never use orderbook best_ask (may be empty when NO side
         # is not tracked) and never use any NO-derived value.
-        best_price = -1
-        for ticker, b in self.brackets.items():
-            if b.event_ticker == bracket.event_ticker and ticker != bracket.market_ticker:
-                quote = self.cache.get_quote(ticker)
-                ask = quote[1] if quote else None  # yes_ask_cents from ticker channel
-                if ask is None:
-                    rest_data = await self._fetch_market_data_via_rest(ticker)
-                    ask = rest_data.get("yes_ask") if rest_data else None
-                # Only consider siblings priced at or below the HEDGE_BUY gate (≤ 60¢).
-                # This prevents hedging into a bracket that is already a strong favourite
-                # (it would cost too much and offer insufficient recovery upside).
-                if ask is not None and ask <= self.config.hedge_buy and ask > best_price:
-                    best_price = ask
-                    next_bracket_ticker = ticker
+        best_sibling_ask = -1
+        best_sibling_ticker: Optional[str] = None
+        for sibling_ticker, b in self.brackets.items():
+            if b.event_ticker != bracket.event_ticker or sibling_ticker == bracket.market_ticker:
+                continue
+            quote = self.cache.get_quote(sibling_ticker)
+            ask = quote[1] if quote else None  # yes_ask_cents from ticker channel
+            if ask is None:
+                rest_data = await self._fetch_market_data_via_rest(sibling_ticker)
+                ask = rest_data.get("yes_ask") if rest_data else None
+            # Only consider siblings priced strictly above eval_price_floor (never buy dead
+            # brackets at 1¢ etc.).
+            if ask is not None and ask > self.config.eval_price_floor and ask > best_sibling_ask:
+                best_sibling_ask = ask
+                best_sibling_ticker = sibling_ticker
 
-        if best_price <= 0:
-            # No sibling is within the HEDGE_BUY gate — arm the event for a deferred hedge.
-            # The stop-loss backstop remains fully active regardless of this deferral.
+        if best_sibling_ask < self.config.hedge_trigger_price:
+            # All siblings are weak (< hedge_trigger_price, e.g. 48¢) or no priced
+            # sibling found — there is no credible winner yet.  Arm the event and wait;
+            # the secondary recovery loop will buy once a sibling's ask rises > hedge_buy
+            # (60¢).  The stop-loss backstop remains fully active regardless.
             self._pending_hedge_events.add(bracket.event_ticker)
 
             # Persist the armed state to the original bracket's position row so it
@@ -967,11 +990,14 @@ class TemperatureStrategy:
             logger.info("phase.c.hedge_deferred",
                         ticker=bracket.market_ticker,
                         event_ticker=bracket.event_ticker,
-                        best_sibling_price=None,
+                        best_sibling_price=best_sibling_ask if best_sibling_ask > 0 else None,
                         hedge_buy=self.config.hedge_buy)
             return False
 
-        hedge_price = best_price
+        # Normal hedge: best sibling has a credible ask (>= hedge_trigger_price).
+        # Proceed with break-even sizing using the existing formula.
+        next_bracket_ticker = best_sibling_ticker
+        hedge_price = best_sibling_ask
 
         # Guard: skip hedging if we don't have a valid entry price
         if not bracket.avg_entry or bracket.avg_entry <= 0:
