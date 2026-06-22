@@ -90,9 +90,45 @@ python bracket_scanner.py --min-spread 7 --buy-trigger 85
 
 ## Trading Strategy
 
-1. **Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 4¢)
-2. **Hedge trigger**: If YES price drops to ≤ `HEDGE_TRIGGER_PRICE` (default 50¢), buy the highest-priced alternative bracket in the same event
-3. **Stop loss**: If YES price drops to ≤ `STOP_LOSS_PRICE` (default 25¢), sell at 1¢ (GTC)
+The strategy uses a two-phase, multi-hedge, per-event break-even approach. Each event (`event_ticker`) is tracked independently — a city's High and Low temperature markets have separate ledgers and hedge state.
+
+### Phase A — Market Monitoring
+All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
+
+### Phase B — Entry
+**Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢). Price is sourced exclusively from the ticker channel `yes_ask`/`yes_ask_dollars` — the NO side is never used to derive YES ask prices.
+
+### Phase C — Position Management
+
+#### Phase-1 Hedge (triggered at low price)
+When a held bracket's YES price drops to ≤ `HEDGE_TRIGGER_PRICE` (default 50¢), the strategy hedges by buying the highest-priced sibling bracket in the same event.
+
+- **Pricing**: the hedge target price is the **YES ask** from the ticker-quote cache (`yes_ask`/`yes_ask_dollars`), with a REST fallback using the `yes_ask` field only — no NO-derived values.
+- **Sizing** (break-even math):
+  - `expected_loss = Q × (avg_entry − stop_loss_price)`
+  - `hedge_qty = ⌈expected_loss / (100 − hedge_price)⌉`
+  - Capped to `min(raw_qty, original_qty, original_cost / hedge_price)` and floored at 1.
+- **Multi-hedge**: an event can be hedged multiple times. If the hedge bracket's price also falls, a new hedge fires into the next highest sibling. The 60-second per-bracket cooldown prevents spam but does not permanently block re-hedging.
+- **Ledger**: once an event is hedged, a per-event cash ledger (sourced from `executed_trades`) tracks gross spend and stop-loss proceeds for all brackets in that event.
+
+#### Phase-2 Top-Off (triggered at high price, hedged events only)
+When a bracket in a **hedged** event recovers to YES ask ≥ `BUY_TRIGGER_PRICE`, and all sibling brackets for that event have closed (settled or stop-lossed), the strategy tops off the surviving bracket to reach event break-even.
+
+- **Gating**: event must have been hedged; YES ask ≥ `BUY_TRIGGER_PRICE` and ≤ `SPREAD_MONITOR_PRICE`; all other event brackets must be closed; event must not already be at break-even.
+- **Sizing** (ledger-based):
+  - `remaining_deficit = gross_spend_cents − (Q_current × 100)`
+  - `topoff_qty = ⌈remaining_deficit / (100 − yes_ask)⌉` (rounded up so worst case is flat)
+- This single formula handles Case B (original bracket recovers while hedge will lose) because the hedge spend is already in `gross_spend_cents`.
+
+#### Stop Loss
+If YES price drops to ≤ `STOP_LOSS_PRICE` (default 25¢), the position is sold at 1¢ (GTC) to guarantee a fill.
+
+### Per-Event Circuit-Breaker (`HEDGE_MAX_FACTOR`)
+A safety cap prevents a single event from draining the account. Configured via `HEDGE_MAX_FACTOR` (default `5`).
+
+- `max_event_spend = HEDGE_MAX_FACTOR × initial_entry_cost_for_event`
+- Basis: **gross spend** (sum of all BUY and HEDGE costs). Stop-loss proceeds do NOT restore headroom.
+- When any hedge or top-off order would push gross spend over the cap: the order is not placed, `phase.c.hedge_cap_reached` is logged (with `event_ticker`, `gross_spend_cents`, `max_event_spend_cents`, and `attempted_spend`), and that event stops receiving hedge/top-off orders for the remainder of the day. Other events are unaffected.
 
 ## Security
 
