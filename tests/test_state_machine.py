@@ -3202,3 +3202,338 @@ async def test_execute_hedge_abandons_on_market_not_found(monkeypatch):
 
     assert len(strategy.executor.orders) == initial_orders, \
         "No further buy_yes orders for abandoned event in main loop"
+
+
+# ---------------------------------------------------------------------------
+# Phase C entry self-heal tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_entry_self_heals_from_fills_when_avg_cost_none(monkeypatch):
+    """
+    When bracket.avg_entry==0 and positions API returns 0 cost,
+    the fills fallback heals avg_entry to 83 and logs phase.c.entry_self_healed.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTOKC-26JUN23-T86"
+    event_ticker = "KXHIGHTOKC-26JUN23"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 86",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+
+    # Positions API returns 0 cost (like Kalshi's None)
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "average_fill_cost_cents": 0}}))
+
+    # Fills return average of 83¢
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_fills",
+        AsyncMock(return_value=[
+            {"market_ticker": ticker, "action": "buy", "count_fp": "2", "yes_price_dollars": "0.83"},
+        ]),
+        raising=False,
+    )
+
+    # Provide a cache quote so price resolution succeeds (bid=79, ask=86)
+    strategy.cache.update_quote(ticker, 79, 86)
+
+    await strategy._evaluate_held_positions()
+
+    assert bracket.avg_entry == 83
+    heal_logs = [(ev, kw) for ev, kw in info_logged if ev == "phase.c.entry_self_healed"]
+    assert len(heal_logs) == 1
+    assert heal_logs[0][1]["cents"] == 83
+    assert heal_logs[0][1]["source"] == "fills"
+
+
+@pytest.mark.asyncio
+async def test_entry_self_heals_inline_from_positions_field(monkeypatch):
+    """
+    When bracket.avg_entry==0 and positions API returns average_fill_cost_cents=84,
+    the cheap inline path heals avg_entry to 84 without calling get_fills.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTOKC-26JUN23-T86"
+    event_ticker = "KXHIGHTOKC-26JUN23"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 86",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+
+    # Positions API returns a valid cost (84¢)
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "average_fill_cost_cents": 84}}))
+
+    # get_fills must NOT be called (track calls)
+    fills_call_count = []
+
+    async def fake_get_fills(**_kwargs):
+        fills_call_count.append(1)
+        return []
+
+    monkeypatch.setattr(strategy.executor, "get_fills", fake_get_fills, raising=False)
+
+    strategy.cache.update_quote(ticker, 79, 86)
+
+    await strategy._evaluate_held_positions()
+
+    assert bracket.avg_entry == 84
+    heal_logs = [(ev, kw) for ev, kw in info_logged if ev == "phase.c.entry_self_healed"]
+    assert len(heal_logs) == 1
+    assert heal_logs[0][1]["cents"] == 84
+    assert heal_logs[0][1]["source"] == "positions_inline"
+    # Fills must not be consulted — inline path short-circuited
+    assert len(fills_call_count) == 0, "get_fills must not be called when inline path succeeds"
+
+
+@pytest.mark.asyncio
+async def test_self_healed_entry_enables_correct_hedge_sizing(monkeypatch):
+    """
+    After self-heal sets avg_entry=83 from inline positions field, a subsequent
+    hedge that fires in the same cycle uses the break-even path
+    (phase.c.hedge_quantity_calc) rather than the full-qty fallback.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTOKC-26JUN23-T86"
+    sib_ticker = "KXHIGHTOKC-26JUN23-T87"
+    event_ticker = "KXHIGHTOKC-26JUN23"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 86",
+        phase=Phase.HOLDING,
+        position_quantity=4,
+        avg_entry=0,
+    )
+    sibling = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 87",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.brackets[sib_ticker] = sibling
+    strategy.active_positions[ticker] = bracket
+
+    # Positions API provides cost inline
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 4, "average_fill_cost_cents": 83}}))
+
+    # Sibling quote: ask=50 >= hedge_trigger=48, so hedge fires
+    strategy.cache.update_quote(sib_ticker, 49, 50)
+    # Main position quote: bid=47 <= hedge_trigger=48
+    strategy.cache.update_quote(ticker, 47, 50)
+
+    monkeypatch.setattr(strategy, "_find_next_bracket", AsyncMock(return_value=sib_ticker))
+
+    await strategy._evaluate_held_positions()
+
+    # Break-even path logged (not fallback)
+    qty_calc_logs = [ev for ev, _ in info_logged if ev == "phase.c.hedge_quantity_calc"]
+    fallback_logs = [ev for ev, _ in warn_logged if ev == "phase.c.hedge_size_fallback_no_entry"]
+    assert len(qty_calc_logs) >= 1, "Expected phase.c.hedge_quantity_calc (break-even sizing)"
+    assert len(fallback_logs) == 0, "Must NOT use full-qty fallback after self-heal"
+    assert bracket.avg_entry == 83
+
+
+@pytest.mark.asyncio
+async def test_no_self_heal_when_cost_unrecoverable(monkeypatch):
+    """
+    When positions API returns 0 and fills return [], avg_entry stays 0 and
+    no entry_self_healed is logged. The loop must not raise.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTOKC-26JUN23-T86"
+    event_ticker = "KXHIGHTOKC-26JUN23"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 86",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "average_fill_cost_cents": 0}}))
+    monkeypatch.setattr(strategy.executor, "get_fills", AsyncMock(return_value=[]), raising=False)
+
+    strategy.cache.update_quote(ticker, 79, 86)
+
+    # Must not raise
+    await strategy._evaluate_held_positions()
+
+    assert bracket.avg_entry == 0
+    heal_logs = [ev for ev, _ in info_logged if ev == "phase.c.entry_self_healed"]
+    assert len(heal_logs) == 0, "Must not log entry_self_healed when cost is unrecoverable"
+
+
+@pytest.mark.asyncio
+async def test_self_heal_fills_fallback_throttled_to_60s(monkeypatch):
+    """
+    When positions inline returns 0, the fills fallback (_resolve_entry_cost_basis)
+    is called at most once per 60s. Running _evaluate_held_positions twice in quick
+    succession (within the 60s window) must invoke the fills API only once.
+    """
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTOKC-26JUN23-T86"
+    event_ticker = "KXHIGHTOKC-26JUN23"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 86",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+
+    # Positions API always returns 0 cost (forces fills fallback path)
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "average_fill_cost_cents": 0}}))
+
+    fills_call_count = []
+
+    async def fake_get_fills(**_kwargs):
+        fills_call_count.append(1)
+        return [
+            {"market_ticker": ticker, "action": "buy", "count_fp": "2", "yes_price_dollars": "0.83"},
+        ]
+
+    monkeypatch.setattr(strategy.executor, "get_fills", fake_get_fills, raising=False)
+    strategy.cache.update_quote(ticker, 79, 86)
+
+    # First cycle — fills called once, heal happens, avg_entry=83
+    await strategy._evaluate_held_positions()
+    # After heal, avg_entry > 0, so subsequent cycles skip the self-heal entirely
+    calls_after_first = len(fills_call_count)
+
+    # Second cycle — avg_entry is now 83 so the self-heal branch is skipped
+    await strategy._evaluate_held_positions()
+
+    total_fills_calls = len(fills_call_count)
+    # The fills network call must not fire more than once across both cycles
+    assert total_fills_calls <= 1, (
+        f"fills API called {total_fills_calls} times; expected at most 1 "
+        "(throttle must prevent repeated calls)"
+    )
+    # After the first heal the bracket should be healed
+    assert bracket.avg_entry == 83
+
+
+@pytest.mark.asyncio
+async def test_existing_healthy_entry_untouched(monkeypatch):
+    """
+    A bracket with avg_entry=86 (already valid) must not be touched by the self-heal:
+    no entry_self_healed logged, get_fills not called, avg_entry unchanged.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTOKC-26JUN23-T86"
+    event_ticker = "KXHIGHTOKC-26JUN23"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTOKC",
+        bracket_label="okc high 86",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=86,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "average_fill_cost_cents": 86}}))
+
+    fills_call_count = []
+
+    async def fake_get_fills(**_kwargs):
+        fills_call_count.append(1)
+        return []
+
+    monkeypatch.setattr(strategy.executor, "get_fills", fake_get_fills, raising=False)
+    strategy.cache.update_quote(ticker, 79, 86)
+
+    await strategy._evaluate_held_positions()
+
+    assert bracket.avg_entry == 86
+    heal_logs = [ev for ev, _ in info_logged if ev == "phase.c.entry_self_healed"]
+    assert len(heal_logs) == 0, "Must not self-heal when entry is already valid"
+    assert len(fills_call_count) == 0, "get_fills must not be called when avg_entry is already valid"
