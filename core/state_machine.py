@@ -379,8 +379,11 @@ class TemperatureStrategy:
             self.cache.update_last_price(market_ticker, last_price)
 
         # Cache YES bid/ask from ticker channel — this is the authoritative price source
-        if yes_bid is not None and yes_ask is not None:
-            self.cache.update_quote(market_ticker, yes_bid, yes_ask)
+        if yes_bid is not None or yes_ask is not None:
+            prev = self.cache.get_quote(market_ticker)
+            b = yes_bid if yes_bid is not None else (prev[0] if prev else 0)
+            a = yes_ask if yes_ask is not None else (prev[1] if prev else 0)
+            self.cache.update_quote(market_ticker, b, a)
 
         # Update brackets in state
         if market_ticker in self.brackets:
@@ -850,7 +853,7 @@ class TemperatureStrategy:
             rest_data: Optional[dict] = None
 
             quote = self.cache.get_quote(ticker)
-            if quote:
+            if quote and self.cache.is_quote_fresh(ticker, 30.0):
                 yes_bid, yes_ask = quote
                 if yes_bid and yes_bid > 0:
                     current_price = yes_bid
@@ -858,6 +861,10 @@ class TemperatureStrategy:
                     current_price = yes_ask
                 if yes_ask and yes_ask > 0:
                     hedge_eval_price = yes_ask
+            else:
+                last_trade = self.cache.get_last_price(ticker)
+                if last_trade and last_trade > 0:
+                    current_price = last_trade
             if current_price and current_price > 0:
                 bracket.last_price = current_price
 
@@ -996,17 +1003,10 @@ class TemperatureStrategy:
                     self.brackets.pop(ticker, None)
                     logger.info("phase.c.stop_loss_zero_qty", ticker=ticker)
                     continue
-                eval_price_floor = getattr(self.config, "eval_price_floor", 2) or 2
-                if current_price <= eval_price_floor:
-                    logger.warning("phase.c.stop_loss_skipped_resolved_market",
-                                   ticker=ticker,
-                                   last_price=current_price,
-                                   qty=bracket.position_quantity)
-                    continue
-                # NOTE: cost-basis guard intentionally removed. A hard stop is an absolute
-                # price floor: if price <= stop_loss_price we exit regardless of whether the
-                # entry price is known. _execute_stop_loss sells position_quantity at 1¢ and
-                # does not require avg_entry.
+                # No floor-skip: if we still hold it and price <= stop_loss_price, ALWAYS
+                # attempt the exit. A price at/below the floor is the strongest reason to
+                # sell, not skip. _execute_stop_loss already throttles retries to 60s and
+                # verifies closure via get_positions().
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
                                last_price=current_price, stop_loss=self.config.stop_loss_price)
                 await self._execute_stop_loss(bracket)

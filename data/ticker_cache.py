@@ -1,4 +1,5 @@
 # data/ticker_cache.py
+import time
 from typing import Optional
 from core.types import OrderBook, OrderBookLevel
 import structlog
@@ -19,19 +20,30 @@ class TickerCache:
         self.orderbooks: dict[str, OrderBook] = {}
         # market_ticker -> full market info (from lifecycle or REST)
         self.market_metadata: dict[str, dict] = {}
-        # market_ticker -> (yes_bid_cents, yes_ask_cents) from ticker channel
-        self.quotes: dict[str, tuple[int, int]] = {}
+        # market_ticker -> (yes_bid_cents, yes_ask_cents, monotonic_ts) from ticker channel
+        self.quotes: dict[str, tuple[int, int, float]] = {}
 
     def update_last_price(self, ticker: str, price: int):
         self.last_prices[ticker] = price
 
     def update_quote(self, ticker: str, yes_bid: int, yes_ask: int):
         """Cache yes_bid/yes_ask (in cents) from the ticker channel."""
-        self.quotes[ticker] = (yes_bid, yes_ask)
+        self.quotes[ticker] = (yes_bid, yes_ask, time.monotonic())
 
     def get_quote(self, ticker: str) -> Optional[tuple[int, int]]:
         """Return cached (yes_bid_cents, yes_ask_cents) or None if not yet seen."""
-        return self.quotes.get(ticker)
+        v = self.quotes.get(ticker)
+        return (v[0], v[1]) if v else None
+
+    def get_quote_ts(self, ticker: str) -> Optional[float]:
+        """Return the monotonic timestamp of the cached quote, or None."""
+        v = self.quotes.get(ticker)
+        return v[2] if v else None
+
+    def is_quote_fresh(self, ticker: str, max_age_s: float = 30.0) -> bool:
+        """Return True only if a quote exists and its age is within max_age_s seconds."""
+        v = self.quotes.get(ticker)
+        return bool(v) and (time.monotonic() - v[2]) <= max_age_s
 
     def update_orderbook_snapshot(self, ticker: str, snapshot: dict):
         """Process an orderbook_snapshot message."""

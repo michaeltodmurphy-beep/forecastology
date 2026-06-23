@@ -1269,7 +1269,11 @@ async def test_phase_c_stop_loss_fires_with_zero_entry_seattle_scenario(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_phase_c_stop_loss_skips_resolved_market(monkeypatch):
+async def test_phase_c_stop_loss_no_longer_skips_resolved_market(monkeypatch):
+    """
+    The floor-skip branch has been removed: a held position with price at/below the
+    eval_price_floor now triggers a stop-loss exit instead of being silently skipped.
+    """
     import core.state_machine as state_machine
 
     warn_logged = []
@@ -1294,6 +1298,7 @@ async def test_phase_c_stop_loss_skips_resolved_market(monkeypatch):
     strategy.brackets[ticker] = bracket
     strategy.active_positions[ticker] = bracket
     strategy.cache.update_quote(ticker, 1, 2)
+    strategy.executor.succeed = True
 
     monkeypatch.setattr(strategy.executor, "get_positions",
                         _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 1}}))
@@ -1301,9 +1306,11 @@ async def test_phase_c_stop_loss_skips_resolved_market(monkeypatch):
     await strategy._evaluate_held_positions()
 
     events = [event for event, _ in warn_logged]
-    assert "phase.c.stop_loss_skipped_resolved_market" in events
-    assert "phase.c.stop_loss_triggered" not in events
-    assert len(strategy.executor.orders) == 0
+    assert "phase.c.stop_loss_skipped_resolved_market" not in events
+    assert "phase.c.stop_loss_triggered" in events
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1
 
 
 @pytest.mark.asyncio
@@ -3537,3 +3544,238 @@ async def test_existing_healthy_entry_untouched(monkeypatch):
     heal_logs = [ev for ev, _ in info_logged if ev == "phase.c.entry_self_healed"]
     assert len(heal_logs) == 0, "Must not self-heal when entry is already valid"
     assert len(fills_call_count) == 0, "get_fills must not be called when avg_entry is already valid"
+
+
+# ---------------------------------------------------------------------------
+# New tests: stop-loss staleness fix (Phase C protection path)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stale_quote_falls_back_to_trade_feed_and_stop_losses(monkeypatch):
+    """
+    THE BOSTON CASE: A stale quote (healthy price) must NOT block stop-loss.
+    When the quote is stale, _evaluate_held_positions should fall back to the
+    trade-channel last price. If that price is <= stop_loss_price, stop-loss fires.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B63.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTBOS-26JUN23",
+        series_ticker="KXLOWTBOS",
+        bracket_label="bos low 63.5",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.executor.succeed = True
+
+    # Put a healthy quote in cache then force it stale
+    strategy.cache.update_quote(ticker, 84, 86)
+    monkeypatch.setattr(strategy.cache, "is_quote_fresh", lambda t, max_age_s=30.0: False)
+
+    # Trade feed shows the real (falling) price
+    strategy.cache.update_last_price(ticker, 20)
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 20}}))
+
+    await strategy._evaluate_held_positions()
+
+    events = [event for event, _ in warn_logged]
+    assert "phase.c.stop_loss_triggered" in events, (
+        "stop_loss_triggered must fire when trade-feed price=20 <= stop_loss=35"
+    )
+    assert "phase.c.stop_loss_skipped_resolved_market" not in events
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1, "sell_yes must have been called for the stop-loss"
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_fires_below_floor_instead_of_skipping(monkeypatch):
+    """
+    With the floor-skip removed, a still-held position at/below eval_price_floor
+    must attempt an exit instead of being silently skipped.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    ticker = "KXLOWTBOS-26JUN23-B63.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTBOS-26JUN23",
+        series_ticker="KXLOWTBOS",
+        bracket_label="bos low 63.5",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.executor.succeed = True
+
+    # Fresh quote at/below eval_price_floor (1¢)
+    strategy.cache.update_quote(ticker, 1, 1)
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 1}}))
+
+    await strategy._evaluate_held_positions()
+
+    events = [event for event, _ in warn_logged]
+    assert "phase.c.stop_loss_triggered" in events
+    assert "phase.c.stop_loss_skipped_resolved_market" not in events
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) >= 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_quote_still_used_normally(monkeypatch):
+    """
+    Regression: a FRESH quote whose bid is well above stop_loss_price must not
+    trigger a stop-loss. Normal holding continues unchanged.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B63.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTBOS-26JUN23",
+        series_ticker="KXLOWTBOS",
+        bracket_label="bos low 63.5",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+
+    # Fresh quote with bid well above stop_loss_price=35
+    strategy.cache.update_quote(ticker, 70, 72)
+
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 70}}))
+
+    await strategy._evaluate_held_positions()
+
+    # No stop-loss should fire
+    events = [event for event, _ in warn_logged]
+    assert "phase.c.stop_loss_triggered" not in events
+    sell_orders = [o for o, _ in strategy.executor.orders
+                   if o.market_ticker == ticker and o.side.name == "SELL_YES"]
+    assert len(sell_orders) == 0, "No sell order should be placed when price is healthy"
+    # Fresh quote was used: bracket.last_price should reflect the bid
+    assert bracket.last_price == 70
+
+
+@pytest.mark.asyncio
+async def test_one_sided_ticker_update_refreshes_quote(monkeypatch):
+    """
+    A ticker message with only yes_bid (no yes_ask) must refresh the quote while
+    preserving the previously-known ask, and vice-versa.
+    """
+    import core.state_machine as state_machine
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B63.5"
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTBOS-26JUN23",
+        series_ticker="KXLOWTBOS",
+        bracket_label="bos low 63.5",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+
+    # Establish a baseline quote in cents (bid=50¢, ask=52¢)
+    strategy.cache.update_quote(ticker, 50, 52)
+
+    # Send a one-sided tick: only yes_bid=0.60 dollars (=60¢), no yes_ask
+    # _handle_ticker converts dollars→cents internally (multiplies by 100)
+    msg = {
+        "msg": {
+            "market_ticker": ticker,
+            "yes_bid": 0.60,
+            # yes_ask deliberately absent
+        }
+    }
+    await strategy._handle_ticker(msg)
+
+    q = strategy.cache.get_quote(ticker)
+    assert q is not None
+    assert q[0] == 60, "bid must be updated to 60¢"
+    assert q[1] == 52, "ask must be preserved as 52¢"
+    assert strategy.cache.is_quote_fresh(ticker, 30.0)
+
+    # Now send a one-sided tick: only yes_ask=0.55 dollars (=55¢), no yes_bid
+    msg2 = {
+        "msg": {
+            "market_ticker": ticker,
+            "yes_ask": 0.55,
+            # yes_bid deliberately absent
+        }
+    }
+    await strategy._handle_ticker(msg2)
+
+    q2 = strategy.cache.get_quote(ticker)
+    assert q2 is not None
+    assert q2[0] == 60, "bid must be preserved as 60¢"
+    assert q2[1] == 55, "ask must be updated to 55¢"
+    assert strategy.cache.is_quote_fresh(ticker, 30.0)
+
+
+def test_is_quote_fresh_semantics():
+    """Unit test for TickerCache freshness helpers."""
+    cache = TickerCache()
+    ticker = "KXTEST-TICKER"
+
+    # Unknown ticker: not fresh
+    assert not cache.is_quote_fresh(ticker, 30.0)
+    assert cache.get_quote_ts(ticker) is None
+    assert cache.get_quote(ticker) is None
+
+    # After update: fresh with generous window
+    cache.update_quote(ticker, 42, 44)
+    assert cache.is_quote_fresh(ticker, 30.0)
+
+    # With zero max_age_s: not fresh (already older than 0s)
+    assert not cache.is_quote_fresh(ticker, 0.0)
+
+    # get_quote still returns 2-tuple, not 3-tuple
+    q = cache.get_quote(ticker)
+    assert q == (42, 44)
+    assert len(q) == 2
+
+    # get_quote_ts returns a float
+    ts = cache.get_quote_ts(ticker)
+    assert ts is not None
+    assert isinstance(ts, float)
