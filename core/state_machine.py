@@ -1439,7 +1439,7 @@ class TemperatureStrategy:
         event_ticker = bracket.event_ticker
 
         # Extract the bracket type (T or B) and temperature value from ticker
-        match = re.match(r'^(KXHIGHT|KXLOWT)(.+)-(\d{2}[A-Z]{3}\d{2})-(T\d+|B\d+\.?\d*)$', ticker)
+        match = re.match(r'^(KXHIGHT?|KXLOWT)(.+)-(\d{2}[A-Z]{3}\d{2})-(T\d+|B\d+\.?\d*)$', ticker)
         if not match:
             logger.warning("strategy.cannot_parse_ticker",
                           ticker=ticker, event_ticker=event_ticker)
@@ -1475,7 +1475,7 @@ class TemperatureStrategy:
         candidates = []
         for t, b in self.brackets.items():
             if b.event_ticker == event_ticker and t != ticker:
-                m = re.match(r'^(KXHIGHT|KXLOWT)(.+)-(\d{2}[A-Z]{3}\d{2})-(T\d+|B\d+\.?\d*)$', t)
+                m = re.match(r'^(KXHIGHT?|KXLOWT)(.+)-(\d{2}[A-Z]{3}\d{2})-(T\d+|B\d+\.?\d*)$', t)
                 if m:
                     bc = m.group(4)
                     try:

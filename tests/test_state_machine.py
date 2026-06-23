@@ -2292,3 +2292,119 @@ async def test_stop_loss_success_but_still_held_keeps_position(monkeypatch):
 
     assert ticker in strategy.active_positions
     assert bracket.position_quantity == 1
+
+
+# ---------------------------------------------------------------------------
+# _find_next_bracket — KXHIGHT? regex fix (covers no-T high cities)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin_ticker,next_ticker,event_ticker,series_ticker", [
+    # No-T high cities (the 7 affected cities — bug being fixed)
+    ("KXHIGHCHI-26JUN22-B72.5", "KXHIGHCHI-26JUN22-T73",  "KXHIGHCHI-26JUN22",  "KXHIGHCHI"),
+    ("KXHIGHNY-26JUN22-B72.5",  "KXHIGHNY-26JUN22-T73",   "KXHIGHNY-26JUN22",   "KXHIGHNY"),
+    ("KXHIGHMIA-26JUN22-B93.5", "KXHIGHMIA-26JUN22-T94",  "KXHIGHMIA-26JUN22",  "KXHIGHMIA"),
+    ("KXHIGHLAX-26JUN22-B71.5", "KXHIGHLAX-26JUN22-T72",  "KXHIGHLAX-26JUN22",  "KXHIGHLAX"),
+    ("KXHIGHAUS-26JUN22-B88.5", "KXHIGHAUS-26JUN22-T89",  "KXHIGHAUS-26JUN22",  "KXHIGHAUS"),
+    ("KXHIGHDEN-26JUN22-B95.5", "KXHIGHDEN-26JUN22-T96",  "KXHIGHDEN-26JUN22",  "KXHIGHDEN"),
+    ("KXHIGHPHIL-26JUN22-B86.5","KXHIGHPHIL-26JUN22-T87", "KXHIGHPHIL-26JUN22", "KXHIGHPHIL"),
+    # With-T high cities (regression guard)
+    ("KXHIGHTHOU-26JUN22-B93.5","KXHIGHTHOU-26JUN22-T94", "KXHIGHTHOU-26JUN22", "KXHIGHTHOU"),
+    ("KXHIGHTSEA-26JUN22-B72.5","KXHIGHTSEA-26JUN22-T73", "KXHIGHTSEA-26JUN22", "KXHIGHTSEA"),
+    ("KXHIGHTDC-26JUN22-B88.5", "KXHIGHTDC-26JUN22-T89",  "KXHIGHTDC-26JUN22",  "KXHIGHTDC"),
+    # Low cities (regression guard — KXLOWT unchanged)
+    ("KXLOWTSEA-26JUN22-B53.5", "KXLOWTSEA-26JUN22-T54",  "KXLOWTSEA-26JUN22",  "KXLOWTSEA"),
+    ("KXLOWTBOS-26JUN22-T59",   "KXLOWTBOS-26JUN22-T60",  "KXLOWTBOS-26JUN22",  "KXLOWTBOS"),
+])
+async def test_find_next_bracket_primary_path(monkeypatch, origin_ticker, next_ticker, event_ticker, series_ticker):
+    """Primary path: the expected next-bracket ticker is pre-registered in strategy.brackets."""
+    strategy = make_strategy(monkeypatch)
+
+    origin = MarketBracket(
+        market_ticker=origin_ticker,
+        event_ticker=event_ticker,
+        series_ticker=series_ticker,
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    sibling = MarketBracket(
+        market_ticker=next_ticker,
+        event_ticker=event_ticker,
+        series_ticker=series_ticker,
+        bracket_label="next",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[origin_ticker] = origin
+    strategy.brackets[next_ticker] = sibling
+
+    result = await strategy._find_next_bracket(origin)
+    assert result == next_ticker
+
+
+@pytest.mark.asyncio
+async def test_find_next_bracket_no_t_high_t_bracket_increment(monkeypatch):
+    """T-bracket for a no-T city increments correctly: KXHIGHCHI-...-T84 → T85."""
+    strategy = make_strategy(monkeypatch)
+    origin_ticker = "KXHIGHCHI-26JUN22-T84"
+    next_ticker   = "KXHIGHCHI-26JUN22-T85"
+    event_ticker  = "KXHIGHCHI-26JUN22"
+
+    origin = MarketBracket(
+        market_ticker=origin_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHCHI",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    sibling = MarketBracket(
+        market_ticker=next_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHCHI",
+        bracket_label="next",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[origin_ticker] = origin
+    strategy.brackets[next_ticker] = sibling
+
+    result = await strategy._find_next_bracket(origin)
+    assert result == next_ticker
+
+
+@pytest.mark.asyncio
+async def test_find_next_bracket_no_t_high_fallback_path(monkeypatch):
+    """Fallback path: only a non-immediate higher sibling is registered for a no-T city.
+
+    Registers KXHIGHNY-...-T78 (not the immediate T73) and verifies the fallback
+    candidate scan — which also uses the KXHIGHT? regex — finds and returns it.
+    """
+    strategy = make_strategy(monkeypatch)
+    origin_ticker  = "KXHIGHNY-26JUN22-B72.5"
+    higher_ticker  = "KXHIGHNY-26JUN22-T78"
+    event_ticker   = "KXHIGHNY-26JUN22"
+
+    origin = MarketBracket(
+        market_ticker=origin_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHNY",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    # Only register the higher (non-immediate) sibling — forces fallback scan
+    higher = MarketBracket(
+        market_ticker=higher_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHNY",
+        bracket_label="higher",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[origin_ticker] = origin
+    strategy.brackets[higher_ticker] = higher
+
+    result = await strategy._find_next_bracket(origin)
+    assert result == higher_ticker
