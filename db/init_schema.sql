@@ -83,3 +83,13 @@ CREATE TABLE IF NOT EXISTS event_windows (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_market_ticker (market_ticker)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS stop_loss_ledger (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    series_ticker VARCHAR(200) NOT NULL,
+    date_prefix VARCHAR(20) NOT NULL,
+    stop_loss_count INT NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_series_date (series_ticker, date_prefix),
+    INDEX idx_series_ticker (series_ticker)
+) ENGINE=InnoDB;

@@ -1,7 +1,6 @@
 # core/state_machine.py
 import asyncio
 import datetime
-import math
 import re
 import structlog
 from typing import Optional
@@ -11,24 +10,26 @@ from core.types import (
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
-from execution.base import BaseExecutor, ExecutionResult
+from execution.base import BaseExecutor
 from app.database import DatabaseManager
 from app.config import AppConfig
 from app.signing import load_private_key
 from app.models import (
     StreamedTicker, StreamedTrade, ExecutedTrade, TradeAction, TradeStatus,
-    Position as PositionModel, PortfolioSnapshot,
+    Position as PositionModel, PortfolioSnapshot, StopLossLedger,
 )
 from sqlalchemy import select, delete
 
-MONTH_MAP = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
-MONTH_ORDINAL = {m: i+1 for i, m in enumerate(["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"])}
-
-# Maximum consecutive transient order failures before permanently abandoning an event's
-# recovery/hedge.  Prevents unbounded retries on flaky-but-not-permanent errors.
-RECOVERY_MAX_CONSECUTIVE_FAILURES = 5
-
 logger = structlog.get_logger(__name__)
+
+MARKET_TICKER_PATTERN = re.compile(r"^(.+?)-(\d{2}[A-Z]{3}\d{2})-(?:T\d+|B\d+\.?\d*)$")
+
+
+def parse_series_and_date(market_ticker: str) -> Optional[tuple[str, str]]:
+    match = MARKET_TICKER_PATTERN.match(market_ticker or "")
+    if not match:
+        return None
+    return match.group(1), match.group(2)
 
 
 class TemperatureStrategy:
@@ -70,27 +71,6 @@ class TemperatureStrategy:
         # Running flag
         self._running = False
 
-        # Per-event hedge state: set of event_tickers that have been hedged at least once.
-        # Only events in this set get top-off / break-even logic applied.
-        self._hedged_events: set[str] = set()
-
-        # Per-event circuit-breaker: once an event's gross spend would exceed
-        # hedge_max_factor * initial_cost, add it here to stop further hedging/top-off.
-        self._cap_reached_events: set[str] = set()
-
-        # Per-event armed/deferred hedge state: when no qualifying sibling is
-        # available at hedge time, the event is "armed" here.  Cleared once the
-        # deferred hedge fills or the event closes.
-        self._pending_hedge_events: set[str] = set()
-        # Cooldown tracker for the secondary deferred-hedge retry loop
-        # (handles events whose original bracket was already stop-lossed).
-        self._pending_hedge_last_attempt: dict[str, float] = {}
-        # Per-event terminal state: events whose recovery/hedge can never succeed
-        # (target market settled/closed, or too many consecutive failures). Once here,
-        # the event is never retried again this run.
-        self._abandoned_events: set[str] = set()
-        # Per-event consecutive recovery/hedge failure counter (transient-failure cap).
-        self._pending_hedge_failures: dict[str, int] = {}
 
     @staticmethod
     def _avg_buy_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
@@ -114,47 +94,6 @@ class TemperatureStrategy:
         if total_count > 0:
             return round((weighted_dollars / total_count) * 100)
         return 0
-
-    @staticmethod
-    def _is_permanent_order_failure(notes) -> bool:
-        """True if the order failure can never succeed on retry (market gone/closed)."""
-        if not notes:
-            return False
-        text = str(notes).lower()
-        return (
-            "market_not_found" in text
-            or "market not found" in text
-            or "not_found" in text
-            or "404" in text
-            or "market_closed" in text
-            or "market closed" in text
-            or "settled" in text
-            or "finalized" in text
-            or "expired" in text
-        )
-
-    async def _market_is_active(self, ticker: str) -> bool:
-        """Best-effort check that a market is still tradeable (status == 'active').
-        Returns True on uncertainty (so we don't over-block on transient REST errors),
-        but returns False when the market is explicitly finalized/closed/settled or 404.
-        """
-        import httpx
-        from app.signing import build_auth_headers
-        path = f"/trade-api/v2/markets/{ticker}"
-        url = f"{self.config.rest_base_url}{path}"
-        try:
-            headers = build_auth_headers(self._private_key, self.config.kalshi_api_key, "GET", path)
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code == 404:
-                    return False
-                if resp.status_code == 200:
-                    status = (resp.json().get("market", {}) or {}).get("status")
-                    if status is not None and status != "active":
-                        return False
-                return True
-        except Exception:
-            return True
 
     async def _resolve_entry_cost_basis(self, ticker: str) -> tuple[int, Optional[str]]:
         try:
@@ -182,6 +121,46 @@ class TemperatureStrategy:
                                ticker=ticker, error=str(e))
 
         return 0, None
+
+    async def _get_stop_loss_count_for_market(self, market_ticker: str) -> int:
+        parsed = parse_series_and_date(market_ticker)
+        if not parsed:
+            return 0
+        series_ticker, date_prefix = parsed
+        async with await self.db.get_session() as session:
+            result = await session.execute(
+                select(StopLossLedger).where(
+                    StopLossLedger.series_ticker == series_ticker,
+                    StopLossLedger.date_prefix == date_prefix,
+                )
+            )
+            row = result.scalar_one_or_none()
+        return int(row.stop_loss_count) if row else 0
+
+    async def _increment_stop_loss_count_for_market(self, market_ticker: str) -> None:
+        parsed = parse_series_and_date(market_ticker)
+        if not parsed:
+            return
+        series_ticker, date_prefix = parsed
+        async with await self.db.get_session() as session:
+            result = await session.execute(
+                select(StopLossLedger).where(
+                    StopLossLedger.series_ticker == series_ticker,
+                    StopLossLedger.date_prefix == date_prefix,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(
+                    StopLossLedger(
+                        series_ticker=series_ticker,
+                        date_prefix=date_prefix,
+                        stop_loss_count=1,
+                    )
+                )
+            else:
+                row.stop_loss_count = int(row.stop_loss_count or 0) + 1
+            await session.commit()
 
     async def start(self):
         """Register WebSocket handlers and start the strategy loop."""
@@ -233,7 +212,6 @@ class TemperatureStrategy:
                      buy_trigger=self.config.buy_trigger_price,
                      minimum_spread=self.config.minimum_spread,
                      spread_monitor=self.config.spread_monitor_price,
-                     hedge_trigger=self.config.hedge_trigger_price,
                      stop_loss=self.config.stop_loss_price,
                      mode=self.config.trading_mode,
                      restored_positions=len(self.active_positions))
@@ -329,12 +307,6 @@ class TemperatureStrategy:
             logger.info("strategy.restored_position", ticker=ticker,
                         qty=pos.quantity, entry=bracket.avg_entry,
                         hedge_market=bracket.hedge_market)
-
-            # Restore armed/deferred hedge state for this event
-            if getattr(pos, 'hedge_pending', 0) == 1 and pos.event_ticker:
-                self._pending_hedge_events.add(pos.event_ticker)
-                logger.info("strategy.restored_hedge_pending",
-                            ticker=ticker, event_ticker=pos.event_ticker)
 
     async def _ensure_bracket(self, market_ticker: str, event_ticker: str = "", series_ticker: str = "", bracket_label: str = ""):
         """Create a new MarketBracket if the ticker is a temperature market and unknown."""
@@ -549,7 +521,6 @@ class TemperatureStrategy:
                 # Check ticker cache for a last_price we can use
                 lp = self.cache.get_last_price(t)
                 if lp and lp > 0:
-                    from core.types import OrderBookLevel
                     level = OrderBookLevel(price=lp, quantity=1, order_count=0)
                     results[t] = OrderBook(yes_bids=[level], yes_asks=[level])
 
@@ -618,17 +589,37 @@ class TemperatureStrategy:
                 continue
 
             if spread <= self.config.minimum_spread:
+                count = await self._get_stop_loss_count_for_market(ticker)
+                max_doublings = int(self.config.hedge_max_factor)
+                if count > max_doublings:
+                    bracket.crossed_buy = True
+                    parsed = parse_series_and_date(ticker)
+                    series_ticker = parsed[0] if parsed else bracket.series_ticker
+                    logger.info("phase.b.recovery_cap_reached",
+                                series_ticker=series_ticker,
+                                count=count,
+                                max_doublings=max_doublings)
+                    continue
+                quantity = self.config.initial_contract_count * (2 ** count)
+                if count > 0:
+                    parsed = parse_series_and_date(ticker)
+                    series_ticker = parsed[0] if parsed else bracket.series_ticker
+                    logger.info("phase.b.recovery_sized_entry",
+                                series_ticker=series_ticker,
+                                count=count,
+                                multiplier=(2 ** count),
+                                quantity=quantity)
                 bracket.crossed_buy = True
                 spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
                 logger.info("phase.b.buying", ticker=ticker,
                             label=bracket.bracket_label, price=price, spread=spread,
                             spread_note=spread_note)
-                await self._execute_entry(bracket)
+                await self._execute_entry(bracket, quantity=quantity)
             else:
                 logger.info("phase.b.spread_too_wide", ticker=ticker,
                             price=price, spread=spread)
 
-    async def _execute_entry(self, bracket: MarketBracket, ob: Optional[OrderBook] = None):
+    async def _execute_entry(self, bracket: MarketBracket, ob: Optional[OrderBook] = None, quantity: Optional[int] = None):
         """
         Execute the initial buy order.
         Buy INITIAL_CONTRACT_COUNT at the lowest ask (fetched live from Kalshi API).
@@ -645,7 +636,7 @@ class TemperatureStrategy:
             market_ticker=bracket.market_ticker,
             side=OrderSide.BUY_YES,
             price=price,
-            quantity=self.config.initial_contract_count,
+            quantity=quantity if quantity is not None else self.config.initial_contract_count,
         )
 
         # Use spread_monitor_price as max price to ensure quick fill
@@ -726,16 +717,9 @@ class TemperatureStrategy:
 
     async def _evaluate_held_positions(self):
         """
-        Phase C: Position Management.
-        For each held position, get current price from positions API.
-        Only trigger hedge/stop-loss on actively priced markets.
-
-        Also runs the secondary recovery loop for armed events whose original
-        bracket has already been stop-lossed (no longer in active_positions).
-        That loop does not need the positions API, so it runs even when
-        active_positions is empty.
+        Phase C: Position Management with simple last-trade stop-loss.
         """
-        if not self.active_positions and not self._pending_hedge_events:
+        if not self.active_positions:
             return
 
         api_positions: dict = {}
@@ -744,7 +728,6 @@ class TemperatureStrategy:
                 api_positions = await self.executor.get_positions()
             except Exception as e:
                 logger.error("phase.c.get_positions_failed", error=str(e))
-                # Fall through to secondary loop; skip main position loop below.
                 api_positions = {}
 
         for ticker, bracket in list(self.active_positions.items()):
@@ -753,15 +736,13 @@ class TemperatureStrategy:
                 now_ts = asyncio.get_event_loop().time()
                 last_seen = getattr(bracket, '_last_seen_in_api', 0)
                 if last_seen == 0:
-                    # First check for this bracket; record time and skip removal
                     bracket._last_seen_in_api = now_ts
                     continue
-                grace = 30  # seconds grace period before considering the position gone
+                grace = 30
                 if now_ts - last_seen < grace:
                     logger.debug("phase.c.position_missing_within_grace", ticker=ticker,
                                  seconds_absent=int(now_ts - last_seen))
                     continue
-                # Grace period expired – treat as settled
                 logger.warning("phase.c.position_not_in_api_after_grace", ticker=ticker,
                                qty=bracket.position_quantity, phase=bracket.phase.name)
                 bracket.phase = Phase.CLOSED
@@ -774,12 +755,8 @@ class TemperatureStrategy:
                     await session.commit()
                 continue
 
-            # Mark that we have a live API reading for this position
             bracket._last_seen_in_api = asyncio.get_event_loop().time()
 
-            # Check if Kalshi has already settled this position (count = 0).
-            # If Kalshi says we hold zero, the market has closed and the
-            # position should be cleaned up.
             api_count = pos_data.get("count", 1)
             if api_count == 0:
                 logger.info("phase.c.position_settled", ticker=ticker,
@@ -787,7 +764,6 @@ class TemperatureStrategy:
                 bracket.phase = Phase.CLOSED
                 self.active_positions.pop(ticker, None)
                 self.brackets.pop(ticker, None)
-                # Also remove from DB
                 async with await self.db.get_session() as session:
                     await session.execute(
                         delete(PositionModel).where(PositionModel.market_ticker == ticker)
@@ -795,18 +771,13 @@ class TemperatureStrategy:
                     await session.commit()
                 continue
 
-            # Self-heal bracket.avg_entry when it is missing (e.g. Kalshi returned
-            # average_fill_cost_dollars=None at entry time).  Runs before hedge/stop-loss
-            # evaluation so that any sizing this cycle uses the real cost basis.
             if not bracket.avg_entry or bracket.avg_entry <= 0:
                 heal_source: Optional[str] = None
-                # Cheap path: use the already-fetched pos_data (no extra API call)
                 avg_cents = int(pos_data.get("average_fill_cost_cents") or 0)
                 if avg_cents > 0:
                     bracket.avg_entry = avg_cents
                     heal_source = "positions_inline"
                 else:
-                    # Fills fallback: throttled to at most once per 60s per ticker
                     now_heal = asyncio.get_event_loop().time()
                     last_heal = getattr(bracket, '_last_entry_heal_attempt', 0)
                     if now_heal - last_heal >= 60:
@@ -833,629 +804,26 @@ class TemperatureStrategy:
                                 pos_row.avg_entry_price = bracket.avg_entry
                                 await session.commit()
                     except Exception:
-                        pass  # DB failure must not interrupt the loop
+                        pass
 
-            # Get current price from the authoritative YES bid/ask quote.
-            # Priority:
-            #   1) cache.get_quote → YES bid (realistic exit for a YES long);
-            #      if bid is 0/missing, use YES ask.
-            #   2) Positions API last_price_cents.
-            #   3) REST _fetch_market_data_via_rest → yes_bid / yes_ask / price
-            #      (rate-limited to once per 60 s per ticker).
-            #   4) Last known real price (bracket.last_price) if > 0.
-            # NEVER use avg_entry or any invented fallback — if no real price is
-            # available, skip trading decisions this cycle.
-            current_price: Optional[int] = None
-            hedge_eval_price: Optional[int] = None
-            rest_data: Optional[dict] = None
+            last_traded_price = self.cache.get_last_price(ticker)
+            if last_traded_price is not None:
+                bracket.last_price = last_traded_price
 
-            quote = self.cache.get_quote(ticker)
-            if quote:
-                yes_bid, yes_ask = quote
-                if yes_bid and yes_bid > 0:
-                    current_price = yes_bid
-                elif yes_ask and yes_ask > 0:
-                    current_price = yes_ask
-                if yes_ask and yes_ask > 0:
-                    hedge_eval_price = yes_ask
-            if current_price and current_price > 0:
-                bracket.last_price = current_price
-
-            if not current_price or current_price <= 0:
-                api_last_price_cents = pos_data.get("last_price_cents")
-                if api_last_price_cents and api_last_price_cents > 0:
-                    current_price = api_last_price_cents
-                    bracket.last_price = current_price
-
-            if not hedge_eval_price or hedge_eval_price <= 0:
-                api_ask_cents = (
-                    pos_data.get("yes_ask_cents")
-                    or pos_data.get("ask_price_cents")
-                    or pos_data.get("yes_ask")
-                )
-                if api_ask_cents and api_ask_cents > 0:
-                    hedge_eval_price = api_ask_cents
-
-            needs_rest_for_bid = not current_price or current_price <= 0
-            needs_rest_for_ask = not hedge_eval_price or hedge_eval_price <= 0
-            if needs_rest_for_bid or needs_rest_for_ask:
-                # Rate limit: only REST-fetch once per 60 seconds per ticker.
-                now = asyncio.get_event_loop().time()
-                last_rest = getattr(bracket, '_last_rest_price_fetch', 0)
-                if now - last_rest >= 60:
-                    bracket._last_rest_price_fetch = now
-                    rest_data = await self._fetch_market_data_via_rest(ticker)
-                    if rest_data:
-                        if needs_rest_for_bid:
-                            rest_price = (rest_data.get("yes_bid")
-                                          or rest_data.get("yes_ask")
-                                          or rest_data.get("price"))
-                            if rest_price and rest_price > 0:
-                                current_price = rest_price
-                                bracket.last_price = current_price
-                        if needs_rest_for_ask:
-                            rest_ask = rest_data.get("yes_ask")
-                            if rest_ask and rest_ask > 0:
-                                hedge_eval_price = rest_ask
-
-            if not current_price or current_price <= 0:
-                # Use last known real price as a final fallback
-                if bracket.last_price and bracket.last_price > 0:
-                    current_price = bracket.last_price
-
-            if (not hedge_eval_price or hedge_eval_price <= 0) and current_price and current_price > 0:
-                hedge_eval_price = current_price
-
-            if ((not current_price or current_price <= 0)
-                    and (not hedge_eval_price or hedge_eval_price <= 0)):
-                # No real price available — skip trading decisions entirely.
-                # Never manufacture a price above the triggers.
-                logger.warning("phase.c.no_live_price", ticker=ticker,
-                               entry=bracket.avg_entry)
-                continue
-
-            # Log price only when it changes from last logged value
-            last_logged = getattr(bracket, '_last_logged_price', None)
-            if current_price != last_logged:
-                bracket._last_logged_price = current_price
-                logger.debug("phase.c.price", ticker=ticker,
-                            current_price=current_price,
-                            entry=bracket.avg_entry,
-                            hedge_trigger=self.config.hedge_trigger_price)
-            logger.debug("phase.c.hedge_eval", ticker=ticker,
-                         bid_price=current_price,
-                         ask_price=hedge_eval_price,
-                         hedge_trigger=self.config.hedge_trigger_price)
-
-            # Check Phase-2 top-off for hedged events (fires at HIGH price, before stop-loss/hedge checks)
-            if (bracket.event_ticker in self._hedged_events
-                    and bracket.event_ticker not in self._cap_reached_events
-                    and bracket.phase == Phase.HOLDING):
-                quote = self.cache.get_quote(ticker)
-                topoff_ask = quote[1] if quote else None
-                if (topoff_ask is not None
-                        and topoff_ask >= self.config.buy_trigger_price
-                        and topoff_ask <= self.config.spread_monitor_price):
-                    # Only top-off when all other event brackets are already closed
-                    open_siblings = [t for t, b in self.active_positions.items()
-                                     if b.event_ticker == bracket.event_ticker and t != ticker]
-                    if not open_siblings:
-                        now_topoff = asyncio.get_event_loop().time()
-                        last_topoff = getattr(bracket, '_last_topoff_attempt', 0)
-                        if now_topoff - last_topoff >= 60:
-                            bracket._last_topoff_attempt = now_topoff
-                            await self._execute_topoff(bracket, topoff_ask)
-
-            # Check Hedge trigger. Fires when:
-            #   a) price has weakened to <= hedge_trigger (initial trigger), OR
-            #   b) the event is already armed (hedge_pending) and we are retrying.
-            # Guard: never fire if the event already has a filled hedge/recovery — only
-            # _execute_topoff may place further buys after the event is hedged.
-            hedge_triggered = (
-                bracket.event_ticker not in self._hedged_events
-                and bracket.event_ticker not in self._abandoned_events
-                and (
-                    (
-                        current_price <= self.config.hedge_trigger_price
-                        or (hedge_eval_price and hedge_eval_price <= self.config.hedge_trigger_price)
-                    )
-                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
-                    and bracket.event_ticker not in self._cap_reached_events
-                    and (
-                        (current_price is not None and current_price > 0)
-                        or (hedge_eval_price is not None and hedge_eval_price > 0)
-                    )
-                ) or (
-                    bracket.event_ticker in self._pending_hedge_events
-                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
-                    and bracket.event_ticker not in self._cap_reached_events
-                    and bracket.event_ticker not in self._abandoned_events
-                )
-            )
-
-            hedge_placed = False
-            if hedge_triggered:
-                # Cooldown: only try hedge once per 60 seconds to prevent spam
-                now = asyncio.get_event_loop().time()
-                last_attempt = getattr(bracket, '_last_hedge_attempt', 0)
-                if now - last_attempt >= 60:
-                    bracket._last_hedge_attempt = now
-                    logger.info("phase.c.hedge_triggered", ticker=ticker,
-                                last_price=current_price,
-                                hedge_eval_price=hedge_eval_price,
-                                hedge_trigger=self.config.hedge_trigger_price,
-                                hedge_pending=(bracket.event_ticker in self._pending_hedge_events))
-                    hedge_placed = await self._execute_hedge(bracket)
-
-            # GUARANTEED STOP-LOSS BACKSTOP — fires independently of hedge/arm state.
-            # Must run even when the hedge was deferred this cycle.
-            if current_price is not None and current_price <= self.config.stop_loss_price:
+            if last_traded_price is not None and last_traded_price < self.config.stop_loss_price:
                 if bracket.position_quantity <= 0:
                     bracket.phase = Phase.CLOSED
                     self.active_positions.pop(ticker, None)
                     self.brackets.pop(ticker, None)
                     logger.info("phase.c.stop_loss_zero_qty", ticker=ticker)
                     continue
-                eval_price_floor = getattr(self.config, "eval_price_floor", 2) or 2
-                if current_price <= eval_price_floor:
-                    logger.warning("phase.c.stop_loss_skipped_resolved_market",
-                                   ticker=ticker,
-                                   last_price=current_price,
-                                   qty=bracket.position_quantity)
-                    continue
-                # NOTE: cost-basis guard intentionally removed. A hard stop is an absolute
-                # price floor: if price <= stop_loss_price we exit regardless of whether the
-                # entry price is known. _execute_stop_loss sells position_quantity at 1¢ and
-                # does not require avg_entry.
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
-                               last_price=current_price, stop_loss=self.config.stop_loss_price)
+                               last_price=last_traded_price, stop_loss=self.config.stop_loss_price)
+                if not getattr(bracket, "_stop_loss_counted", False):
+                    await self._increment_stop_loss_count_for_market(bracket.market_ticker)
+                    bracket._stop_loss_counted = True
                 await self._execute_stop_loss(bracket)
                 continue
-
-            # Only skip further checks this cycle if the hedge actually placed an order
-            if hedge_placed:
-                continue
-
-        # Secondary retry: attempt deferred hedges for armed events whose original
-        # bracket has already been stop-lossed (no longer in active_positions).
-        for event_ticker in list(self._pending_hedge_events):
-            if event_ticker in self._cap_reached_events:
-                continue
-            if event_ticker in self._hedged_events:
-                continue  # top-off will handle recovery
-            if event_ticker in self._abandoned_events:
-                self._pending_hedge_events.discard(event_ticker)
-                continue
-            if any(b.event_ticker == event_ticker for b in self.active_positions.values()):
-                continue  # handled by the main loop above
-
-            # Per-event cooldown for orphaned recovery attempts
-            now = asyncio.get_event_loop().time()
-            last_recovery = self._pending_hedge_last_attempt.get(event_ticker, 0)
-            if now - last_recovery < 60:
-                continue
-            self._pending_hedge_last_attempt[event_ticker] = now
-
-            # Scan for a qualifying sibling: YES ask strictly > hedge_buy (60¢) AND
-            # > eval_price_floor.  A cheap/weak sibling is never the right recovery
-            # target — we wait until a real winner emerges (rising above 60¢).
-            best_ticker: Optional[str] = None
-            best_ask = -1
-            best_seen_ask = -1  # track highest seen for logging even if none qualifies
-            for t, b in self.brackets.items():
-                if b.event_ticker != event_ticker:
-                    continue
-                q = self.cache.get_quote(t)
-                ask = q[1] if q else None
-                if ask is None:
-                    rest_d = await self._fetch_market_data_via_rest(t)
-                    ask = rest_d.get("yes_ask") if rest_d else None
-                if ask is not None and ask > 0:
-                    if ask > best_seen_ask:
-                        best_seen_ask = ask
-                    # Qualify only when ask has RISEN above hedge_buy and is above the floor.
-                    if ask > self.config.hedge_buy and ask > self.config.eval_price_floor and ask > best_ask:
-                        best_ask = ask
-                        best_ticker = t
-
-            if best_ticker is None or best_ask <= 0:
-                logger.info("phase.c.hedge_deferred", event_ticker=event_ticker,
-                            reason="no_qualifying_sibling_above_hedge_buy",
-                            best_sibling_price=best_seen_ask if best_seen_ask > 0 else None)
-                continue
-
-            # Pre-placement check: ensure the chosen target market is still active.
-            # Fail-open (returns True on transient/unknown errors); returns False only
-            # on explicit 404 or non-active status (settled/finalized/closed).
-            if not await self._market_is_active(best_ticker):
-                self._pending_hedge_events.discard(event_ticker)
-                self._pending_hedge_last_attempt.pop(event_ticker, None)
-                self._pending_hedge_failures.pop(event_ticker, None)
-                self._abandoned_events.add(event_ticker)
-                try:
-                    async with await self.db.get_session() as session:
-                        db_result = await session.execute(
-                            select(PositionModel).where(PositionModel.event_ticker == event_ticker)
-                        )
-                        for pos_row in (db_result.scalars().all() or []):
-                            pos_row.hedge_pending = 0
-                        await session.commit()
-                except Exception:
-                    pass
-                logger.warning("phase.c.recovery_hedge_abandoned",
-                               event_ticker=event_ticker, reason="target_market_inactive",
-                               notes=None)
-                continue
-
-            # Place recovery buy at initial_contract_count quantity
-            recovery_qty = max(self.config.initial_contract_count, 1)
-            order = OrderRequest(
-                market_ticker=best_ticker,
-                side=OrderSide.BUY_YES,
-                price=best_ask,
-                quantity=recovery_qty,
-                is_hedge=True,
-            )
-            result = await self.executor.buy_yes(order, max_price=self.config.spread_monitor_price)
-
-            async with await self.db.get_session() as session:
-                et = ExecutedTrade(
-                    market_ticker=best_ticker,
-                    action=TradeAction.HEDGE,
-                    side="yes",
-                    price=result.fill_price,
-                    quantity=result.fill_quantity,
-                    total_cost_cents=result.total_cost_cents,
-                    trade_mode=self.config.trading_mode,
-                    status=TradeStatus.FILLED if result.success else TradeStatus.REJECTED,
-                    kalshi_order_id=result.order_id or None,
-                    notes=result.notes,
-                )
-                session.add(et)
-                await session.commit()
-
-            if result.success:
-                # Add recovery bracket as active position
-                recovery_bracket = self.brackets.get(best_ticker)
-                if recovery_bracket is None:
-                    recovery_bracket = MarketBracket(
-                        market_ticker=best_ticker,
-                        event_ticker=event_ticker,
-                        series_ticker="",
-                        bracket_label="",
-                        phase=Phase.HOLDING,
-                    )
-                    self.brackets[best_ticker] = recovery_bracket
-                recovery_bracket.phase = Phase.HOLDING
-                recovery_bracket.crossed_buy = True
-                recovery_bracket.position_quantity = result.fill_quantity
-                recovery_bracket.avg_entry = result.fill_price
-                recovery_bracket.last_price = result.fill_price
-                self.active_positions[best_ticker] = recovery_bracket
-                self._hedged_events.add(event_ticker)
-                self._pending_hedge_events.discard(event_ticker)
-                self._pending_hedge_last_attempt.pop(event_ticker, None)
-                self._pending_hedge_failures.pop(event_ticker, None)
-                self._abandoned_events.discard(event_ticker)
-
-                async with await self.db.get_session() as session:
-                    existing_rec = await session.execute(
-                        select(PositionModel).where(PositionModel.market_ticker == best_ticker)
-                    )
-                    rec_pos = existing_rec.scalar_one_or_none()
-                    if rec_pos:
-                        rec_pos.quantity = rec_pos.quantity + result.fill_quantity
-                        rec_pos.avg_entry_price = result.fill_price
-                        rec_pos.last_price = result.fill_price
-                    else:
-                        rec_pos = PositionModel(
-                            market_ticker=best_ticker,
-                            event_ticker=event_ticker,
-                            series_ticker="",
-                            side="yes",
-                            quantity=result.fill_quantity,
-                            avg_entry_price=result.fill_price,
-                            last_price=result.fill_price,
-                        )
-                        session.add(rec_pos)
-                    await session.commit()
-
-                logger.info("phase.c.recovery_hedge_filled",
-                            event_ticker=event_ticker, recovery_ticker=best_ticker,
-                            qty=result.fill_quantity, price=result.fill_price)
-            else:
-                if self._is_permanent_order_failure(result.notes):
-                    # Permanent failure (market gone/closed) — abandon the event so
-                    # we never retry against a settled market again this run.
-                    self._pending_hedge_events.discard(event_ticker)
-                    self._pending_hedge_last_attempt.pop(event_ticker, None)
-                    self._pending_hedge_failures.pop(event_ticker, None)
-                    self._abandoned_events.add(event_ticker)
-                    try:
-                        async with await self.db.get_session() as session:
-                            db_result = await session.execute(
-                                select(PositionModel).where(PositionModel.event_ticker == event_ticker)
-                            )
-                            for pos_row in (db_result.scalars().all() or []):
-                                pos_row.hedge_pending = 0
-                            await session.commit()
-                    except Exception:
-                        pass
-                    logger.warning("phase.c.recovery_hedge_abandoned",
-                                   event_ticker=event_ticker, reason="permanent_failure",
-                                   notes=result.notes)
-                else:
-                    # Transient failure — increment counter and abandon after cap.
-                    new_count = self._pending_hedge_failures.get(event_ticker, 0) + 1
-                    self._pending_hedge_failures[event_ticker] = new_count
-                    if new_count >= RECOVERY_MAX_CONSECUTIVE_FAILURES:
-                        self._pending_hedge_events.discard(event_ticker)
-                        self._pending_hedge_last_attempt.pop(event_ticker, None)
-                        self._pending_hedge_failures.pop(event_ticker, None)
-                        self._abandoned_events.add(event_ticker)
-                        try:
-                            async with await self.db.get_session() as session:
-                                db_result = await session.execute(
-                                    select(PositionModel).where(PositionModel.event_ticker == event_ticker)
-                                )
-                                for pos_row in (db_result.scalars().all() or []):
-                                    pos_row.hedge_pending = 0
-                                await session.commit()
-                        except Exception:
-                            pass
-                        logger.warning("phase.c.recovery_hedge_abandoned",
-                                       event_ticker=event_ticker, reason="max_failures",
-                                       notes=result.notes)
-                    else:
-                        logger.warning("phase.c.recovery_hedge_failed",
-                                       event_ticker=event_ticker, notes=result.notes)
-
-    async def _execute_hedge(self, bracket: MarketBracket) -> bool:
-        """
-        When price drops to HEDGE_TRIGGER_PRICE, buy the highest sibling bracket
-        whose YES ask is within HEDGE_BUY (≤ 60¢).  Returns True if an order was
-        placed this call, False if the hedge was deferred (event armed) or failed.
-
-        Break-even calculation:
-        - We own position_quantity of the current bracket at avg_entry price.
-        - If price hits stop loss, we lose: position_quantity * (avg_entry - stop_loss_price)
-        - Let P_hedge = price we pay for hedge
-        - Each hedge contract pays (100 - P_hedge) profit if hedge resolves Yes.
-        - hedge_quantity = ceil(expected_loss / (100 - P_hedge))
-        """
-        # Find the next highest bracket ticker in the same event
-        next_bracket_ticker = await self._find_next_bracket(bracket)
-        if not next_bracket_ticker:
-            logger.warning("phase.c.hedge_no_bracket_found", ticker=bracket.market_ticker)
-            return False
-
-        # Scan all siblings for the highest valid YES ask (ignore price <= eval_price_floor).
-        # Use YES ask from ticker-quote cache (authoritative source); fall back to
-        # REST yes_ask.  Never use orderbook best_ask (may be empty when NO side
-        # is not tracked) and never use any NO-derived value.
-        best_sibling_ask = -1
-        best_sibling_ticker: Optional[str] = None
-        for sibling_ticker, b in self.brackets.items():
-            if b.event_ticker != bracket.event_ticker or sibling_ticker == bracket.market_ticker:
-                continue
-            quote = self.cache.get_quote(sibling_ticker)
-            ask = quote[1] if quote else None  # yes_ask_cents from ticker channel
-            if ask is None:
-                rest_data = await self._fetch_market_data_via_rest(sibling_ticker)
-                ask = rest_data.get("yes_ask") if rest_data else None
-            # Only consider siblings priced strictly above eval_price_floor (never buy dead
-            # brackets at 1¢ etc.).
-            if ask is not None and ask > self.config.eval_price_floor and ask > best_sibling_ask:
-                best_sibling_ask = ask
-                best_sibling_ticker = sibling_ticker
-
-        if best_sibling_ask < self.config.hedge_trigger_price:
-            # All siblings are weak (< hedge_trigger_price, e.g. 48¢) or no priced
-            # sibling found — there is no credible winner yet.  Arm the event and wait;
-            # the secondary recovery loop will buy once a sibling's ask rises > hedge_buy
-            # (60¢).  The stop-loss backstop remains fully active regardless.
-            self._pending_hedge_events.add(bracket.event_ticker)
-
-            # Persist the armed state to the original bracket's position row so it
-            # survives a restart.
-            async with await self.db.get_session() as session:
-                result_db = await session.execute(
-                    select(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
-                )
-                pos = result_db.scalar_one_or_none()
-                if pos:
-                    pos.hedge_pending = 1
-                    await session.commit()
-
-            logger.info("phase.c.hedge_deferred",
-                        ticker=bracket.market_ticker,
-                        event_ticker=bracket.event_ticker,
-                        best_sibling_price=best_sibling_ask if best_sibling_ask > 0 else None,
-                        hedge_buy=self.config.hedge_buy)
-            return False
-
-        # Normal hedge: best sibling has a credible ask (>= hedge_trigger_price).
-        # Proceed with break-even sizing using the existing formula.
-        next_bracket_ticker = best_sibling_ticker
-        hedge_price = best_sibling_ask
-
-        if not bracket.avg_entry or bracket.avg_entry <= 0:
-            backfilled_cents, source = await self._resolve_entry_cost_basis(bracket.market_ticker)
-            if backfilled_cents > 0:
-                bracket.avg_entry = backfilled_cents
-                logger.info("phase.c.hedge_entry_backfilled",
-                            ticker=bracket.market_ticker,
-                            source=source,
-                            cents=backfilled_cents)
-
-        if bracket.avg_entry and bracket.avg_entry > 0:
-            # Calculate expected loss if price continues to stop loss
-            expected_loss = bracket.position_quantity * (bracket.avg_entry - self.config.stop_loss_price)
-
-            # Calculate hedge quantity to break even
-            hedge_profit_per_contract = 100 - hedge_price
-            if hedge_profit_per_contract > 0 and expected_loss > 0:
-                raw_hedge_qty = (expected_loss + hedge_profit_per_contract - 1) // hedge_profit_per_contract  # ceiling
-            else:
-                raw_hedge_qty = bracket.position_quantity  # fallback
-
-            max_by_quantity = bracket.position_quantity
-            original_cost = bracket.position_quantity * bracket.avg_entry
-            max_by_cost = original_cost // hedge_price if hedge_price > 0 else bracket.position_quantity
-            capped_hedge_qty = min(raw_hedge_qty, max_by_quantity, max_by_cost)
-            hedge_qty = max(capped_hedge_qty, 1)
-            if capped_hedge_qty == raw_hedge_qty:
-                cap_reason = "formula"
-            elif capped_hedge_qty == max_by_quantity and max_by_quantity <= max_by_cost:
-                cap_reason = "quantity"
-            else:
-                cap_reason = "cost"
-
-            logger.info("phase.c.hedge_quantity_calc",
-                        ticker=bracket.market_ticker,
-                        expected_loss=expected_loss,
-                        hedge_price=hedge_price,
-                        raw_qty=raw_hedge_qty,
-                        capped_qty=hedge_qty,
-                        cap_reason=cap_reason)
-        else:
-            hedge_qty = max(bracket.position_quantity, 1)
-            logger.warning("phase.c.hedge_size_fallback_no_entry",
-                           ticker=bracket.market_ticker,
-                           qty=hedge_qty)
-
-        # Circuit-breaker: check per-event spend cap before placing the order
-        order_cost = hedge_qty * hedge_price
-        ledger = await self._event_ledger(bracket.event_ticker)
-        initial_cost = ledger["initial_cost_cents"]
-        if initial_cost > 0:
-            max_event_spend = int(self.config.hedge_max_factor * initial_cost)
-            if ledger["gross_spend_cents"] + order_cost > max_event_spend:
-                self._cap_reached_events.add(bracket.event_ticker)
-                logger.warning("phase.c.hedge_cap_reached",
-                               event_ticker=bracket.event_ticker,
-                               gross_spend_cents=ledger["gross_spend_cents"],
-                               max_event_spend_cents=max_event_spend,
-                               attempted_spend=order_cost)
-                return False
-
-        # Pre-placement check: ensure the chosen target market is still active.
-        # Fail-open on transient errors; returns False only on explicit 404 or
-        # non-active status (settled/finalized/closed).
-        if not await self._market_is_active(next_bracket_ticker):
-            logger.warning("phase.c.hedge_target_inactive",
-                           ticker=bracket.market_ticker,
-                           target=next_bracket_ticker)
-            return False
-
-        order = OrderRequest(
-            market_ticker=next_bracket_ticker,
-            side=OrderSide.BUY_YES,
-            price=hedge_price,
-            quantity=hedge_qty,
-            is_hedge=True,
-        )
-
-        result = await self.executor.buy_yes(order, max_price=self.config.spread_monitor_price)
-
-        async with await self.db.get_session() as session:
-            et = ExecutedTrade(
-                market_ticker=next_bracket_ticker,
-                action=TradeAction.HEDGE,
-                side="yes",
-                price=result.fill_price,
-                quantity=result.fill_quantity,
-                total_cost_cents=result.total_cost_cents,
-                trade_mode=self.config.trading_mode,
-                status=TradeStatus.FILLED if result.success else TradeStatus.REJECTED,
-                kalshi_order_id=result.order_id or None,
-                notes=result.notes,
-            )
-            session.add(et)
-            await session.commit()
-
-        if result.success:
-            bracket.phase = Phase.HEDGED
-            bracket.hedge_market = next_bracket_ticker
-            bracket.hedge_quantity = result.fill_quantity
-
-            # Register this event as hedged so the ledger/top-off logic activates
-            self._hedged_events.add(bracket.event_ticker)
-            # Clear any armed/deferred state now that the hedge has filled
-            self._pending_hedge_events.discard(bracket.event_ticker)
-
-            # Add the hedge bracket as its own position in active_positions
-            # so it gets stop-loss monitoring and portfolio tracking.
-            hedge_bracket = self.brackets.get(next_bracket_ticker)
-            if hedge_bracket is None:
-                hedge_bracket = MarketBracket(
-                    market_ticker=next_bracket_ticker,
-                    event_ticker=bracket.event_ticker,
-                    series_ticker=bracket.series_ticker,
-                    bracket_label="",
-                    phase=Phase.HOLDING,
-                )
-                self.brackets[next_bracket_ticker] = hedge_bracket
-            hedge_bracket.phase = Phase.HOLDING
-            hedge_bracket.crossed_buy = True
-            hedge_bracket.position_quantity = result.fill_quantity
-            hedge_bracket.avg_entry = result.fill_price
-            hedge_bracket.last_price = result.fill_price
-            self.active_positions[next_bracket_ticker] = hedge_bracket
-
-            logger.info("phase.c.hedge_filled", ticker=bracket.market_ticker,
-                        hedge_ticker=next_bracket_ticker, hedge_qty=result.fill_quantity,
-                        hedge_price=result.fill_price)
-
-            # Update positions table (original position's hedge fields)
-            # Also persist the hedge position itself so it survives restarts.
-            async with await self.db.get_session() as session:
-                result_db = await session.execute(
-                    select(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
-                )
-                pos = result_db.scalar_one_or_none()
-                if pos:
-                    pos.hedge_market_ticker = next_bracket_ticker
-                    pos.hedge_quantity = result.fill_quantity
-                    pos.hedge_pending = 0  # clear deferred state on successful fill
-
-                # Upsert hedge position row so it survives restarts
-                existing_hedge = await session.execute(
-                    select(PositionModel).where(PositionModel.market_ticker == next_bracket_ticker)
-                )
-                hedge_pos = existing_hedge.scalar_one_or_none()
-                if hedge_pos:
-                    hedge_pos.quantity = hedge_pos.quantity + result.fill_quantity
-                    hedge_pos.avg_entry_price = result.fill_price
-                    hedge_pos.last_price = result.fill_price
-                else:
-                    hedge_pos = PositionModel(
-                        market_ticker=next_bracket_ticker,
-                        event_ticker=bracket.event_ticker,
-                        series_ticker=bracket.series_ticker,
-                        side="yes",
-                        quantity=result.fill_quantity,
-                        avg_entry_price=result.fill_price,
-                        last_price=result.fill_price,
-                    )
-                    session.add(hedge_pos)
-
-                await session.commit()
-
-            return True
-        else:
-            logger.warning("phase.c.hedge_failed", ticker=bracket.market_ticker,
-                           notes=result.notes)
-            if self._is_permanent_order_failure(result.notes):
-                # Permanent failure (market gone/closed): abandon the event so the
-                # main loop does not keep triggering hedge attempts this run.
-                self._pending_hedge_events.discard(bracket.event_ticker)
-                self._abandoned_events.add(bracket.event_ticker)
-                logger.warning("phase.c.recovery_hedge_abandoned",
-                               event_ticker=bracket.event_ticker,
-                               reason="permanent_failure",
-                               notes=result.notes)
-            return False
 
     async def _execute_stop_loss(self, bracket: MarketBracket):
         """Execute a stop-loss: sell position at market (1¢) to guarantee fill."""
@@ -1517,10 +885,6 @@ class TemperatureStrategy:
             self.brackets.pop(bracket.market_ticker, None)
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         price=result.fill_price, proceeds=-result.total_cost_cents)
-            # If the event was armed (hedge_pending), keep it in the in-memory set
-            # even after the original is removed — a recovery bracket may still be
-            # bought at HEDGE_BUY (60¢) on a subsequent cycle via the secondary loop.
-            # The DB row is gone, so in-memory retention is the only state source now.
         else:
             bracket.position_quantity = live_count
             logger.warning(
@@ -1532,260 +896,6 @@ class TemperatureStrategy:
                 notes=result.notes,
                 last_price=bracket.last_price,
             )
-
-    async def _event_ledger(self, event_ticker: str) -> dict:
-        """
-        Build a cash ledger for an event from executed_trades.
-
-        Returns a dict with:
-          - initial_cost_cents: total_cost_cents of the first BUY for this event
-          - gross_spend_cents: sum of total_cost_cents for BUY and HEDGE actions
-          - stop_loss_proceeds_cents: sum of proceeds from STOP_LOSS actions
-          - open_tickers: set of market tickers still in active_positions
-          - closed_tickers: set of market tickers known for this event but not open
-        """
-        # Collect all known market tickers for this event from in-memory state
-        event_market_tickers = [
-            t for t, b in self.brackets.items()
-            if b.event_ticker == event_ticker
-        ]
-        for t, b in self.active_positions.items():
-            if b.event_ticker == event_ticker and t not in event_market_tickers:
-                event_market_tickers.append(t)
-
-        if not event_market_tickers:
-            return {
-                "initial_cost_cents": 0,
-                "gross_spend_cents": 0,
-                "stop_loss_proceeds_cents": 0,
-                "open_tickers": set(),
-                "closed_tickers": set(),
-            }
-
-        async with await self.db.get_session() as session:
-            result = await session.execute(
-                select(ExecutedTrade).where(
-                    ExecutedTrade.market_ticker.in_(event_market_tickers)
-                ).order_by(ExecutedTrade.executed_at)
-            )
-            trades = result.scalars().all()
-
-        initial_cost_cents = 0
-        gross_spend_cents = 0
-        stop_loss_proceeds_cents = 0
-        first_buy_seen = False
-
-        for trade in trades:
-            if trade.action in (TradeAction.BUY, TradeAction.HEDGE):
-                cost = trade.total_cost_cents or 0
-                gross_spend_cents += cost
-                if not first_buy_seen and trade.action == TradeAction.BUY:
-                    initial_cost_cents = cost
-                    first_buy_seen = True
-            elif trade.action == TradeAction.STOP_LOSS:
-                # total_cost_cents for a sell is negative (proceeds returned);
-                # abs() gives the cash received.
-                stop_loss_proceeds_cents += abs(trade.total_cost_cents or 0)
-
-        open_tickers = set(self.active_positions.keys()) & set(event_market_tickers)
-        closed_tickers = set(event_market_tickers) - open_tickers
-
-        return {
-            "initial_cost_cents": initial_cost_cents,
-            "gross_spend_cents": gross_spend_cents,
-            "stop_loss_proceeds_cents": stop_loss_proceeds_cents,
-            "open_tickers": open_tickers,
-            "closed_tickers": closed_tickers,
-        }
-
-    async def _execute_topoff(self, bracket: MarketBracket, yes_ask: int):
-        """
-        Phase 2: Top-off the surviving bracket so the event reaches break-even.
-
-        Sizes from the per-event ledger:
-          remaining_deficit = gross_spend_cents - (Q_current * 100)
-          topoff_qty = ceil(remaining_deficit / (100 - yes_ask))
-
-        Only fires when all other brackets in the event are closed and the
-        event's gross spend is not already covered.
-        """
-        event_ticker = bracket.event_ticker
-        ledger = await self._event_ledger(event_ticker)
-
-        gross_spend = ledger["gross_spend_cents"]
-        q_current = bracket.position_quantity
-        remaining_deficit = gross_spend - (q_current * 100)
-
-        if remaining_deficit <= 0:
-            logger.debug("phase.c.topoff_already_break_even",
-                         event_ticker=event_ticker,
-                         gross_spend=gross_spend,
-                         q_current=q_current)
-            return
-
-        profit_per_contract = 100 - yes_ask
-        if profit_per_contract <= 0:
-            logger.warning("phase.c.topoff_price_too_high",
-                           event_ticker=event_ticker,
-                           ticker=bracket.market_ticker,
-                           yes_ask=yes_ask)
-            return
-
-        topoff_qty = math.ceil(remaining_deficit / profit_per_contract)
-
-        # Circuit-breaker check
-        order_cost = topoff_qty * yes_ask
-        initial_cost = ledger["initial_cost_cents"]
-        if initial_cost > 0:
-            max_event_spend = int(self.config.hedge_max_factor * initial_cost)
-            if gross_spend + order_cost > max_event_spend:
-                self._cap_reached_events.add(event_ticker)
-                logger.warning("phase.c.hedge_cap_reached",
-                               event_ticker=event_ticker,
-                               gross_spend_cents=gross_spend,
-                               max_event_spend_cents=max_event_spend,
-                               attempted_spend=order_cost)
-                return
-
-        logger.info("phase.c.topoff_triggered",
-                    ticker=bracket.market_ticker,
-                    event_ticker=event_ticker,
-                    gross_spend=gross_spend,
-                    q_current=q_current,
-                    remaining_deficit=remaining_deficit,
-                    topoff_qty=topoff_qty,
-                    yes_ask=yes_ask)
-
-        order = OrderRequest(
-            market_ticker=bracket.market_ticker,
-            side=OrderSide.BUY_YES,
-            price=yes_ask,
-            quantity=topoff_qty,
-        )
-
-        result = await self.executor.buy_yes(order, max_price=self.config.spread_monitor_price)
-
-        async with await self.db.get_session() as session:
-            et = ExecutedTrade(
-                market_ticker=bracket.market_ticker,
-                action=TradeAction.BUY,
-                side="yes",
-                price=result.fill_price,
-                quantity=result.fill_quantity,
-                total_cost_cents=result.total_cost_cents,
-                trade_mode=self.config.trading_mode,
-                status=TradeStatus.FILLED if result.success else TradeStatus.REJECTED,
-                kalshi_order_id=result.order_id or None,
-                notes=result.notes,
-            )
-            session.add(et)
-            await session.commit()
-
-        if result.success:
-            old_qty = bracket.position_quantity
-            bracket.position_quantity = old_qty + result.fill_quantity
-            if bracket.position_quantity > 0:
-                bracket.avg_entry = (
-                    (bracket.avg_entry * old_qty + result.fill_price * result.fill_quantity)
-                    // bracket.position_quantity
-                )
-
-            logger.info("phase.c.topoff_filled",
-                        ticker=bracket.market_ticker,
-                        qty=result.fill_quantity,
-                        price=result.fill_price,
-                        new_qty=bracket.position_quantity)
-
-            # Sync updated quantity/price to positions table
-            async with await self.db.get_session() as session:
-                existing = await session.execute(
-                    select(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
-                )
-                pos = existing.scalar_one_or_none()
-                if pos:
-                    pos.quantity = bracket.position_quantity
-                    pos.avg_entry_price = bracket.avg_entry
-                    pos.last_price = result.fill_price
-                    await session.commit()
-        else:
-            logger.warning("phase.c.topoff_failed",
-                           ticker=bracket.market_ticker,
-                           notes=result.notes)
-
-    async def _find_next_bracket(self, bracket: MarketBracket) -> Optional[str]:
-        """
-        Find the next highest bracket in the same event/series by parsing the
-        market ticker. Ticker format: KXLOWTCITY-YYMMDD-T## (less than ##°) or
-        KXLOWTCITY-YYMMDD-B##.# (between ## and ##+1°).
-        """
-        ticker = bracket.market_ticker
-        event_ticker = bracket.event_ticker
-
-        # Extract the bracket type (T or B) and temperature value from ticker
-        match = re.match(r'^(KXHIGHT?|KXLOWT)(.+)-(\d{2}[A-Z]{3}\d{2})-(T\d+|B\d+\.?\d*)$', ticker)
-        if not match:
-            logger.warning("strategy.cannot_parse_ticker",
-                          ticker=ticker, event_ticker=event_ticker)
-            return None
-
-        prefix, city, date_str, bracket_code = match.groups()
-        bracket_type = bracket_code[0]  # 'T' or 'B'
-        value_str = bracket_code[1:]     # numeric part
-
-        try:
-            if bracket_type == 'T':
-                current_val = int(float(value_str))
-                next_val = current_val + 1
-                next_code = f"T{next_val}"
-            else:
-                # "B" values like 81.5 = between 81 and 82
-                current_val = float(value_str)
-                next_val = current_val + 1.0
-                if next_val == int(next_val):
-                    next_code = f"T{int(next_val)}"
-                else:
-                    next_code = f"B{next_val:.1f}"
-        except (ValueError, TypeError):
-            logger.warning("strategy.cannot_parse_bracket_value",
-                          ticker=ticker, bracket_code=bracket_code)
-            return None
-
-        next_ticker = f"{prefix}{city}-{date_str}-{next_code}"
-        if next_ticker in self.brackets:
-            return next_ticker
-
-        # Fallback: find any bracket in same event with a higher value
-        candidates = []
-        for t, b in self.brackets.items():
-            if b.event_ticker == event_ticker and t != ticker:
-                m = re.match(r'^(KXHIGHT?|KXLOWT)(.+)-(\d{2}[A-Z]{3}\d{2})-(T\d+|B\d+\.?\d*)$', t)
-                if m:
-                    bc = m.group(4)
-                    try:
-                        if bc[0] == 'T':
-                            cand_val = int(bc[1:])
-                        else:
-                            cand_val = float(bc[1:])
-                        candidates.append((cand_val, t))
-                    except ValueError:
-                        continue
-
-        if candidates:
-            try:
-                current_numeric = int(float(value_str)) if bracket_type == 'T' else float(value_str)
-            except ValueError:
-                return None
-            candidates.sort()
-            for cand_val, cand_ticker in candidates:
-                if cand_val > current_numeric:
-                    logger.info("strategy.next_bracket_found",
-                               ticker=ticker, next_ticker=cand_ticker,
-                               next_val=cand_val)
-                    return cand_ticker
-
-        logger.warning("strategy.next_bracket_not_found",
-                       ticker=ticker, event_ticker=event_ticker)
-        return None
 
     async def _fetch_market_data_via_rest(self, ticker: str) -> Optional[dict]:
         """

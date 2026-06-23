@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 import json
+import os
 pytest.importorskip("websockets")
 import websockets
 from app.signing import load_private_key, build_ws_headers
@@ -9,6 +10,8 @@ from app.config import AppConfig
 @pytest.mark.asyncio
 async def test_websocket_connection():
     c = AppConfig.from_env()
+    if not os.path.exists("kalshi_private_key.pem"):
+        pytest.skip("integration key file not available")
     key = load_private_key("kalshi_private_key.pem")
     headers = build_ws_headers(key, c.kalshi_api_key)
     print("Connecting to", c.ws_url)
@@ -22,5 +25,4 @@ async def test_websocket_connection():
             print("Response:", resp)
     except Exception as e:
         print("Failed:", type(e).__name__, str(e))
-
 
