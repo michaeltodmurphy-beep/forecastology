@@ -19,14 +19,14 @@ class AppConfig(BaseSettings):
     buy_trigger_price: int
     spread_monitor_price: int
     minimum_spread: int
-    hedge_trigger_price: int
+    hedge_trigger_price: int = 0
     stop_loss_price: int
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
-    hedge_max_factor: float = 5.0
+    hedge_max_factor: float = 3.0
     eval_price_floor: int = 5
-    hedge_buy: int = 60
+    hedge_buy: int = 0
     dry_run: bool = False
 
     @field_validator(

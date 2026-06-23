@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, String, Integer, Float, DateTime, Enum, BigInteger, Text, JSON
+from sqlalchemy import Column, String, Integer, Float, DateTime, Enum, BigInteger, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
 import enum
@@ -117,3 +117,18 @@ class EventWindow(Base):
     bracket_label = Column(String(50), nullable=True)  # e.g. "96-97"
     last_price = Column(Integer, nullable=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StopLossLedger(Base):
+    """Persistent per-(series_ticker, date_prefix) stop-loss counter for martingale sizing."""
+    __tablename__ = "stop_loss_ledger"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    series_ticker = Column(String(200), nullable=False, index=True)
+    date_prefix = Column(String(20), nullable=False)
+    stop_loss_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("series_ticker", "date_prefix", name="uq_stop_loss_ledger_series_date"),
+    )
