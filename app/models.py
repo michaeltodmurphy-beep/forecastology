@@ -1,5 +1,8 @@
 # app/models.py
-from sqlalchemy import Column, String, Integer, Float, DateTime, Enum, BigInteger, Text, JSON
+from sqlalchemy import (
+    Column, String, Integer, Float, DateTime, Enum, BigInteger, Text, JSON,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
 import enum
@@ -90,6 +93,7 @@ class Position(Base):
     # 1 = hedge is armed/deferred for this event; 0 or NULL = not armed.
     # Integer (not Boolean) for broad DB compatibility. Set on the original
     # bracket's row when a hedge is deferred, cleared on fill or close.
+    # DEPRECATED after hedge-engine removal; retained for schema/back-compat.
     hedge_pending = Column(Integer, nullable=True, default=0)
     position_ts = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -116,4 +120,29 @@ class EventWindow(Base):
     phase = Column(String(50), nullable=False)  # "MONITORING", "WATCHING", "ENTERING", "HOLDING", "HEDGED", "CLOSED"
     bracket_label = Column(String(50), nullable=True)  # e.g. "96-97"
     last_price = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StopLossLedger(Base):
+    """
+    Persistent per-(series_ticker, date) stop-loss counter that drives
+    martingale recovery sizing in Phase B entry.
+
+    One row per (series_ticker, date_prefix). High and Low are different Kalshi
+    series tickers (e.g. KXHIGHTBOS vs KXLOWTBOS), so they are tracked
+    independently with no city-name normalization required.
+
+    `date_prefix` is the YYMMMDD segment parsed from the market ticker
+    (e.g. "26JUN23"), which makes the counter reset daily implicitly: a new
+    day's markets simply never match yesterday's rows.
+    """
+    __tablename__ = "stop_loss_ledger"
+    __table_args__ = (
+        UniqueConstraint("series_ticker", "date_prefix", name="uq_series_date"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    series_ticker = Column(String(200), nullable=False, index=True)
+    date_prefix = Column(String(20), nullable=False)
+    stop_loss_count = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
