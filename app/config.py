@@ -19,20 +19,30 @@ class AppConfig(BaseSettings):
     buy_trigger_price: int
     spread_monitor_price: int
     minimum_spread: int
-    hedge_trigger_price: int
     stop_loss_price: int
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
-    hedge_max_factor: float = 5.0
+    # hedge_max_factor is REPURPOSED as the maximum number of stop-loss "doublings"
+    # allowed per (series, day) for martingale recovery sizing.
+    # Buy size at BUY_TRIGGER = initial_contract_count * 2**stop_loss_count.
+    # Buy is allowed while stop_loss_count <= hedge_max_factor; once it exceeds
+    # hedge_max_factor we stop buying that series for the rest of the day.
+    # With initial_contract_count=2 and hedge_max_factor=3 -> sizes 2,4,8,16.
+    hedge_max_factor: float = 3.0
     eval_price_floor: int = 5
-    hedge_buy: int = 60
+    # DEPRECATED / UNUSED by trading logic. Kept only so existing .env files that
+    # still define HEDGE_TRIGGER_PRICE / HEDGE_BUY continue to load, and so .env
+    # files that OMIT them do not raise (they now have safe defaults). No code
+    # references these for any trading decision after the hedge engine removal.
+    hedge_trigger_price: int = 0
+    hedge_buy: int = 0
     dry_run: bool = False
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
-        'hedge_trigger_price', 'stop_loss_price', 'monitor_start_price',
-        'eval_price_floor', 'hedge_buy',
+        'stop_loss_price', 'monitor_start_price',
+        'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         mode='before'
     )
     @classmethod
