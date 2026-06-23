@@ -30,7 +30,7 @@ class FakeClient:
         self.post_payloads.append(json)
         return self.responses.pop(0)
 
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, **kwargs):
         self.get_urls.append(url)
         return self.get_responses.pop(0)
 
@@ -184,3 +184,172 @@ async def test_dry_run_skips_live_orders(monkeypatch, method_name, order, kwargs
     assert executor._client.post_payloads == []
     dry_run_log = next(kwargs for event, kwargs in warning_logged if event == "live.dry_run_skip_order")
     assert dry_run_log["ticker"] == "TICKER"
+
+
+# ---------------------------------------------------------------------------
+# _to_dollars_float robustness
+# ---------------------------------------------------------------------------
+
+def test_to_dollars_float_robustness():
+    assert live._to_dollars_float("0.8500") == pytest.approx(0.85)
+    assert live._to_dollars_float("") == 0.0
+    assert live._to_dollars_float(None) == 0.0
+    assert live._to_dollars_float("abc") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _extract_fill — real Kalshi API shapes
+# ---------------------------------------------------------------------------
+
+def test_extract_fill_nyc_single_fill():
+    """NYC: taker_fill_cost=1.70, fill_count=2 → 85¢ (NOT the limit 90¢)."""
+    data = {
+        "fill_count_fp": "2.00",
+        "taker_fill_cost_dollars": "1.700000",
+        "maker_fill_cost_dollars": "0.000000",
+        "yes_price_dollars": "0.9000",
+        "order_id": "29a4b107-2fbe-48de-b3d4-e317661a895a",
+        "status": "executed",
+    }
+    count, price = live._extract_fill(data)
+    assert count == 2
+    assert price == 85
+    assert price != 90  # must NOT use limit price
+
+
+def test_extract_fill_miami_multi_lot():
+    """Miami: taker_fill_cost=2.02, fill_count=6 → 34¢ (NOT the limit 40¢)."""
+    data = {
+        "fill_count_fp": "6.00",
+        "taker_fill_cost_dollars": "2.020000",
+        "maker_fill_cost_dollars": "0.000000",
+        "yes_price_dollars": "0.4000",
+        "order_id": "e1bdb76c-8366-43b2-b0ff-dac6ac74fae1",
+        "status": "executed",
+    }
+    count, price = live._extract_fill(data)
+    assert count == 6
+    assert price == 34
+    assert price != 40  # must NOT use limit price
+
+
+def test_extract_fill_zero_fill():
+    """Order placed but not yet filled (fill_count_fp=0)."""
+    data = {"fill_count_fp": "0.00", "remaining_count_fp": "2.00"}
+    count, price = live._extract_fill(data)
+    assert count == 0
+    assert price == 0
+
+
+def test_extract_fill_fallback_to_limit_when_no_cost(monkeypatch):
+    """When *_fill_cost_dollars are absent, falls back to yes_price_dollars and warns."""
+    warnings_logged = []
+    monkeypatch.setattr(live.logger, "warning", lambda event, **kw: warnings_logged.append(event))
+
+    data = {"fill_count_fp": "1.00", "yes_price_dollars": "0.5000"}
+    count, price = live._extract_fill(data)
+    assert count == 1
+    assert price == 50
+    assert "live.fill_price_fallback_to_limit" in warnings_logged
+
+
+def test_extract_fill_wrapped_order_key():
+    """API response wrapped under {"order": {...}} still returns correct values."""
+    data = {
+        "order": {
+            "fill_count_fp": "2.00",
+            "taker_fill_cost_dollars": "1.700000",
+            "maker_fill_cost_dollars": "0.000000",
+            "yes_price_dollars": "0.9000",
+            "order_id": "29a4b107-2fbe-48de-b3d4-e317661a895a",
+        }
+    }
+    count, price = live._extract_fill(data)
+    assert count == 2
+    assert price == 85
+
+
+# ---------------------------------------------------------------------------
+# _avg_fill_price_cents_from_fills
+# ---------------------------------------------------------------------------
+
+def test_avg_fill_price_cents_from_fills_miami():
+    """Miami: 1 lot @37¢ + 5 lots @33¢ → weighted avg → 34¢."""
+    fills = [
+        {
+            "ticker": "KXLOWTMIA-26JUN22-B80.5",
+            "action": "buy",
+            "count_fp": "1.00",
+            "yes_price_dollars": "0.3700",
+        },
+        {
+            "ticker": "KXLOWTMIA-26JUN22-B80.5",
+            "action": "buy",
+            "count_fp": "5.00",
+            "yes_price_dollars": "0.3300",
+        },
+    ]
+    result = live._avg_fill_price_cents_from_fills(fills, "KXLOWTMIA-26JUN22-B80.5")
+    assert result == 34
+
+
+def test_avg_fill_price_cents_from_fills_ignores_sells_and_other_tickers():
+    """Sell fills and fills for other tickers must be excluded from cost basis."""
+    fills = [
+        {
+            "ticker": "KXLOWTMIA-26JUN22-B80.5",
+            "action": "buy",
+            "count_fp": "4.00",
+            "yes_price_dollars": "0.3500",
+        },
+        {
+            "ticker": "KXLOWTMIA-26JUN22-B80.5",
+            "action": "sell",  # should be ignored
+            "count_fp": "2.00",
+            "yes_price_dollars": "0.9000",
+        },
+        {
+            "ticker": "KXHIGHNY-26JUN22-B72.5",  # different ticker — should be ignored
+            "action": "buy",
+            "count_fp": "3.00",
+            "yes_price_dollars": "0.9000",
+        },
+    ]
+    result = live._avg_fill_price_cents_from_fills(fills, "KXLOWTMIA-26JUN22-B80.5")
+    assert result == 35  # only the 4@35¢ buy counts
+
+
+# ---------------------------------------------------------------------------
+# get_positions fills_history fallback
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_positions_fills_history_fallback(monkeypatch):
+    """When position cost is unknown from positions endpoint, fills_history is used."""
+    debug_logged = []
+    monkeypatch.setattr(live.logger, "debug", lambda event, **kw: debug_logged.append((event, kw)))
+
+    positions_resp = FakeResponse(200, {
+        "market_positions": [{
+            "ticker": "KXLOWTNYC-26JUN22-B67.5",
+            "position_fp": "2.00",
+            "last_price": "0.85",
+        }]
+    })
+    fills_resp = FakeResponse(200, {
+        "fills": [
+            {
+                "ticker": "KXLOWTNYC-26JUN22-B67.5",
+                "action": "buy",
+                "count_fp": "2.00",
+                "yes_price_dollars": "0.8500",
+            }
+        ]
+    })
+    executor = _make_executor(monkeypatch, get_responses=[positions_resp, fills_resp])
+
+    positions = await executor.get_positions()
+
+    assert positions["KXLOWTNYC-26JUN22-B67.5"]["average_fill_cost_cents"] == 85
+    cost_log = next(kw for event, kw in debug_logged if event == "live.position_cost_basis")
+    assert cost_log["source"] == "fills_history"

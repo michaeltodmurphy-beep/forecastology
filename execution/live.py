@@ -22,21 +22,75 @@ def _to_cents_int(value) -> int:
         return 0
 
 
+def _to_dollars_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _extract_fill(data: dict) -> tuple[int, int]:
-    fill = data.get("fill") or {}
+    """Return (fill_count, avg_fill_price_cents) from a Kalshi order-create response.
+
+    Kalshi returns the order object with fill_count_fp and *_fill_cost_dollars.
+    The average fill price is total fill cost / fill count (fees excluded).
+    NOTE: yes_price_dollars on an order is the LIMIT price, not the fill price,
+    so it must NOT be used as the cost basis.
+    """
+    order = data.get("order") if isinstance(data.get("order"), dict) else data
+
+    # Fill count: prefer fill_count_fp; fall back to legacy keys.
+    fill_obj = data.get("fill") or {}
     fill_count = _to_cents_int(
-        fill.get("count")
-        or fill.get("filled_count")
-        or data.get("fill_count")
-        or data.get("filled_count")
+        order.get("fill_count_fp")
+        or order.get("fill_count")
+        or order.get("filled_count")
+        or fill_obj.get("count")
     )
-    fill_price = _to_cents_int(
-        fill.get("price")
-        or fill.get("avg_price")
-        or data.get("fill_price")
-        or data.get("avg_price")
-    )
-    return fill_count, fill_price
+    if fill_count <= 0:
+        return 0, 0
+
+    # Total fill cost in dollars (taker + maker), fees excluded.
+    taker_cost = _to_dollars_float(order.get("taker_fill_cost_dollars"))
+    maker_cost = _to_dollars_float(order.get("maker_fill_cost_dollars"))
+    total_cost_dollars = taker_cost + maker_cost
+
+    if total_cost_dollars > 0:
+        avg_price_cents = round((total_cost_dollars / fill_count) * 100)
+    else:
+        # Fallback chain when fill-cost is absent (older/partial responses):
+        #  1) an explicit fill avg price, if present
+        #  2) yes_price_dollars (LIMIT price) as a last resort — log a warning
+        explicit = (fill_obj.get("price") or fill_obj.get("avg_price")
+                    or order.get("avg_price"))
+        if explicit:
+            avg_price_cents = _to_cents_int(explicit)
+        else:
+            yp = order.get("yes_price_dollars")
+            avg_price_cents = round(_to_dollars_float(yp) * 100) if yp else 0
+            if avg_price_cents > 0:
+                logger.warning("live.fill_price_fallback_to_limit",
+                               note="used yes_price_dollars (limit) as fill price")
+    return fill_count, avg_price_cents
+
+
+def _avg_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
+    """Compute volume-weighted average BUY fill price in cents for a ticker."""
+    total_count = 0.0
+    weighted_dollars = 0.0
+    for f in fills:
+        if f.get("ticker") != ticker and f.get("market_ticker") != ticker:
+            continue
+        if (f.get("action") or "").lower() != "buy":
+            continue
+        cnt = _to_dollars_float(f.get("count_fp") or f.get("count"))
+        price = _to_dollars_float(f.get("yes_price_dollars"))
+        if cnt > 0 and price > 0:
+            total_count += cnt
+            weighted_dollars += price * cnt
+    if total_count > 0:
+        return round((weighted_dollars / total_count) * 100)
+    return 0
 
 
 class LiveTradeExecutor(BaseExecutor):
@@ -107,7 +161,7 @@ class LiveTradeExecutor(BaseExecutor):
                     )
                 order_id = data.get("order_id", "")
                 logger.info("live.buy_yes_filled",
-                            ticker=order.market_ticker, price=order.price, qty=order.quantity)
+                            ticker=order.market_ticker, fill_price=fill_price, fill_count=fill_quantity)
                 return ExecutionResult(
                     success=True,
                     market_ticker=order.market_ticker,
@@ -191,7 +245,7 @@ class LiveTradeExecutor(BaseExecutor):
                     )
                 order_id = data.get("order_id", "")
                 logger.info("live.sell_yes_filled",
-                            ticker=order.market_ticker, price=order.price, qty=order.quantity)
+                            ticker=order.market_ticker, fill_price=fill_price, fill_count=fill_quantity)
                 return ExecutionResult(
                     success=True,
                     market_ticker=order.market_ticker,
@@ -269,12 +323,30 @@ class LiveTradeExecutor(BaseExecutor):
                      event_count=len(event_tickers))
         return all_markets
 
+    async def get_fills(self, ticker: Optional[str] = None, limit: int = 200) -> list:
+        """Fetch fills from /trade-api/v2/portfolio/fills (optionally for one ticker)."""
+        path = "/trade-api/v2/portfolio/fills"
+        headers = self._headers("GET", path)
+        params: dict = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        resp = await self._client.get(f"{self.base_url}{path}", headers=headers, params=params)
+        if resp.status_code in (200, 201):
+            return resp.json().get("fills", [])
+        return []
+
     async def get_positions(self) -> dict[str, dict]:
         path = REST_PORTFOLIO_POSITIONS
         url = f"{self.base_url}{path}"
         headers = self._headers("GET", path)
         resp = await self._client.get(url, headers=headers)
         data = resp.json()
+
+        try:
+            all_fills = await self.get_fills(limit=200)
+        except Exception:
+            all_fills = []
+
         positions = {}
         for pos in data.get("market_positions", []):
             ticker = pos.get("ticker", "")
@@ -311,6 +383,12 @@ class LiveTradeExecutor(BaseExecutor):
                             cost_cents = round(total_cents / pos["count"])
                             cost_source = total_field
                             break
+
+                if cost_cents <= 0 and pos["count"] > 0:
+                    fills_cost = _avg_fill_price_cents_from_fills(all_fills, ticker)
+                    if fills_cost > 0:
+                        cost_cents = fills_cost
+                        cost_source = "fills_history"
 
                 pos["average_fill_cost_cents"] = cost_cents if cost_cents > 0 else 0
                 logger.debug(
