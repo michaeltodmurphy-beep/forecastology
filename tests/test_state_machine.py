@@ -366,6 +366,142 @@ async def test_execute_hedge_caps_quantity(monkeypatch, avg_entry, position_quan
 
 
 @pytest.mark.asyncio
+async def test_execute_hedge_backfills_entry_from_positions(monkeypatch):
+    import core.state_machine as state_machine
+
+    logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda event, **kwargs: logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    sibling = "KXLOWTSATX-26JUN23-T79"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+    )
+    sibling_bracket = MarketBracket(
+        market_ticker=sibling,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.brackets[sibling] = sibling_bracket
+    strategy.cache.update_quote(sibling, 47, 48)
+    monkeypatch.setattr(strategy, "_find_next_bracket", AsyncMock(return_value=sibling))
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"average_fill_cost_cents": 86}}))
+
+    await strategy._execute_hedge(bracket)
+
+    assert bracket.avg_entry == 86
+    assert len(strategy.executor.orders) == 1
+    assert any(event == "phase.c.hedge_entry_backfilled" and kwargs["source"] == "positions" and kwargs["cents"] == 86
+               for event, kwargs in logged)
+    assert all(event != "phase.c.hedge_no_entry_price" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_execute_hedge_backfills_entry_from_fills(monkeypatch):
+    import core.state_machine as state_machine
+
+    logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda event, **kwargs: logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    sibling = "KXLOWTSATX-26JUN23-T79"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=0,
+    )
+    sibling_bracket = MarketBracket(
+        market_ticker=sibling,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.brackets[sibling] = sibling_bracket
+    strategy.cache.update_quote(sibling, 47, 48)
+    monkeypatch.setattr(strategy, "_find_next_bracket", AsyncMock(return_value=sibling))
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {}}))
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_fills",
+        AsyncMock(return_value=[
+            {"market_ticker": ticker, "action": "buy", "count_fp": "2", "yes_price_dollars": "0.85"},
+            {"market_ticker": ticker, "action": "buy", "count_fp": "1", "yes_price_dollars": "0.85"},
+        ]),
+        raising=False,
+    )
+
+    await strategy._execute_hedge(bracket)
+
+    assert bracket.avg_entry == 85
+    assert len(strategy.executor.orders) == 1
+    assert any(event == "phase.c.hedge_entry_backfilled" and kwargs["source"] == "fills" and kwargs["cents"] == 85
+               for event, kwargs in logged)
+
+
+@pytest.mark.asyncio
+async def test_execute_hedge_falls_back_to_full_qty_when_entry_unknown(monkeypatch):
+    import core.state_machine as state_machine
+
+    logged_warnings = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda event, **kwargs: logged_warnings.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    sibling = "KXLOWTSATX-26JUN23-T79"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=3,
+        avg_entry=0,
+    )
+    sibling_bracket = MarketBracket(
+        market_ticker=sibling,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.brackets[sibling] = sibling_bracket
+    strategy.cache.update_quote(sibling, 49, 50)
+    monkeypatch.setattr(strategy, "_find_next_bracket", AsyncMock(return_value=sibling))
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {}}))
+    monkeypatch.setattr(strategy.executor, "get_fills", AsyncMock(return_value=[]), raising=False)
+
+    await strategy._execute_hedge(bracket)
+
+    assert len(strategy.executor.orders) == 1
+    order, _ = strategy.executor.orders[0]
+    assert order.quantity == 3
+    assert any(event == "phase.c.hedge_size_fallback_no_entry" and kwargs["qty"] == 3
+               for event, kwargs in logged_warnings)
+
+
+@pytest.mark.asyncio
 async def test_ensure_bracket_filters_non_today_tickers(monkeypatch):
     import core.state_machine as state_machine
 
@@ -1214,6 +1350,256 @@ async def test_phase_c_no_live_price_skips_trading_no_invented_fallback(monkeypa
 
     # Must NOT have placed any order (no invented price above triggers)
     assert len(strategy.executor.orders) == 0
+
+
+@pytest.mark.asyncio
+async def test_entry_reconciles_fill_price_zero_from_positions(monkeypatch):
+    import core.state_machine as state_machine
+
+    logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda event, **kwargs: logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.MONITORING,
+    )
+
+    monkeypatch.setattr(
+        strategy.executor,
+        "buy_yes",
+        AsyncMock(return_value=ExecutionResult(
+            success=True,
+            market_ticker=ticker,
+            side="yes",
+            price=82,
+            quantity=2,
+            fill_price=0,
+            fill_quantity=2,
+            total_cost_cents=0,
+            order_id="x",
+            notes="ok",
+        )),
+    )
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({ticker: {"average_fill_cost_cents": 84}}))
+
+    await strategy._execute_entry(bracket, ob=OrderBook(yes_asks=[OrderBookLevel(price=82, quantity=10, order_count=1)]))
+
+    assert bracket.avg_entry == 84
+    assert ticker in strategy.active_positions
+    assert any(event == "phase.b.entry_cost_reconciled" and kwargs["source"] == "positions" and kwargs["cents"] == 84
+               for event, kwargs in logged)
+
+
+@pytest.mark.asyncio
+async def test_entry_reconciles_fill_price_zero_from_fills(monkeypatch):
+    import core.state_machine as state_machine
+
+    logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda event, **kwargs: logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.MONITORING,
+    )
+
+    monkeypatch.setattr(
+        strategy.executor,
+        "buy_yes",
+        AsyncMock(return_value=ExecutionResult(
+            success=True,
+            market_ticker=ticker,
+            side="yes",
+            price=82,
+            quantity=2,
+            fill_price=0,
+            fill_quantity=2,
+            total_cost_cents=0,
+            order_id="x",
+            notes="ok",
+        )),
+    )
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {}}))
+    monkeypatch.setattr(
+        strategy.executor,
+        "get_fills",
+        AsyncMock(return_value=[
+            {"market_ticker": ticker, "action": "buy", "count_fp": "2", "yes_price_dollars": "0.83"},
+            {"market_ticker": ticker, "action": "buy", "count_fp": "2", "yes_price_dollars": "0.85"},
+        ]),
+        raising=False,
+    )
+
+    await strategy._execute_entry(bracket, ob=OrderBook(yes_asks=[OrderBookLevel(price=82, quantity=10, order_count=1)]))
+
+    assert bracket.avg_entry == 84
+    assert any(event == "phase.b.entry_cost_reconciled" and kwargs["source"] == "fills" and kwargs["cents"] == 84
+               for event, kwargs in logged)
+
+
+@pytest.mark.asyncio
+async def test_entry_fill_price_zero_reconcile_failure_is_non_fatal(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.MONITORING,
+    )
+
+    monkeypatch.setattr(
+        strategy.executor,
+        "buy_yes",
+        AsyncMock(return_value=ExecutionResult(
+            success=True,
+            market_ticker=ticker,
+            side="yes",
+            price=82,
+            quantity=2,
+            fill_price=0,
+            fill_quantity=2,
+            total_cost_cents=0,
+            order_id="x",
+            notes="ok",
+        )),
+    )
+    monkeypatch.setattr(strategy.executor, "get_positions", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(strategy.executor, "get_fills", AsyncMock(side_effect=RuntimeError("boom2")), raising=False)
+
+    await strategy._execute_entry(bracket, ob=OrderBook(yes_asks=[OrderBookLevel(price=82, quantity=10, order_count=1)]))
+
+    assert ticker in strategy.active_positions
+    assert bracket.position_quantity == 2
+    assert bracket.avg_entry == 0
+
+
+@pytest.mark.asyncio
+async def test_ask_price_can_trigger_hedge_even_when_bid_is_healthy(monkeypatch):
+    import core.state_machine as state_machine
+
+    debug_logged = []
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda event, **kwargs: debug_logged.append((event, kwargs)))
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 94, 47)
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 94}}))
+    strategy._execute_hedge = AsyncMock(return_value=True)
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_hedge.assert_awaited_once_with(bracket)
+    hedge_eval = next(kwargs for event, kwargs in debug_logged if event == "phase.c.hedge_eval")
+    assert hedge_eval["bid_price"] == 94
+    assert hedge_eval["ask_price"] == 47
+
+
+@pytest.mark.asyncio
+async def test_no_hedge_when_bid_and_ask_are_healthy(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 94, 94)
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 94}}))
+    strategy._execute_hedge = AsyncMock(return_value=True)
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_hedge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_still_uses_realistic_price(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy.cache.update_quote(ticker, 30, 48)
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {"count": 2, "last_price_cents": 30}}))
+    strategy._execute_hedge = AsyncMock(return_value=True)
+    strategy._execute_stop_loss = AsyncMock()
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_awaited_once_with(bracket)
+
+
+@pytest.mark.asyncio
+async def test_only_ask_price_available_does_not_skip_with_no_live_price(monkeypatch):
+    import core.state_machine as state_machine
+
+    warning_events = []
+    monkeypatch.setattr(state_machine.logger, "warning", lambda event, **kwargs: warning_events.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTSATX-26JUN23-T78"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXLOWTSATX-26JUN23",
+        series_ticker="KXLOWTSATX",
+        bracket_label="origin",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    strategy._execute_hedge = AsyncMock(return_value=True)
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"yes_ask": 46, "yes_bid": None, "price": None})
+    monkeypatch.setattr(strategy.executor, "get_positions", _make_fake_get_positions({ticker: {"count": 2}}))
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_hedge.assert_awaited_once_with(bracket)
+    assert all(event != "phase.c.no_live_price" for event, _ in warning_events)
 
 
 @pytest.mark.asyncio

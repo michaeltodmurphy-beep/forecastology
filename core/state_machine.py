@@ -82,6 +82,56 @@ class TemperatureStrategy:
         # (handles events whose original bracket was already stop-lossed).
         self._pending_hedge_last_attempt: dict[str, float] = {}
 
+    @staticmethod
+    def _avg_buy_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
+        total_count = 0.0
+        weighted_dollars = 0.0
+        for fill in fills or []:
+            if fill.get("ticker") != ticker and fill.get("market_ticker") != ticker:
+                continue
+            if (fill.get("action") or "").lower() != "buy":
+                continue
+            count = fill.get("count_fp") or fill.get("count") or 0
+            price = fill.get("yes_price_dollars") or 0
+            try:
+                count_f = float(count)
+                price_f = float(price)
+            except (TypeError, ValueError):
+                continue
+            if count_f > 0 and price_f > 0:
+                total_count += count_f
+                weighted_dollars += price_f * count_f
+        if total_count > 0:
+            return round((weighted_dollars / total_count) * 100)
+        return 0
+
+    async def _resolve_entry_cost_basis(self, ticker: str) -> tuple[int, Optional[str]]:
+        try:
+            positions = await self.executor.get_positions()
+            pos_data = positions.get(ticker, {}) if isinstance(positions, dict) else {}
+            avg_from_positions = int(pos_data.get("average_fill_cost_cents") or 0)
+            if avg_from_positions > 0:
+                return avg_from_positions, "positions"
+        except Exception as e:
+            logger.warning("phase.c.hedge_entry_backfill_positions_failed",
+                           ticker=ticker, error=str(e))
+
+        if hasattr(self.executor, "get_fills"):
+            try:
+                fills = await self.executor.get_fills(ticker=ticker)
+                avg_fn = getattr(self.executor, "_avg_fill_price_cents_from_fills", None)
+                if callable(avg_fn):
+                    avg_from_fills = int(avg_fn(fills, ticker) or 0)
+                else:
+                    avg_from_fills = self._avg_buy_fill_price_cents_from_fills(fills, ticker)
+                if avg_from_fills > 0:
+                    return avg_from_fills, "fills"
+            except Exception as e:
+                logger.warning("phase.c.hedge_entry_backfill_fills_failed",
+                               ticker=ticker, error=str(e))
+
+        return 0, None
+
     async def start(self):
         """Register WebSocket handlers and start the strategy loop."""
         self._running = True
@@ -569,9 +619,19 @@ class TemperatureStrategy:
             await session.commit()
 
         if result.success:
+            reconciled_fill_price = result.fill_price
+            if result.fill_quantity > 0 and result.fill_price <= 0:
+                backfilled_cents, source = await self._resolve_entry_cost_basis(bracket.market_ticker)
+                if backfilled_cents > 0:
+                    reconciled_fill_price = backfilled_cents
+                    logger.info("phase.b.entry_cost_reconciled",
+                                ticker=bracket.market_ticker,
+                                source=source,
+                                cents=backfilled_cents)
+
             bracket.phase = Phase.HOLDING
             bracket.position_quantity = result.fill_quantity
-            bracket.avg_entry = result.fill_price
+            bracket.avg_entry = reconciled_fill_price
             self.active_positions[bracket.market_ticker] = bracket
             logger.info("phase.b.entry_filled", ticker=bracket.market_ticker,
                         price=result.fill_price, qty=result.fill_quantity,
@@ -588,8 +648,8 @@ class TemperatureStrategy:
                 if pos:
                     # Update existing position if found
                     pos.quantity = pos.quantity + result.fill_quantity
-                    pos.avg_entry_price = result.fill_price
-                    pos.last_price = result.fill_price
+                    pos.avg_entry_price = reconciled_fill_price
+                    pos.last_price = reconciled_fill_price
                 else:
                     # Insert new position
                     pos = PositionModel(
@@ -598,8 +658,8 @@ class TemperatureStrategy:
                         series_ticker=bracket.series_ticker,
                         side="yes",
                         quantity=result.fill_quantity,
-                        avg_entry_price=result.fill_price,
-                        last_price=result.fill_price,
+                        avg_entry_price=reconciled_fill_price,
+                        last_price=reconciled_fill_price,
                     )
                     session.add(pos)
                 
@@ -695,6 +755,8 @@ class TemperatureStrategy:
             # NEVER use avg_entry or any invented fallback — if no real price is
             # available, skip trading decisions this cycle.
             current_price: Optional[int] = None
+            hedge_eval_price: Optional[int] = None
+            rest_data: Optional[dict] = None
 
             quote = self.cache.get_quote(ticker)
             if quote:
@@ -703,6 +765,8 @@ class TemperatureStrategy:
                     current_price = yes_bid
                 elif yes_ask and yes_ask > 0:
                     current_price = yes_ask
+                if yes_ask and yes_ask > 0:
+                    hedge_eval_price = yes_ask
             if current_price and current_price > 0:
                 bracket.last_price = current_price
 
@@ -712,7 +776,18 @@ class TemperatureStrategy:
                     current_price = api_last_price_cents
                     bracket.last_price = current_price
 
-            if not current_price or current_price <= 0:
+            if not hedge_eval_price or hedge_eval_price <= 0:
+                api_ask_cents = (
+                    pos_data.get("yes_ask_cents")
+                    or pos_data.get("ask_price_cents")
+                    or pos_data.get("yes_ask")
+                )
+                if api_ask_cents and api_ask_cents > 0:
+                    hedge_eval_price = api_ask_cents
+
+            needs_rest_for_bid = not current_price or current_price <= 0
+            needs_rest_for_ask = not hedge_eval_price or hedge_eval_price <= 0
+            if needs_rest_for_bid or needs_rest_for_ask:
                 # Rate limit: only REST-fetch once per 60 seconds per ticker.
                 now = asyncio.get_event_loop().time()
                 last_rest = getattr(bracket, '_last_rest_price_fetch', 0)
@@ -720,19 +795,28 @@ class TemperatureStrategy:
                     bracket._last_rest_price_fetch = now
                     rest_data = await self._fetch_market_data_via_rest(ticker)
                     if rest_data:
-                        rest_price = (rest_data.get("yes_bid")
-                                      or rest_data.get("yes_ask")
-                                      or rest_data.get("price"))
-                        if rest_price and rest_price > 0:
-                            current_price = rest_price
-                            bracket.last_price = current_price
+                        if needs_rest_for_bid:
+                            rest_price = (rest_data.get("yes_bid")
+                                          or rest_data.get("yes_ask")
+                                          or rest_data.get("price"))
+                            if rest_price and rest_price > 0:
+                                current_price = rest_price
+                                bracket.last_price = current_price
+                        if needs_rest_for_ask:
+                            rest_ask = rest_data.get("yes_ask")
+                            if rest_ask and rest_ask > 0:
+                                hedge_eval_price = rest_ask
 
             if not current_price or current_price <= 0:
                 # Use last known real price as a final fallback
                 if bracket.last_price and bracket.last_price > 0:
                     current_price = bracket.last_price
 
-            if not current_price or current_price <= 0:
+            if (not hedge_eval_price or hedge_eval_price <= 0) and current_price and current_price > 0:
+                hedge_eval_price = current_price
+
+            if ((not current_price or current_price <= 0)
+                    and (not hedge_eval_price or hedge_eval_price <= 0)):
                 # No real price available — skip trading decisions entirely.
                 # Never manufacture a price above the triggers.
                 logger.warning("phase.c.no_live_price", ticker=ticker,
@@ -747,6 +831,10 @@ class TemperatureStrategy:
                             current_price=current_price,
                             entry=bracket.avg_entry,
                             hedge_trigger=self.config.hedge_trigger_price)
+            logger.debug("phase.c.hedge_eval", ticker=ticker,
+                         bid_price=current_price,
+                         ask_price=hedge_eval_price,
+                         hedge_trigger=self.config.hedge_trigger_price)
 
             # Check Phase-2 top-off for hedged events (fires at HIGH price, before stop-loss/hedge checks)
             if (bracket.event_ticker in self._hedged_events
@@ -777,14 +865,18 @@ class TemperatureStrategy:
                 and (
                     (
                         current_price <= self.config.hedge_trigger_price
-                        and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
-                        and bracket.event_ticker not in self._cap_reached_events
-                        and current_price > 0
-                    ) or (
-                        bracket.event_ticker in self._pending_hedge_events
-                        and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
-                        and bracket.event_ticker not in self._cap_reached_events
+                        or (hedge_eval_price and hedge_eval_price <= self.config.hedge_trigger_price)
                     )
+                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
+                    and bracket.event_ticker not in self._cap_reached_events
+                    and (
+                        (current_price is not None and current_price > 0)
+                        or (hedge_eval_price is not None and hedge_eval_price > 0)
+                    )
+                ) or (
+                    bracket.event_ticker in self._pending_hedge_events
+                    and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
+                    and bracket.event_ticker not in self._cap_reached_events
                 )
             )
 
@@ -797,13 +889,14 @@ class TemperatureStrategy:
                     bracket._last_hedge_attempt = now
                     logger.info("phase.c.hedge_triggered", ticker=ticker,
                                 last_price=current_price,
+                                hedge_eval_price=hedge_eval_price,
                                 hedge_trigger=self.config.hedge_trigger_price,
                                 hedge_pending=(bracket.event_ticker in self._pending_hedge_events))
                     hedge_placed = await self._execute_hedge(bracket)
 
             # GUARANTEED STOP-LOSS BACKSTOP — fires independently of hedge/arm state.
             # Must run even when the hedge was deferred this cycle.
-            if current_price <= self.config.stop_loss_price:
+            if current_price is not None and current_price <= self.config.stop_loss_price:
                 if bracket.position_quantity <= 0:
                     bracket.phase = Phase.CLOSED
                     self.active_positions.pop(ticker, None)
@@ -1022,42 +1115,50 @@ class TemperatureStrategy:
         next_bracket_ticker = best_sibling_ticker
         hedge_price = best_sibling_ask
 
-        # Guard: skip hedging if we don't have a valid entry price
         if not bracket.avg_entry or bracket.avg_entry <= 0:
-            logger.warning("phase.c.hedge_no_entry_price",
+            backfilled_cents, source = await self._resolve_entry_cost_basis(bracket.market_ticker)
+            if backfilled_cents > 0:
+                bracket.avg_entry = backfilled_cents
+                logger.info("phase.c.hedge_entry_backfilled",
+                            ticker=bracket.market_ticker,
+                            source=source,
+                            cents=backfilled_cents)
+
+        if bracket.avg_entry and bracket.avg_entry > 0:
+            # Calculate expected loss if price continues to stop loss
+            expected_loss = bracket.position_quantity * (bracket.avg_entry - self.config.stop_loss_price)
+
+            # Calculate hedge quantity to break even
+            hedge_profit_per_contract = 100 - hedge_price
+            if hedge_profit_per_contract > 0 and expected_loss > 0:
+                raw_hedge_qty = (expected_loss + hedge_profit_per_contract - 1) // hedge_profit_per_contract  # ceiling
+            else:
+                raw_hedge_qty = bracket.position_quantity  # fallback
+
+            max_by_quantity = bracket.position_quantity
+            original_cost = bracket.position_quantity * bracket.avg_entry
+            max_by_cost = original_cost // hedge_price if hedge_price > 0 else bracket.position_quantity
+            capped_hedge_qty = min(raw_hedge_qty, max_by_quantity, max_by_cost)
+            hedge_qty = max(capped_hedge_qty, 1)
+            if capped_hedge_qty == raw_hedge_qty:
+                cap_reason = "formula"
+            elif capped_hedge_qty == max_by_quantity and max_by_quantity <= max_by_cost:
+                cap_reason = "quantity"
+            else:
+                cap_reason = "cost"
+
+            logger.info("phase.c.hedge_quantity_calc",
+                        ticker=bracket.market_ticker,
+                        expected_loss=expected_loss,
+                        hedge_price=hedge_price,
+                        raw_qty=raw_hedge_qty,
+                        capped_qty=hedge_qty,
+                        cap_reason=cap_reason)
+        else:
+            hedge_qty = max(bracket.position_quantity, 1)
+            logger.warning("phase.c.hedge_size_fallback_no_entry",
                            ticker=bracket.market_ticker,
-                           qty=bracket.position_quantity)
-            return False
-
-        # Calculate expected loss if price continues to stop loss
-        expected_loss = bracket.position_quantity * (bracket.avg_entry - self.config.stop_loss_price)
-
-        # Calculate hedge quantity to break even
-        hedge_profit_per_contract = 100 - hedge_price
-        if hedge_profit_per_contract > 0 and expected_loss > 0:
-            raw_hedge_qty = (expected_loss + hedge_profit_per_contract - 1) // hedge_profit_per_contract  # ceiling
-        else:
-            raw_hedge_qty = bracket.position_quantity  # fallback
-
-        max_by_quantity = bracket.position_quantity
-        original_cost = bracket.position_quantity * bracket.avg_entry
-        max_by_cost = original_cost // hedge_price if hedge_price > 0 else bracket.position_quantity
-        capped_hedge_qty = min(raw_hedge_qty, max_by_quantity, max_by_cost)
-        hedge_qty = max(capped_hedge_qty, 1)
-        if capped_hedge_qty == raw_hedge_qty:
-            cap_reason = "formula"
-        elif capped_hedge_qty == max_by_quantity and max_by_quantity <= max_by_cost:
-            cap_reason = "quantity"
-        else:
-            cap_reason = "cost"
-
-        logger.info("phase.c.hedge_quantity_calc",
-                    ticker=bracket.market_ticker,
-                    expected_loss=expected_loss,
-                    hedge_price=hedge_price,
-                    raw_qty=raw_hedge_qty,
-                    capped_qty=hedge_qty,
-                    cap_reason=cap_reason)
+                           qty=hedge_qty)
 
         # Circuit-breaker: check per-event spend cap before placing the order
         order_cost = hedge_qty * hedge_price
