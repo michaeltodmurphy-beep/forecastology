@@ -24,6 +24,10 @@ from sqlalchemy import select, delete
 MONTH_MAP = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
 MONTH_ORDINAL = {m: i+1 for i, m in enumerate(["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"])}
 
+# Maximum consecutive transient order failures before permanently abandoning an event's
+# recovery/hedge.  Prevents unbounded retries on flaky-but-not-permanent errors.
+RECOVERY_MAX_CONSECUTIVE_FAILURES = 5
+
 logger = structlog.get_logger(__name__)
 
 
@@ -81,6 +85,12 @@ class TemperatureStrategy:
         # Cooldown tracker for the secondary deferred-hedge retry loop
         # (handles events whose original bracket was already stop-lossed).
         self._pending_hedge_last_attempt: dict[str, float] = {}
+        # Per-event terminal state: events whose recovery/hedge can never succeed
+        # (target market settled/closed, or too many consecutive failures). Once here,
+        # the event is never retried again this run.
+        self._abandoned_events: set[str] = set()
+        # Per-event consecutive recovery/hedge failure counter (transient-failure cap).
+        self._pending_hedge_failures: dict[str, int] = {}
 
     @staticmethod
     def _avg_buy_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
@@ -104,6 +114,47 @@ class TemperatureStrategy:
         if total_count > 0:
             return round((weighted_dollars / total_count) * 100)
         return 0
+
+    @staticmethod
+    def _is_permanent_order_failure(notes) -> bool:
+        """True if the order failure can never succeed on retry (market gone/closed)."""
+        if not notes:
+            return False
+        text = str(notes).lower()
+        return (
+            "market_not_found" in text
+            or "market not found" in text
+            or "not_found" in text
+            or "404" in text
+            or "market_closed" in text
+            or "market closed" in text
+            or "settled" in text
+            or "finalized" in text
+            or "expired" in text
+        )
+
+    async def _market_is_active(self, ticker: str) -> bool:
+        """Best-effort check that a market is still tradeable (status == 'active').
+        Returns True on uncertainty (so we don't over-block on transient REST errors),
+        but returns False when the market is explicitly finalized/closed/settled or 404.
+        """
+        import httpx
+        from app.signing import build_auth_headers
+        path = f"/trade-api/v2/markets/{ticker}"
+        url = f"{self.config.rest_base_url}{path}"
+        try:
+            headers = build_auth_headers(self._private_key, self.config.kalshi_api_key, "GET", path)
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 404:
+                    return False
+                if resp.status_code == 200:
+                    status = (resp.json().get("market", {}) or {}).get("status")
+                    if status is not None and status != "active":
+                        return False
+                return True
+        except Exception:
+            return True
 
     async def _resolve_entry_cost_basis(self, ticker: str) -> tuple[int, Optional[str]]:
         try:
@@ -862,6 +913,7 @@ class TemperatureStrategy:
             # _execute_topoff may place further buys after the event is hedged.
             hedge_triggered = (
                 bracket.event_ticker not in self._hedged_events
+                and bracket.event_ticker not in self._abandoned_events
                 and (
                     (
                         current_price <= self.config.hedge_trigger_price
@@ -877,6 +929,7 @@ class TemperatureStrategy:
                     bracket.event_ticker in self._pending_hedge_events
                     and bracket.phase in (Phase.HOLDING, Phase.HEDGED)
                     and bracket.event_ticker not in self._cap_reached_events
+                    and bracket.event_ticker not in self._abandoned_events
                 )
             )
 
@@ -930,6 +983,9 @@ class TemperatureStrategy:
                 continue
             if event_ticker in self._hedged_events:
                 continue  # top-off will handle recovery
+            if event_ticker in self._abandoned_events:
+                self._pending_hedge_events.discard(event_ticker)
+                continue
             if any(b.event_ticker == event_ticker for b in self.active_positions.values()):
                 continue  # handled by the main loop above
 
@@ -966,6 +1022,29 @@ class TemperatureStrategy:
                 logger.info("phase.c.hedge_deferred", event_ticker=event_ticker,
                             reason="no_qualifying_sibling_above_hedge_buy",
                             best_sibling_price=best_seen_ask if best_seen_ask > 0 else None)
+                continue
+
+            # Pre-placement check: ensure the chosen target market is still active.
+            # Fail-open (returns True on transient/unknown errors); returns False only
+            # on explicit 404 or non-active status (settled/finalized/closed).
+            if not await self._market_is_active(best_ticker):
+                self._pending_hedge_events.discard(event_ticker)
+                self._pending_hedge_last_attempt.pop(event_ticker, None)
+                self._pending_hedge_failures.pop(event_ticker, None)
+                self._abandoned_events.add(event_ticker)
+                try:
+                    async with await self.db.get_session() as session:
+                        db_result = await session.execute(
+                            select(PositionModel).where(PositionModel.event_ticker == event_ticker)
+                        )
+                        for pos_row in (db_result.scalars().all() or []):
+                            pos_row.hedge_pending = 0
+                        await session.commit()
+                except Exception:
+                    pass
+                logger.warning("phase.c.recovery_hedge_abandoned",
+                               event_ticker=event_ticker, reason="target_market_inactive",
+                               notes=None)
                 continue
 
             # Place recovery buy at initial_contract_count quantity
@@ -1016,6 +1095,8 @@ class TemperatureStrategy:
                 self._hedged_events.add(event_ticker)
                 self._pending_hedge_events.discard(event_ticker)
                 self._pending_hedge_last_attempt.pop(event_ticker, None)
+                self._pending_hedge_failures.pop(event_ticker, None)
+                self._abandoned_events.discard(event_ticker)
 
                 async with await self.db.get_session() as session:
                     existing_rec = await session.execute(
@@ -1043,8 +1124,51 @@ class TemperatureStrategy:
                             event_ticker=event_ticker, recovery_ticker=best_ticker,
                             qty=result.fill_quantity, price=result.fill_price)
             else:
-                logger.warning("phase.c.recovery_hedge_failed",
-                               event_ticker=event_ticker, notes=result.notes)
+                if self._is_permanent_order_failure(result.notes):
+                    # Permanent failure (market gone/closed) — abandon the event so
+                    # we never retry against a settled market again this run.
+                    self._pending_hedge_events.discard(event_ticker)
+                    self._pending_hedge_last_attempt.pop(event_ticker, None)
+                    self._pending_hedge_failures.pop(event_ticker, None)
+                    self._abandoned_events.add(event_ticker)
+                    try:
+                        async with await self.db.get_session() as session:
+                            db_result = await session.execute(
+                                select(PositionModel).where(PositionModel.event_ticker == event_ticker)
+                            )
+                            for pos_row in (db_result.scalars().all() or []):
+                                pos_row.hedge_pending = 0
+                            await session.commit()
+                    except Exception:
+                        pass
+                    logger.warning("phase.c.recovery_hedge_abandoned",
+                                   event_ticker=event_ticker, reason="permanent_failure",
+                                   notes=result.notes)
+                else:
+                    # Transient failure — increment counter and abandon after cap.
+                    new_count = self._pending_hedge_failures.get(event_ticker, 0) + 1
+                    self._pending_hedge_failures[event_ticker] = new_count
+                    if new_count >= RECOVERY_MAX_CONSECUTIVE_FAILURES:
+                        self._pending_hedge_events.discard(event_ticker)
+                        self._pending_hedge_last_attempt.pop(event_ticker, None)
+                        self._pending_hedge_failures.pop(event_ticker, None)
+                        self._abandoned_events.add(event_ticker)
+                        try:
+                            async with await self.db.get_session() as session:
+                                db_result = await session.execute(
+                                    select(PositionModel).where(PositionModel.event_ticker == event_ticker)
+                                )
+                                for pos_row in (db_result.scalars().all() or []):
+                                    pos_row.hedge_pending = 0
+                                await session.commit()
+                        except Exception:
+                            pass
+                        logger.warning("phase.c.recovery_hedge_abandoned",
+                                       event_ticker=event_ticker, reason="max_failures",
+                                       notes=result.notes)
+                    else:
+                        logger.warning("phase.c.recovery_hedge_failed",
+                                       event_ticker=event_ticker, notes=result.notes)
 
     async def _execute_hedge(self, bracket: MarketBracket) -> bool:
         """
@@ -1175,6 +1299,15 @@ class TemperatureStrategy:
                                attempted_spend=order_cost)
                 return False
 
+        # Pre-placement check: ensure the chosen target market is still active.
+        # Fail-open on transient errors; returns False only on explicit 404 or
+        # non-active status (settled/finalized/closed).
+        if not await self._market_is_active(next_bracket_ticker):
+            logger.warning("phase.c.hedge_target_inactive",
+                           ticker=bracket.market_ticker,
+                           target=next_bracket_ticker)
+            return False
+
         order = OrderRequest(
             market_ticker=next_bracket_ticker,
             side=OrderSide.BUY_YES,
@@ -1273,6 +1406,15 @@ class TemperatureStrategy:
         else:
             logger.warning("phase.c.hedge_failed", ticker=bracket.market_ticker,
                            notes=result.notes)
+            if self._is_permanent_order_failure(result.notes):
+                # Permanent failure (market gone/closed): abandon the event so the
+                # main loop does not keep triggering hedge attempts this run.
+                self._pending_hedge_events.discard(bracket.event_ticker)
+                self._abandoned_events.add(bracket.event_ticker)
+                logger.warning("phase.c.recovery_hedge_abandoned",
+                               event_ticker=bracket.event_ticker,
+                               reason="permanent_failure",
+                               notes=result.notes)
             return False
 
     async def _execute_stop_loss(self, bracket: MarketBracket):
