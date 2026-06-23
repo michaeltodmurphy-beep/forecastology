@@ -795,6 +795,46 @@ class TemperatureStrategy:
                     await session.commit()
                 continue
 
+            # Self-heal bracket.avg_entry when it is missing (e.g. Kalshi returned
+            # average_fill_cost_dollars=None at entry time).  Runs before hedge/stop-loss
+            # evaluation so that any sizing this cycle uses the real cost basis.
+            if not bracket.avg_entry or bracket.avg_entry <= 0:
+                heal_source: Optional[str] = None
+                # Cheap path: use the already-fetched pos_data (no extra API call)
+                avg_cents = int(pos_data.get("average_fill_cost_cents") or 0)
+                if avg_cents > 0:
+                    bracket.avg_entry = avg_cents
+                    heal_source = "positions_inline"
+                else:
+                    # Fills fallback: throttled to at most once per 60s per ticker
+                    now_heal = asyncio.get_event_loop().time()
+                    last_heal = getattr(bracket, '_last_entry_heal_attempt', 0)
+                    if now_heal - last_heal >= 60:
+                        bracket._last_entry_heal_attempt = now_heal
+                        backfilled_cents, src = await self._resolve_entry_cost_basis(ticker)
+                        if backfilled_cents > 0:
+                            bracket.avg_entry = backfilled_cents
+                            heal_source = src
+
+                if heal_source is not None and bracket.avg_entry > 0:
+                    logger.info("phase.c.entry_self_healed",
+                                ticker=ticker,
+                                source=heal_source,
+                                cents=bracket.avg_entry)
+                    try:
+                        async with await self.db.get_session() as session:
+                            existing_pos = await session.execute(
+                                select(PositionModel).where(
+                                    PositionModel.market_ticker == ticker
+                                )
+                            )
+                            pos_row = existing_pos.scalar_one_or_none()
+                            if pos_row:
+                                pos_row.avg_entry_price = bracket.avg_entry
+                                await session.commit()
+                    except Exception:
+                        pass  # DB failure must not interrupt the loop
+
             # Get current price from the authoritative YES bid/ask quote.
             # Priority:
             #   1) cache.get_quote → YES bid (realistic exit for a YES long);
