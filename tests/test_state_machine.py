@@ -8,7 +8,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from app.config import AppConfig
-from core.state_machine import TemperatureStrategy
+from core.state_machine import TemperatureStrategy, RECOVERY_MAX_CONSECUTIVE_FAILURES
 from core.types import MarketBracket, OrderBook, OrderBookLevel, Phase
 from data.ticker_cache import TickerCache
 from execution.base import ExecutionResult
@@ -2794,3 +2794,411 @@ async def test_find_next_bracket_no_t_high_fallback_path(monkeypatch):
 
     result = await strategy._find_next_bracket(origin)
     assert result == higher_ticker
+
+
+# ---------------------------------------------------------------------------
+# New tests: abandoned-event / permanent-failure handling
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recovery_hedge_abandons_event_on_market_not_found(monkeypatch):
+    """
+    When buy_yes returns success=False with market_not_found in notes (permanent
+    failure), the secondary recovery loop must abandon the event:
+    - remove from _pending_hedge_events
+    - add to _abandoned_events
+    - log phase.c.recovery_hedge_abandoned
+    A second call to _evaluate_held_positions must NOT place any further buy orders.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+
+    event_ticker = "KXHIGHTLV-26JUN22"
+    sib_ticker = "KXHIGHTLV-26JUN22-T110"
+
+    sib = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[sib_ticker] = sib
+
+    # Arm the event; bypass cooldown
+    strategy._pending_hedge_events.add(event_ticker)
+    strategy._pending_hedge_last_attempt[event_ticker] = 0
+
+    # Sibling ask above hedge_buy so it gets selected
+    strategy.cache.update_quote(sib_ticker, 65, 70)
+
+    # _market_is_active fails open (returns True) so order is attempted
+    monkeypatch.setattr(strategy, "_market_is_active", AsyncMock(return_value=True))
+
+    # buy_yes returns permanent failure
+    permanent_notes = '{"error": {"code": "market_not_found", "message": "market not found"}}'
+    monkeypatch.setattr(
+        strategy.executor,
+        "buy_yes",
+        AsyncMock(return_value=ExecutionResult(
+            success=False,
+            market_ticker=sib_ticker,
+            side="yes",
+            price=70,
+            quantity=1,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            status="REJECTED",
+            notes=permanent_notes,
+        )),
+    )
+
+    await strategy._evaluate_held_positions()
+
+    # Event must be abandoned after first permanent failure
+    assert event_ticker not in strategy._pending_hedge_events, \
+        "Event must be removed from _pending_hedge_events after permanent failure"
+    assert event_ticker in strategy._abandoned_events, \
+        "Event must be in _abandoned_events after permanent failure"
+    abandoned_logs = [ev for ev, _ in warn_logged if ev == "phase.c.recovery_hedge_abandoned"]
+    assert len(abandoned_logs) >= 1, "recovery_hedge_abandoned must be logged"
+
+    # Second cycle: no additional buy orders should be placed
+    initial_order_count = len(strategy.executor.orders)
+    # Reset cooldown so the secondary loop would run if not abandoned
+    strategy._pending_hedge_last_attempt.clear()
+    await strategy._evaluate_held_positions()
+    assert len(strategy.executor.orders) == initial_order_count, \
+        "No further buy_yes orders after event is abandoned"
+
+
+@pytest.mark.asyncio
+async def test_recovery_hedge_skips_inactive_target_market(monkeypatch):
+    """
+    When _market_is_active returns False for the chosen best_ticker, the secondary
+    loop must abandon the event (reason=target_market_inactive) without placing any
+    order.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+
+    event_ticker = "KXHIGHTLV-26JUN22"
+    sib_ticker = "KXHIGHTLV-26JUN22-T110"
+
+    sib = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[sib_ticker] = sib
+
+    strategy._pending_hedge_events.add(event_ticker)
+    strategy._pending_hedge_last_attempt[event_ticker] = 0
+
+    strategy.cache.update_quote(sib_ticker, 65, 70)
+
+    # _market_is_active returns False → inactive target
+    monkeypatch.setattr(strategy, "_market_is_active", AsyncMock(return_value=False))
+
+    await strategy._evaluate_held_positions()
+
+    # No buy order must have been placed
+    buy_orders = [o for o, _ in strategy.executor.orders if o.side.name == "BUY_YES"]
+    assert len(buy_orders) == 0, "No buy order when target market is inactive"
+
+    # Event must be abandoned
+    assert event_ticker not in strategy._pending_hedge_events
+    assert event_ticker in strategy._abandoned_events
+
+    abandoned_logs = [ev for ev, kw in warn_logged
+                      if ev == "phase.c.recovery_hedge_abandoned"
+                      and kw.get("reason") == "target_market_inactive"]
+    assert len(abandoned_logs) >= 1, "recovery_hedge_abandoned with reason=target_market_inactive must be logged"
+
+
+@pytest.mark.asyncio
+async def test_recovery_hedge_transient_failure_caps_after_n(monkeypatch):
+    """
+    Transient (non-permanent) failures increment the per-event counter.
+    After RECOVERY_MAX_CONSECUTIVE_FAILURES attempts the event is abandoned
+    with reason=max_failures; subsequent cycles place no further orders.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+
+    event_ticker = "KXHIGHTLV-26JUN22"
+    sib_ticker = "KXHIGHTLV-26JUN22-T110"
+
+    sib = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[sib_ticker] = sib
+
+    strategy._pending_hedge_events.add(event_ticker)
+    strategy.cache.update_quote(sib_ticker, 65, 70)
+
+    # _market_is_active is active
+    monkeypatch.setattr(strategy, "_market_is_active", AsyncMock(return_value=True))
+
+    # buy_yes returns transient failure (generic note, NOT permanent)
+    monkeypatch.setattr(
+        strategy.executor,
+        "buy_yes",
+        AsyncMock(return_value=ExecutionResult(
+            success=False,
+            market_ticker=sib_ticker,
+            side="yes",
+            price=70,
+            quantity=1,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            status="REJECTED",
+            notes="connection reset",
+        )),
+    )
+
+    for i in range(RECOVERY_MAX_CONSECUTIVE_FAILURES - 1):
+        # Reset cooldown so each iteration runs
+        strategy._pending_hedge_last_attempt[event_ticker] = 0
+        await strategy._evaluate_held_positions()
+        # Event must still be pending (not yet abandoned)
+        assert event_ticker in strategy._pending_hedge_events, \
+            f"Event must stay armed after {i + 1} transient failures (below cap)"
+        assert event_ticker not in strategy._abandoned_events
+
+    # Final (Nth) attempt should trigger abandonment
+    strategy._pending_hedge_last_attempt[event_ticker] = 0
+    await strategy._evaluate_held_positions()
+
+    assert event_ticker not in strategy._pending_hedge_events, \
+        "Event must be removed from _pending_hedge_events after cap"
+    assert event_ticker in strategy._abandoned_events, \
+        "Event must be in _abandoned_events after cap"
+
+    abandoned_logs = [ev for ev, kw in warn_logged
+                      if ev == "phase.c.recovery_hedge_abandoned"
+                      and kw.get("reason") == "max_failures"]
+    assert len(abandoned_logs) >= 1, "recovery_hedge_abandoned with reason=max_failures must be logged"
+
+    # Further cycle must not produce more orders
+    order_count_after_abandon = len(strategy.executor.orders)
+    strategy._pending_hedge_last_attempt.clear()
+    await strategy._evaluate_held_positions()
+    assert len(strategy.executor.orders) == order_count_after_abandon, \
+        "No further orders after event is abandoned by transient cap"
+
+
+@pytest.mark.asyncio
+async def test_recovery_hedge_success_still_clears_and_resets(monkeypatch):
+    """
+    Regression: happy path still works after the failure-tracking changes.
+    buy_yes succeeds → event removed from _pending_hedge_events, added to
+    _hedged_events, recovery_hedge_filled logged, and _pending_hedge_failures /
+    _abandoned_events do NOT contain the event.
+    """
+    import core.state_machine as state_machine
+
+    info_logged = []
+    monkeypatch.setattr(state_machine.logger, "info",
+                        lambda event, **kwargs: info_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+    strategy.executor.succeed = True
+
+    event_ticker = "KXHIGHTLV-26JUN22"
+    sib_ticker = "KXHIGHTLV-26JUN22-T110"
+
+    sib = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="sibling",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[sib_ticker] = sib
+
+    strategy._pending_hedge_events.add(event_ticker)
+    strategy._pending_hedge_last_attempt[event_ticker] = 0
+    # Pre-seed a transient failure count to verify it's cleared on success
+    strategy._pending_hedge_failures[event_ticker] = 2
+
+    strategy.cache.update_quote(sib_ticker, 65, 70)
+
+    monkeypatch.setattr(strategy, "_market_is_active", AsyncMock(return_value=True))
+
+    await strategy._evaluate_held_positions()
+
+    # Happy path: event hedged, armed state cleared
+    assert event_ticker not in strategy._pending_hedge_events
+    assert event_ticker in strategy._hedged_events
+    assert event_ticker not in strategy._abandoned_events
+    assert event_ticker not in strategy._pending_hedge_failures
+
+    filled_logs = [ev for ev, _ in info_logged if ev == "phase.c.recovery_hedge_filled"]
+    assert len(filled_logs) >= 1, "recovery_hedge_filled must be logged"
+
+
+@pytest.mark.asyncio
+async def test_abandoned_event_not_retriggered_in_main_loop(monkeypatch):
+    """
+    An event in _abandoned_events must NOT cause _execute_hedge to be called in
+    the main position loop, even if the active bracket price is at/below
+    hedge_trigger_price.
+    """
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60)
+
+    event_ticker = "KXHIGHTLV-26JUN22"
+    orig_ticker = "KXHIGHTLV-26JUN22-B84.5"
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.active_positions[orig_ticker] = original
+
+    # Mark event as abandoned
+    strategy._abandoned_events.add(event_ticker)
+
+    # Price at hedge trigger so hedge_triggered would fire if not abandoned
+    strategy.cache.update_quote(orig_ticker, 45, 47)
+
+    execute_hedge_mock = AsyncMock(return_value=False)
+    monkeypatch.setattr(strategy, "_execute_hedge", execute_hedge_mock)
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({orig_ticker: {"count": 2, "last_price_cents": 45}}))
+
+    await strategy._evaluate_held_positions()
+
+    execute_hedge_mock.assert_not_awaited()
+    buy_orders = [o for o, _ in strategy.executor.orders if o.side.name == "BUY_YES"]
+    assert len(buy_orders) == 0, "No hedge buy for abandoned event"
+
+
+@pytest.mark.asyncio
+async def test_execute_hedge_abandons_on_market_not_found(monkeypatch):
+    """
+    _execute_hedge: when buy_yes returns success=False with market_not_found notes,
+    it must return False, log phase.c.hedge_failed (existing), add the event to
+    _abandoned_events (via recovery_hedge_abandoned), and not produce further orders
+    on a subsequent main-loop cycle.
+    """
+    import core.state_machine as state_machine
+
+    warn_logged = []
+    monkeypatch.setattr(state_machine.logger, "info", lambda *_a, **_kw: None)
+    monkeypatch.setattr(state_machine.logger, "warning",
+                        lambda event, **kwargs: warn_logged.append((event, kwargs)))
+    monkeypatch.setattr(state_machine.logger, "debug", lambda *_a, **_kw: None)
+
+    strategy = make_strategy(monkeypatch, hedge_buy=60, eval_price_floor=5)
+
+    event_ticker = "KXHIGHTLV-26JUN22"
+    orig_ticker = "KXHIGHTLV-26JUN22-B84.5"
+    sib_ticker = "KXHIGHTLV-26JUN22-T110"
+
+    original = MarketBracket(
+        market_ticker=orig_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="orig",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=84,
+    )
+    sibling = MarketBracket(
+        market_ticker=sib_ticker,
+        event_ticker=event_ticker,
+        series_ticker="KXHIGHTLV",
+        bracket_label="sib",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[orig_ticker] = original
+    strategy.brackets[sib_ticker] = sibling
+
+    strategy.cache.update_quote(sib_ticker, 50, 52)
+
+    monkeypatch.setattr(strategy, "_find_next_bracket", AsyncMock(return_value=sib_ticker))
+    monkeypatch.setattr(strategy, "_market_is_active", AsyncMock(return_value=True))
+
+    permanent_notes = '{"error": {"code": "market_not_found", "message": "market not found"}}'
+    monkeypatch.setattr(
+        strategy.executor,
+        "buy_yes",
+        AsyncMock(return_value=ExecutionResult(
+            success=False,
+            market_ticker=sib_ticker,
+            side="yes",
+            price=52,
+            quantity=2,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            status="REJECTED",
+            notes=permanent_notes,
+        )),
+    )
+
+    result = await strategy._execute_hedge(original)
+
+    assert result is False
+    # Existing hedge_failed log must still be present
+    hedge_failed_logs = [ev for ev, _ in warn_logged if ev == "phase.c.hedge_failed"]
+    assert len(hedge_failed_logs) >= 1, "phase.c.hedge_failed must be logged"
+    # Event must be abandoned
+    assert event_ticker in strategy._abandoned_events, \
+        "Event must be in _abandoned_events after permanent failure in _execute_hedge"
+
+    # Second call via main loop: abandoned event must not re-trigger hedge
+    strategy.active_positions[orig_ticker] = original
+    monkeypatch.setattr(strategy.executor, "get_positions",
+                        _make_fake_get_positions({orig_ticker: {"count": 2, "last_price_cents": 45}}))
+    strategy.cache.update_quote(orig_ticker, 43, 45)
+    initial_orders = len(strategy.executor.orders)
+
+    await strategy._evaluate_held_positions()
+
+    assert len(strategy.executor.orders) == initial_orders, \
+        "No further buy_yes orders for abandoned event in main loop"
