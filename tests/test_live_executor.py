@@ -25,6 +25,7 @@ class FakeClient:
         self.get_responses = list(get_responses or [])
         self.post_payloads = []
         self.get_urls = []
+        self.get_kwargs = []  # records kwargs (including params) for each GET call
 
     async def post(self, _url, json=None, headers=None):
         self.post_payloads.append(json)
@@ -32,6 +33,7 @@ class FakeClient:
 
     async def get(self, url, headers=None, **kwargs):
         self.get_urls.append(url)
+        self.get_kwargs.append(kwargs)
         return self.get_responses.pop(0)
 
     async def aclose(self):
@@ -353,3 +355,190 @@ async def test_get_positions_fills_history_fallback(monkeypatch):
     assert positions["KXLOWTNYC-26JUN22-B67.5"]["average_fill_cost_cents"] == 85
     cost_log = next(kw for event, kw in debug_logged if event == "live.position_cost_basis")
     assert cost_log["source"] == "fills_history"
+
+
+# ---------------------------------------------------------------------------
+# get_fills — per-ticker pagination (new tests)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_fills_pagination_aggregates_pages(monkeypatch):
+    """Per-ticker pagination fetches all pages and aggregates fills."""
+    ticker = "KXLOWTMIA-26JUN22-B80.5"
+    f1 = {"ticker": ticker, "action": "buy", "count_fp": "1.00", "yes_price_dollars": "0.3700"}
+    f2 = {"ticker": ticker, "action": "buy", "count_fp": "2.00", "yes_price_dollars": "0.3300"}
+    f3 = {"ticker": ticker, "action": "buy", "count_fp": "3.00", "yes_price_dollars": "0.3100"}
+
+    resp1 = FakeResponse(200, {"fills": [f1, f2], "cursor": "abc"})
+    resp2 = FakeResponse(200, {"fills": [f3], "cursor": ""})
+
+    executor = _make_executor(monkeypatch, get_responses=[resp1, resp2])
+
+    fills = await executor.get_fills(ticker=ticker)
+
+    assert fills == [f1, f2, f3]
+    assert len(executor._client.get_urls) == 2  # stopped because second cursor was empty
+
+
+@pytest.mark.asyncio
+async def test_get_fills_stops_on_empty_page(monkeypatch):
+    """Pagination stops immediately when an empty fills page is returned."""
+    ticker = "KXLOWTMIA-26JUN22-B80.5"
+    f1 = {"ticker": ticker, "action": "buy", "count_fp": "1.00", "yes_price_dollars": "0.3500"}
+
+    resp1 = FakeResponse(200, {"fills": [f1], "cursor": "x"})
+    resp2 = FakeResponse(200, {"fills": [], "cursor": "x"})
+
+    executor = _make_executor(monkeypatch, get_responses=[resp1, resp2])
+
+    fills = await executor.get_fills(ticker=ticker)
+
+    assert fills == [f1]
+    assert len(executor._client.get_urls) == 2  # stopped because second page was empty
+
+
+@pytest.mark.asyncio
+async def test_get_fills_max_pages_cap(monkeypatch):
+    """max_pages limits the number of API calls even when cursor never empties."""
+    page = [{"ticker": "T", "action": "buy", "count_fp": "1.00", "yes_price_dollars": "0.5000"}]
+    # Provide more responses than max_pages to prove the cap fires
+    responses = [FakeResponse(200, {"fills": page, "cursor": "next"}) for _ in range(5)]
+
+    executor = _make_executor(monkeypatch, get_responses=responses)
+
+    fills = await executor.get_fills(ticker="T", max_pages=3)
+
+    assert len(executor._client.get_urls) == 3  # capped at max_pages
+    assert len(fills) == 3  # one fill per page × 3 pages
+
+
+@pytest.mark.asyncio
+async def test_get_fills_ticker_param_forwarded(monkeypatch):
+    """ticker is included in every request's params; cursor is added on subsequent pages."""
+    ticker = "KXLOWTMIA-26JUN22-B80.5"
+    f1 = {"ticker": ticker, "action": "buy", "count_fp": "1.00", "yes_price_dollars": "0.3700"}
+    f2 = {"ticker": ticker, "action": "buy", "count_fp": "2.00", "yes_price_dollars": "0.3300"}
+
+    resp1 = FakeResponse(200, {"fills": [f1], "cursor": "abc"})
+    resp2 = FakeResponse(200, {"fills": [f2], "cursor": ""})
+
+    executor = _make_executor(monkeypatch, get_responses=[resp1, resp2])
+
+    await executor.get_fills(ticker=ticker)
+
+    # First request carries ticker but no cursor
+    params1 = executor._client.get_kwargs[0].get("params", {})
+    assert params1.get("ticker") == ticker
+    assert "cursor" not in params1
+
+    # Second request carries ticker AND the cursor from page 1
+    params2 = executor._client.get_kwargs[1].get("params", {})
+    assert params2.get("ticker") == ticker
+    assert params2.get("cursor") == "abc"
+
+
+@pytest.mark.asyncio
+async def test_get_fills_no_caching(monkeypatch):
+    """Calling get_fills twice always hits the API twice — results are never memoized."""
+    ticker = "KXLOWTMIA-26JUN22-B80.5"
+    f = {"ticker": ticker, "action": "buy", "count_fp": "1.00", "yes_price_dollars": "0.3500"}
+
+    resp1 = FakeResponse(200, {"fills": [f], "cursor": ""})
+    resp2 = FakeResponse(200, {"fills": [f], "cursor": ""})
+
+    executor = _make_executor(monkeypatch, get_responses=[resp1, resp2])
+
+    await executor.get_fills(ticker=ticker)
+    await executor.get_fills(ticker=ticker)
+
+    assert len(executor._client.get_urls) == 2  # two separate API calls, no caching
+
+
+# ---------------------------------------------------------------------------
+# get_positions — per-ticker guard and no-fills edge case
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_positions_per_ticker_fills_only_for_none(monkeypatch):
+    """get_fills is called only for positions that have no resolved cost basis."""
+    debug_logged = []
+    monkeypatch.setattr(live.logger, "debug", lambda event, **kw: debug_logged.append((event, kw)))
+
+    positions_resp = FakeResponse(200, {
+        "market_positions": [
+            {
+                "ticker": "HEALTHY",
+                "position_fp": "2.00",
+                "average_fill_cost_dollars": "0.8500",
+                "last_price": "0.90",
+            },
+            {
+                "ticker": "MISSING",
+                "position_fp": "3.00",
+                "last_price": "0.50",
+            },
+        ]
+    })
+    fills_resp = FakeResponse(200, {
+        "fills": [
+            {
+                "ticker": "MISSING",
+                "action": "buy",
+                "count_fp": "3.00",
+                "yes_price_dollars": "0.4000",
+            }
+        ],
+        "cursor": "",
+    })
+
+    executor = _make_executor(monkeypatch, get_responses=[positions_resp, fills_resp])
+
+    # Wrap get_fills to record which tickers triggered a call
+    get_fills_tickers: list = []
+    original_get_fills = executor.get_fills
+
+    async def tracked_get_fills(ticker=None, **kwargs):
+        get_fills_tickers.append(ticker)
+        return await original_get_fills(ticker=ticker, **kwargs)
+
+    executor.get_fills = tracked_get_fills
+
+    positions = await executor.get_positions()
+
+    # get_fills called only for the unresolved ticker
+    assert "MISSING" in get_fills_tickers
+    assert "HEALTHY" not in get_fills_tickers
+
+    # MISSING resolved via fills history
+    missing_log = next(kw for event, kw in debug_logged if event == "live.position_cost_basis" and kw["ticker"] == "MISSING")
+    assert missing_log["source"] == "fills_history"
+    assert missing_log["cents"] == 40
+
+    # HEALTHY used average_fill_cost_dollars, undisturbed
+    healthy_log = next(kw for event, kw in debug_logged if event == "live.position_cost_basis" and kw["ticker"] == "HEALTHY")
+    assert healthy_log["source"] == "average_fill_cost_dollars"
+    assert healthy_log["cents"] == 85
+
+
+@pytest.mark.asyncio
+async def test_get_positions_no_fills_stays_none(monkeypatch):
+    """When get_fills returns [] the position stays source=none with cents=0."""
+    debug_logged = []
+    monkeypatch.setattr(live.logger, "debug", lambda event, **kw: debug_logged.append((event, kw)))
+
+    positions_resp = FakeResponse(200, {
+        "market_positions": [{
+            "ticker": "KXLOWTMIA-26JUN22-B80.5",
+            "position_fp": "2.00",
+            "last_price": "0.50",
+        }]
+    })
+    fills_resp = FakeResponse(200, {"fills": [], "cursor": ""})
+
+    executor = _make_executor(monkeypatch, get_responses=[positions_resp, fills_resp])
+
+    positions = await executor.get_positions()
+
+    assert positions["KXLOWTMIA-26JUN22-B80.5"]["average_fill_cost_cents"] == 0
+    cost_log = next(kw for event, kw in debug_logged if event == "live.position_cost_basis")
+    assert cost_log["source"] == "none"
