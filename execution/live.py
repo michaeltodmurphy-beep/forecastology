@@ -323,17 +323,37 @@ class LiveTradeExecutor(BaseExecutor):
                      event_count=len(event_tickers))
         return all_markets
 
-    async def get_fills(self, ticker: Optional[str] = None, limit: int = 200) -> list:
-        """Fetch fills from /trade-api/v2/portfolio/fills (optionally for one ticker)."""
+    async def get_fills(self, ticker: Optional[str] = None, limit: int = 200, max_pages: int = 5) -> list[dict]:
+        """Fetch fills from /trade-api/v2/portfolio/fills.
+
+        If `ticker` is provided, only that market's fills are returned, paginating
+        via cursor up to `max_pages` pages (a single bracket rarely exceeds one page).
+        NO caching: always fetches fresh so cost basis is never stale.
+        """
         path = "/trade-api/v2/portfolio/fills"
-        headers = self._headers("GET", path)
-        params: dict = {"limit": limit}
-        if ticker:
-            params["ticker"] = ticker
-        resp = await self._client.get(f"{self.base_url}{path}", headers=headers, params=params)
-        if resp.status_code in (200, 201):
-            return resp.json().get("fills", [])
-        return []
+        out: list[dict] = []
+        cursor = ""
+        for _ in range(max_pages):
+            headers = self._headers("GET", path)
+            params: dict = {"limit": limit}
+            if ticker:
+                params["ticker"] = ticker
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                resp = await self._client.get(f"{self.base_url}{path}", headers=headers, params=params)
+            except Exception as e:
+                logger.warning("live.get_fills_error", ticker=ticker, error=str(e))
+                break
+            if resp.status_code not in (200, 201):
+                break
+            body = resp.json()
+            page = body.get("fills", [])
+            out.extend(page)
+            cursor = body.get("cursor", "")
+            if not cursor or not page:
+                break
+        return out
 
     async def get_positions(self) -> dict[str, dict]:
         path = REST_PORTFOLIO_POSITIONS
@@ -341,11 +361,6 @@ class LiveTradeExecutor(BaseExecutor):
         headers = self._headers("GET", path)
         resp = await self._client.get(url, headers=headers)
         data = resp.json()
-
-        try:
-            all_fills = await self.get_fills(limit=200)
-        except Exception:
-            all_fills = []
 
         positions = {}
         for pos in data.get("market_positions", []):
@@ -385,7 +400,8 @@ class LiveTradeExecutor(BaseExecutor):
                             break
 
                 if cost_cents <= 0 and pos["count"] > 0:
-                    fills_cost = _avg_fill_price_cents_from_fills(all_fills, ticker)
+                    ticker_fills = await self.get_fills(ticker=ticker)
+                    fills_cost = _avg_fill_price_cents_from_fills(ticker_fills, ticker)
                     if fills_cost > 0:
                         cost_cents = fills_cost
                         cost_source = "fills_history"
