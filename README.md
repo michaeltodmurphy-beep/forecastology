@@ -14,7 +14,7 @@ The system runs as three coordinating processes:
 |---|---|---|
 | **WS Daemon** | `run.py` | Connects to Kalshi WebSocket, maintains live order book cache, runs `TemperatureStrategy` |
 | **Scanner** | `scanner.py` | Reads shared state from `/dev/shm/forecastology_state.json`, places buy orders when conditions are met (systemd timer, ~every 2s) |
-| **Monitor** | `monitor.py` | Reads open positions from DB, checks prices, triggers hedges and stop-losses (systemd timer, ~every 30s) |
+| **Monitor** | `monitor.py` | Reads open positions from DB, checks prices, and triggers stop-losses (systemd timer, ~every 30s) |
 
 > **Note:** `scanner.py` (shared-state version) requires the WS daemon (`run.py`) to write market state to `/dev/shm/forecastology_state.json`. The current `run.py` uses the integrated `TemperatureStrategy` approach which handles scanning internally — the standalone `scanner.py` is for a future decoupled architecture.
 
@@ -61,9 +61,10 @@ Key variables:
 | `TRADING_MODE` | `PAPER` (simulated) or `LIVE` (real money) |
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
-| `HEDGE_TRIGGER_PRICE` | YES bid at or below this (cents) triggers the hedge/arm logic (default `0.48`) |
-| `HEDGE_BUY` | Recovery threshold: deferred-hedge recovery fires only once a sibling's YES ask rises **strictly above** this value (default `0.60`). Normal immediate hedges (best sibling ≥ `HEDGE_TRIGGER_PRICE` at trigger time) are not gated by this value. |
-| `STOP_LOSS_PRICE` | YES bid at or below this (cents) triggers the guaranteed stop-loss sell (default `0.35`) |
+| `STOP_LOSS_PRICE` | Last trade strictly below this (cents) triggers the stop-loss sell (default `0.35`) |
+| `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
+| `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
+| `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 
 ## Running
 
@@ -93,150 +94,58 @@ python bracket_scanner.py --min-spread 7 --buy-trigger 85
 
 ## Trading Strategy
 
-The strategy uses a two-phase, multi-hedge, per-event break-even approach. Each event (`event_ticker`) is tracked independently — a city's High and Low temperature markets have separate ledgers and hedge state.
+The hedge engine has been removed. The strategy is now a simple entry + stop-loss + martingale recovery system keyed by `(series_ticker, date_prefix)`.
 
 ### Phase A — Market Monitoring
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢). Price is sourced exclusively from the ticker channel `yes_ask`/`yes_ask_dollars` — the NO side is never used to derive YES ask prices.
+**Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢).
+
+Before each buy, the bot looks up `StopLossLedger(series_ticker, date_prefix)` using the market ticker's parsed `YYMMMDD` segment:
+
+- `count = 0` → buy `INITIAL_CONTRACT_COUNT`
+- `count = 1` → buy `INITIAL_CONTRACT_COUNT * 2`
+- `count = 2` → buy `INITIAL_CONTRACT_COUNT * 4`
+- `count = 3` → buy `INITIAL_CONTRACT_COUNT * 8`
+- in general: `quantity = INITIAL_CONTRACT_COUNT * 2**count`
+
+`HEDGE_MAX_FACTOR` is now the **maximum number of doublings**. Buying is allowed while `count <= HEDGE_MAX_FACTOR`; once `count > HEDGE_MAX_FACTOR`, the series is done for that day and the bot logs `phase.b.recovery_cap_reached`.
+
+With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the exact cap boundary is:
+
+- `count=0` → buy `2`
+- `count=1` → buy `4`
+- `count=2` → buy `8`
+- `count=3` → buy `16`
+- `count>=4` → no more buys for that `(series, day)`
+
+High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
 
 ### Phase C — Position Management
+Held positions use the cached **last trade** only:
 
-Phase C prices held positions off the **authoritative YES bid/ask quote** from the
-WebSocket ticker channel (`cache.get_quote`), not the stale `last_price` (last trade).
-This ensures hedge and stop-loss triggers fire correctly even when the last trade is
-hours old in thin temperature markets.
+- `price = cache.get_last_price(ticker)`
+- if `price is None` → skip this cycle
+- if `price < STOP_LOSS_PRICE` → sell the entire holding through the existing 1¢ IOC reduce-only stop-loss path
+- comparison is **strictly `<`**, not `<=`
 
-**Price resolution priority:**
-1. `cache.get_quote(ticker)` → YES bid (realistic exit for a long YES); falls back to YES ask if bid is 0.
-2. Positions-API `last_price_cents`.
-3. REST `_fetch_market_data_via_rest` → `yes_bid` / `yes_ask` / `price` (60 s per-ticker cooldown).
-4. Last known real price (`bracket.last_price` if > 0).
+Immediately before the stop-loss order is sent, the bot increments `StopLossLedger` once per triggered position (guarded so 60-second retries do not double-count the same stop-loss).
 
-If no real price is available, the cycle is skipped with a `phase.c.no_live_price` warning.
-The bot **never manufactures a price** (the old `avg_entry or 83` fallback has been removed).
+### StopLossLedger
+`stop_loss_ledger` stores the persistent per-day martingale counter:
 
-#### Full lifecycle (sell loser → buy recovery → top-off to break-even)
+- key: `(series_ticker, date_prefix)`
+- value: `stop_loss_count`
+- date key comes from the market ticker itself, not the current clock
 
-1. **Hedge trigger** (`HEDGE_TRIGGER_PRICE`, default 48¢): when a held bracket's YES bid falls
-   to ≤ 48¢, the bot scans siblings in the same event for the **best (highest) valid YES ask**
-   (ignoring brackets priced at or below `EVAL_PRICE_FLOOR`):
+This means any bracket in the same series on the same day inherits the same recovery size. For example, a stop-loss on `KXLOWTBOS-26JUN23-B65.5` makes `KXLOWTBOS-26JUN23-T68` rebuy at the doubled size.
 
-   | Best sibling YES ask at trigger time | Action |
-   |--------------------------------------|--------|
-   | **≥ `HEDGE_TRIGGER_PRICE` (48¢)** — credible winner exists | **Normal hedge**: buy that sibling immediately using break-even sizing (see below). Event added to `_hedged_events`. |
-   | **< `HEDGE_TRIGGER_PRICE` (48¢)** — all siblings weak, no credible winner | **Deferred**: arm the event (`hedge_pending`). Do NOT buy a weak sibling. Wait for a winner to emerge (see step 2). |
-
-2. **Armed/deferred state** (`hedge_pending`): every subsequent cycle, armed events are
-   re-scanned. As soon as a sibling's YES ask rises **strictly above `HEDGE_BUY` (60¢)** the
-   deferred hedge (recovery) fires: the single highest-priced qualifying sibling is bought at
-   `initial_contract_count` quantity. `hedge_pending` is cleared and the event enters the hedged
-   state. The 60-second per-event cooldown prevents spam.
-
-   > **Why the two thresholds?** `HEDGE_TRIGGER_PRICE` (48¢) is the "credible winner" bar at
-   > hedge time — if any sibling is already there, hedge immediately. `HEDGE_BUY` (60¢) is the
-   > "risen enough to be a real winner" bar for the deferred path — wait until a sibling climbs
-   > convincingly before committing to the recovery buy.
-
-3. **Stop-loss backstop** (`STOP_LOSS_PRICE`, default 35¢): whenever the original held
-   bracket's price ≤ 35¢, the bot **sells it at market (1¢ limit, takes best available bid)**
-   to realize the loss, **regardless of `hedge_pending` or hedge state**. The armed state
-   (`hedge_pending`) is preserved after the stop-loss executes, so a recovery bracket can still
-   be bought on a later cycle once a sibling clears 60¢ (via the secondary loop in
-   `_evaluate_held_positions`, which runs even when `active_positions` is empty).
-
-4. **Top-off at 82¢** (`BUY_TRIGGER_PRICE`): when a bracket in a hedged event recovers to
-   YES ask ≥ 82¢ and all other event brackets are closed, the ledger-based top-off fires.
-   Because the ledger (`_event_ledger`) already includes the realized 35¢ stop-loss proceeds
-   and the 60¢ recovery-buy cost, one top-off calculation reconciles all prior legs
-   automatically.
-   - `remaining_deficit = gross_spend_cents − (Q_current × 100)`
-   - `topoff_qty = ⌈remaining_deficit / (100 − yes_ask)⌉`
-
-**Single-order-per-event guarantee**: at most ONE hedge/recovery order is placed per event
-(until the top-off phase). Once an event is in `_hedged_events`, neither the main hedge branch
-nor the secondary recovery loop will place another hedge order; only `_execute_topoff` may
-buy more (into the same surviving bracket).
-
-**90¢ buy ceiling**: all buys (entry, hedge, recovery, top-off) submit at
-`max_price = SPREAD_MONITOR_PRICE` (default 90¢). Kalshi fills at the best available ask ≤ 90¢.
-If a winner has already risen above 90¢ when detected, the order will not fill at that level —
-do not chase. The stop-loss on the loser still protects the downside.
-
-**Floor guard**: brackets priced at or below `EVAL_PRICE_FLOOR` (default 5¢) are never
-chosen as hedge or recovery targets. This prevents buying dead/settled brackets.
-
-**Ledger honesty**: all sizing and break-even math uses the actual `result.fill_price`
-returned by the executor, never the 90¢ submit ceiling.
-
-#### Phase-1 Hedge (triggered at low price)
-When a held bracket's YES price drops to ≤ `HEDGE_TRIGGER_PRICE`, the strategy applies the
-**conditional hedge rule**:
-
-- **Normal hedge (best sibling ≥ 48¢)**: buy the highest-priced sibling immediately using
-  break-even sizing. Max buy price = `SPREAD_MONITOR_PRICE` (90¢).
-- **Deferred hedge (all siblings < 48¢)**: arm the event (`hedge_pending`); wait for a sibling
-  to rise strictly above `HEDGE_BUY` (60¢), then buy that sibling as a recovery bracket.
-
-- **Pricing**: the hedge target price is the **YES ask** from the ticker-quote cache
-  (`yes_ask`/`yes_ask_dollars`), with a REST fallback using the `yes_ask` field only — no
-  NO-derived values, no orderbook `best_ask`.
-- **Sizing** (break-even math, normal hedge path only):
-  - `expected_loss = Q × (avg_entry − stop_loss_price)`
-  - `hedge_qty = ⌈expected_loss / (100 − hedge_price)⌉`
-  - Capped to `min(raw_qty, original_qty, original_cost / hedge_price)` and floored at 1.
-- **Ledger**: once an event is hedged, a per-event cash ledger (sourced from
-  `executed_trades`) tracks gross spend and stop-loss proceeds for all brackets in that event.
-
-#### Phase-2 Top-Off (triggered at high price, hedged events only)
-When a bracket in a **hedged** event recovers to YES ask ≥ `BUY_TRIGGER_PRICE`, and all
-sibling brackets for that event have closed (settled or stop-lossed), the strategy tops off
-the surviving bracket to reach event break-even.
-
-- **Gating**: event must have been hedged; YES ask ≥ `BUY_TRIGGER_PRICE` and ≤
-  `SPREAD_MONITOR_PRICE`; all other event brackets must be closed; event must not already be
-  at break-even.
-- **Sizing** (ledger-based):
-  - `remaining_deficit = gross_spend_cents − (Q_current × 100)`
-  - `topoff_qty = ⌈remaining_deficit / (100 − yes_ask)⌉` (rounded up so worst case is flat)
-- This single formula handles Case B (original bracket recovers while hedge will lose) because
-  the hedge spend is already in `gross_spend_cents`. It also reconciles the 35¢ stop-loss
-  realized loss automatically.
-
-#### Stop Loss
-If YES bid/ask drops to ≤ `STOP_LOSS_PRICE` (default 35¢), the position is **sold at 1¢
-(marketable limit — accepts the best available bid)** to guarantee a fill. This fires
-**independently of `hedge_pending`** — an armed/deferred hedge never delays or prevents the
-stop-loss backstop. After the stop-loss executes, the event stays armed so a recovery bracket
-can still be bought once a sibling clears 60¢.
-
-### Per-Event Circuit-Breaker (`HEDGE_MAX_FACTOR`)
-A safety cap prevents a single event from draining the account. Configured via
-`HEDGE_MAX_FACTOR` (default `5`).
-
-- `max_event_spend = HEDGE_MAX_FACTOR × initial_entry_cost_for_event`
-- Basis: **gross spend** (sum of all BUY and HEDGE costs). Stop-loss proceeds do NOT restore
-  headroom.
-- When any hedge or top-off order would push gross spend over the cap: the order is not
-  placed, `phase.c.hedge_cap_reached` is logged (with `event_ticker`, `gross_spend_cents`,
-  `max_event_spend_cents`, and `attempted_spend`), and that event stops receiving hedge/top-off
-  orders for the remainder of the day. Other events are unaffected.
+### Worst-Case Per-Series Daily Spend
+This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is four buys at `2 + 4 + 8 + 16 = 30` contracts total before the strategy stops buying that series for the day.
 
 ### Watchlist Evaluation Floor (`EVAL_PRICE_FLOOR`)
-Reduces log noise and speeds up the watchlist loop by silently skipping brackets whose YES ask
-price is at or below the floor. Configured via `EVAL_PRICE_FLOOR` (default `5` cents; dollar
-format `0.05` is also accepted).
-
-- Brackets priced ≤ floor are skipped early in `_evaluate_watchlist` without emitting a
-  `phase.b.below_trigger` log. Their `last_price` is still updated.
-- Brackets priced above the floor but below `BUY_TRIGGER_PRICE` continue to emit
-  `phase.b.below_trigger` exactly as before.
-- **WebSocket subscriptions are unchanged**: all market data keeps flowing so hedge/top-off
-  logic (`_execute_hedge`, `_execute_topoff`, `_find_next_bracket`) can still see every
-  sibling bracket in an event.
-- The default 5¢ floor only suppresses truly inert brackets; any bracket that could
-  realistically recover toward the 82¢ buy trigger remains fully evaluated and logged.
+Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below `BUY_TRIGGER_PRICE` still emit `phase.b.below_trigger`.
 
 ## Security
 
@@ -250,3 +159,4 @@ See `db/init_schema.sql` for the full schema. Key tables:
 
 - `positions` — open positions
 - `executed_trades` — trade history
+- `stop_loss_ledger` — per-(series, day) martingale stop-loss counters
