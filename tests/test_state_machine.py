@@ -1082,3 +1082,98 @@ async def test_stop_loss_success_but_still_held_keeps_position(monkeypatch):
     await strategy._execute_stop_loss(bracket)
 
     assert strategy.active_positions[ticker].position_quantity == 2
+
+
+@pytest.mark.asyncio
+async def test_phase_c_uses_rest_bid_when_quote_bid_is_zero(monkeypatch):
+    """REST fallback must run even when a 0-bid quote is cached (bid=0, ask=98)."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSFO-26JUN24-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 98, "yes_bid": 97, "spread": 1}
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTSFO",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 0, 98)
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_not_awaited()
+    strategy._fetch_market_data_via_rest.assert_awaited_once_with(ticker)
+    assert not any(event == "phase.c.no_live_price" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_phase_c_stop_loss_fires_via_rest_bid_when_quote_bid_zero_and_market_low(monkeypatch):
+    """A genuinely falling position with a transient 0-bid quote is still stopped out."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSFO-26JUN24-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 12, "yes_bid": 10, "spread": 2}
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTSFO",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 0, 12)
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_awaited_once()
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    assert not any(event == "phase.c.no_live_price" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_phase_c_no_live_price_logged_at_most_once_per_60s(monkeypatch):
+    """phase.c.no_live_price must be throttled to at most once per 60s per ticker."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSFO-26JUN24-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTSFO",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 0, 0)
+
+    # Run several times back-to-back without advancing time
+    for _ in range(5):
+        await strategy._evaluate_held_positions()
+
+    no_price_logs = [event for event, _ in logged if event == "phase.c.no_live_price"]
+    assert len(no_price_logs) == 1

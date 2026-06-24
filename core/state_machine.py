@@ -823,7 +823,7 @@ class TemperatureStrategy:
                 if yes_bid > 0:
                     current_price = yes_bid
 
-            if current_price is None and quote is None:
+            if current_price is None:
                 now_fetch = asyncio.get_event_loop().time()
                 last_fetch = getattr(bracket, "_last_rest_price_fetch", 0)
                 if now_fetch - last_fetch >= 60:
@@ -847,7 +847,11 @@ class TemperatureStrategy:
                     current_price = last_price
 
             if current_price is None:
-                logger.warning("phase.c.no_live_price", ticker=ticker)
+                now_warn = asyncio.get_event_loop().time()
+                last_warn = getattr(bracket, "_last_no_price_log", 0)
+                if now_warn - last_warn >= 60:
+                    bracket._last_no_price_log = now_warn
+                    logger.warning("phase.c.no_live_price", ticker=ticker)
                 continue
 
             bracket.last_price = current_price
