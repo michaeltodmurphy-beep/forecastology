@@ -502,11 +502,15 @@ class TemperatureStrategy:
             price = None
             spread = None
             rest_data = None
+            yes_bid = None
+            yes_ask = None
 
             # Primary source: ticker channel quote (yes_ask as price, yes_ask - yes_bid as spread)
             quote = self.cache.get_quote(ticker)
             if quote is not None:
                 yes_bid_q, yes_ask_q = quote
+                yes_bid = yes_bid_q
+                yes_ask = yes_ask_q
                 price = yes_ask_q
                 spread = yes_ask_q - yes_bid_q
 
@@ -515,6 +519,8 @@ class TemperatureStrategy:
                 rest_data = await self._fetch_market_data_via_rest(ticker)
                 rest_calls_this_cycle += 1
                 if rest_data:
+                    yes_bid = rest_data.get("yes_bid")
+                    yes_ask = rest_data.get("yes_ask")
                     if "yes_ask" in rest_data and "yes_bid" in rest_data:
                         price = rest_data["yes_ask"]
                         spread = rest_data["yes_ask"] - rest_data["yes_bid"]
@@ -530,6 +536,14 @@ class TemperatureStrategy:
                 continue
 
             bracket.last_price = price
+
+            if (
+                yes_bid is not None
+                and yes_ask is not None
+                and yes_ask >= 99
+                and yes_bid <= self.config.eval_price_floor
+            ):
+                continue
 
             # Skip near-dead brackets early (quietly) — they will never reach buy_trigger.
             if price <= self.config.eval_price_floor:
@@ -715,7 +729,7 @@ class TemperatureStrategy:
             await session.commit()
 
     async def _evaluate_held_positions(self):
-        """Phase C: manage held positions with last-trade stop-losses."""
+        """Phase C: manage held positions with live sellable-price stop-losses."""
         if not self.active_positions:
             return
 
@@ -801,8 +815,39 @@ class TemperatureStrategy:
                     except Exception:
                         pass
 
-            current_price = self.cache.get_last_price(ticker)
+            current_price = None
+            yes_ask = None
+            quote = self.cache.get_quote(ticker)
+            if quote is not None:
+                yes_bid, yes_ask = quote
+                if yes_bid > 0:
+                    current_price = yes_bid
+
+            if current_price is None and quote is None:
+                now_fetch = asyncio.get_event_loop().time()
+                last_fetch = getattr(bracket, "_last_rest_price_fetch", 0)
+                if now_fetch - last_fetch >= 60:
+                    bracket._last_rest_price_fetch = now_fetch
+                    rest_data = await self._fetch_market_data_via_rest(ticker)
+                    if rest_data:
+                        yes_ask = rest_data.get("yes_ask")
+                        rest_yes_bid = rest_data.get("yes_bid")
+                        if rest_yes_bid is not None and rest_yes_bid > 0:
+                            current_price = rest_yes_bid
+                        elif rest_data.get("price") is not None:
+                            current_price = rest_data["price"]
+
             if current_price is None:
+                last_price = self.cache.get_last_price(ticker)
+                if (
+                    last_price is not None
+                    and yes_ask is not None
+                    and last_price <= yes_ask
+                ):
+                    current_price = last_price
+
+            if current_price is None:
+                logger.warning("phase.c.no_live_price", ticker=ticker)
                 continue
 
             bracket.last_price = current_price

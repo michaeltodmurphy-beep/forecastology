@@ -365,6 +365,27 @@ async def test_eval_price_floor_boundary_logs_below_trigger_above_floor(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_phase_b_skips_settled_one_sided_book(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTBOS-26JUN22-B53.5",
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="settled",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 0, 100)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    assert "phase.b.buying" not in [event for event, _ in logged]
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ensure_bracket_filters_to_today(monkeypatch):
     strategy = make_strategy(monkeypatch)
     today = get_eastern_today_date_prefix()
@@ -509,7 +530,7 @@ async def test_restore_positions_uses_db_cost_basis_when_api_entry_missing(monke
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_sells_when_last_trade_below_threshold(monkeypatch):
+async def test_stop_loss_sells_when_bid_below_threshold(monkeypatch):
     logged = capture_logs(monkeypatch)
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
@@ -544,7 +565,7 @@ async def test_stop_loss_sells_when_last_trade_below_threshold(monkeypatch):
     )
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    strategy.cache.update_last_price(ticker, 49)
+    strategy.cache.update_quote(ticker, 49, 51)
 
     await strategy._evaluate_held_positions()
 
@@ -554,8 +575,79 @@ async def test_stop_loss_sells_when_last_trade_below_threshold(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("last_price", [50, 51])
-async def test_no_stop_loss_at_or_above_threshold(monkeypatch, last_price):
+async def test_stop_loss_fires_on_low_bid_even_when_last_price_is_100(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTMIN-26JUN23-B77.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="sell-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTMIN",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_last_price(ticker, 100)
+    strategy.cache.update_quote(ticker, 10, 12)
+
+    await strategy._evaluate_held_positions()
+
+    assert executor.orders[0][0].side.name == "SELL_YES"
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_no_stop_loss_when_bid_above_threshold(monkeypatch):
+    ticker = "KXHIGHTMIN-26JUN23-B77.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTMIN",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_last_price(ticker, 100)
+    strategy.cache.update_quote(ticker, 60, 62)
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bid_price", [50, 51])
+async def test_no_stop_loss_at_or_above_threshold(monkeypatch, bid_price):
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
@@ -571,7 +663,7 @@ async def test_no_stop_loss_at_or_above_threshold(monkeypatch, last_price):
     )
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    strategy.cache.update_last_price(ticker, last_price)
+    strategy.cache.update_quote(ticker, bid_price, bid_price + 1)
 
     await strategy._evaluate_held_positions()
 
@@ -580,6 +672,7 @@ async def test_no_stop_loss_at_or_above_threshold(monkeypatch, last_price):
 
 @pytest.mark.asyncio
 async def test_no_stop_loss_without_last_trade(monkeypatch):
+    logged = capture_logs(monkeypatch)
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
@@ -599,6 +692,7 @@ async def test_no_stop_loss_without_last_trade(monkeypatch):
     await strategy._evaluate_held_positions()
 
     strategy._execute_stop_loss.assert_not_awaited()
+    assert any(event == "phase.c.no_live_price" for event, _ in logged)
 
 
 @pytest.mark.asyncio
@@ -636,11 +730,71 @@ async def test_stop_loss_increments_ledger(monkeypatch):
     )
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    strategy.cache.update_last_price(ticker, 49)
+    strategy.cache.update_quote(ticker, 49, 51)
 
     await strategy._evaluate_held_positions()
 
     assert await strategy._get_stop_loss_count_for_market(ticker) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_increments_ledger_then_recovery_doubles(monkeypatch):
+    stop_ticker = "KXLOWTBOS-26JUN23-B65.5"
+    recovery_ticker = "KXLOWTBOS-26JUN23-T68"
+    executor = FakeExecutor()
+    executor.positions = {stop_ticker: {"count": 2, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="sell-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    strategy = make_strategy(monkeypatch, executor=executor, db=InMemoryDB(), stop_loss_price=50)
+
+    held_bracket = MarketBracket(
+        market_ticker=stop_ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[stop_ticker] = held_bracket
+    strategy.brackets[stop_ticker] = held_bracket
+    strategy.cache.update_last_price(stop_ticker, 100)
+    strategy.cache.update_quote(stop_ticker, 10, 12)
+
+    await strategy._evaluate_held_positions()
+
+    assert await strategy._get_stop_loss_count_for_market(stop_ticker) == 1
+
+    recovery_bracket = MarketBracket(
+        market_ticker=recovery_ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="recovery",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[recovery_ticker] = recovery_bracket
+    strategy.cache.update_quote(recovery_ticker, 80, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert executor.orders[-1][0].side.name == "BUY_YES"
+    assert executor.orders[-1][0].quantity == 4
 
 
 @pytest.mark.asyncio
