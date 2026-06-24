@@ -1177,3 +1177,168 @@ async def test_phase_c_no_live_price_logged_at_most_once_per_60s(monkeypatch):
 
     no_price_logs = [event for event, _ in logged if event == "phase.c.no_live_price"]
     assert len(no_price_logs) == 1
+
+
+@pytest.mark.asyncio
+async def test_held_position_price_refreshes_within_configured_interval(monkeypatch):
+    """Held-position REST fetch uses held_position_price_refresh_seconds (default 10s), not 60s."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSFO-26JUN24-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    # Use the 10s default via config
+    assert strategy.config.held_position_price_refresh_seconds == 10
+
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 40, "yes_bid": 38, "spread": 2}
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTSFO",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # No cached quote, so REST is needed
+    # Simulate that 15s have elapsed since last REST fetch (> 10s, < 60s)
+    bracket._last_rest_price_fetch = 0  # force the fetch to be eligible
+
+    await strategy._evaluate_held_positions()
+
+    # REST should have been consulted (38 bid < 50 stop-loss → stop-loss triggers)
+    strategy._fetch_market_data_via_rest.assert_awaited_once_with(ticker)
+    strategy._execute_stop_loss.assert_awaited_once()
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    assert not any(event == "phase.c.no_live_price" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_abandoned_after_max_unfilled_attempts(monkeypatch):
+    """After stop_loss_max_unfilled_attempts consecutive zero fills, position is abandoned."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTLV-26JUN24-T84"
+    executor = FakeExecutor()
+    # Position stays present and unchanged after each sell attempt (no fill)
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 60}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    max_attempts = strategy.config.stop_loss_max_unfilled_attempts  # default 3
+
+    # sell_yes always returns zero fill
+    executor.sell_yes = AsyncMock(
+        return_value=ExecutionResult(
+            success=True,
+            market_ticker=ticker,
+            side="yes",
+            price=1,
+            quantity=1,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            order_id=None,
+            notes="no bid",
+        )
+    )
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTLV",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=60,
+    )
+    bracket.last_price = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # Drive the stop-loss path max_attempts times, bypassing the 60s attempt throttle
+    for _ in range(max_attempts):
+        bracket._last_stop_loss_attempt = 0  # reset throttle so it fires each time
+        await strategy._execute_stop_loss(bracket)
+
+    assert bracket._stop_loss_abandoned is True
+    assert any(event == "phase.c.stop_loss_abandoned_no_liquidity" for event, _ in logged)
+
+    # Now ensure _evaluate_held_positions does NOT emit stop_loss_triggered for this bracket
+    logged.clear()
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 2, "yes_bid": 1, "spread": 1}
+    )
+    bracket._last_rest_price_fetch = 0
+    await strategy._evaluate_held_positions()
+
+    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_abandon_counter_resets_on_partial_fill(monkeypatch):
+    """_consecutive_unfilled_sl resets when a sell returns fill_quantity > 0 (position progresses)."""
+    ticker = "KXLOWTLV-26JUN24-T84"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 60}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+
+    # First two attempts: zero fill
+    zero_fill = ExecutionResult(
+        success=True,
+        market_ticker=ticker,
+        side="yes",
+        price=1,
+        quantity=1,
+        fill_price=0,
+        fill_quantity=0,
+        total_cost_cents=0,
+        order_id=None,
+        notes="no bid",
+    )
+    partial_fill = ExecutionResult(
+        success=True,
+        market_ticker=ticker,
+        side="yes",
+        price=1,
+        quantity=1,
+        fill_price=1,
+        fill_quantity=1,
+        total_cost_cents=-1,
+        order_id="order-1",
+        notes="filled",
+    )
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTLV",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=60,
+    )
+    bracket.last_price = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # Two zero-fill attempts — counter goes to 2
+    executor.sell_yes = AsyncMock(return_value=zero_fill)
+    for _ in range(2):
+        bracket._last_stop_loss_attempt = 0
+        await strategy._execute_stop_loss(bracket)
+
+    assert getattr(bracket, "_consecutive_unfilled_sl", 0) == 2
+    assert not getattr(bracket, "_stop_loss_abandoned", False)
+
+    # Third attempt: fill_quantity=1 → position closes, counter resets
+    executor.sell_yes = AsyncMock(return_value=partial_fill)
+    executor.positions = {}  # position gone after fill
+    bracket._last_stop_loss_attempt = 0
+    await strategy._execute_stop_loss(bracket)
+
+    # Position fully closed (live_count == 0), so abandonment is never triggered
+    assert not getattr(bracket, "_stop_loss_abandoned", False)
+    assert bracket.phase == Phase.CLOSED

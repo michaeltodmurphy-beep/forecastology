@@ -826,7 +826,7 @@ class TemperatureStrategy:
             if current_price is None:
                 now_fetch = asyncio.get_event_loop().time()
                 last_fetch = getattr(bracket, "_last_rest_price_fetch", 0)
-                if now_fetch - last_fetch >= 60:
+                if now_fetch - last_fetch >= self.config.held_position_price_refresh_seconds:
                     bracket._last_rest_price_fetch = now_fetch
                     rest_data = await self._fetch_market_data_via_rest(ticker)
                     if rest_data:
@@ -861,6 +861,14 @@ class TemperatureStrategy:
                     self.active_positions.pop(ticker, None)
                     self.brackets.pop(ticker, None)
                     logger.info("phase.c.stop_loss_zero_qty", ticker=ticker)
+                    continue
+                if getattr(bracket, "_stop_loss_abandoned", False):
+                    now_aband = asyncio.get_event_loop().time()
+                    last_aband_log = getattr(bracket, "_last_abandoned_log", 0)
+                    if now_aband - last_aband_log >= 60:
+                        bracket._last_abandoned_log = now_aband
+                        logger.info("phase.c.stop_loss_abandoned_holding", ticker=ticker,
+                                    remaining_qty=bracket.position_quantity, last_price=current_price)
                     continue
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
                                last_price=current_price, stop_loss=self.config.stop_loss_price)
@@ -930,7 +938,12 @@ class TemperatureStrategy:
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         price=result.fill_price, proceeds=-result.total_cost_cents)
         else:
+            prev_qty = bracket.position_quantity
             bracket.position_quantity = live_count
+            if result.fill_quantity > 0 or live_count < prev_qty:
+                bracket._consecutive_unfilled_sl = 0
+            else:
+                bracket._consecutive_unfilled_sl = getattr(bracket, "_consecutive_unfilled_sl", 0) + 1
             logger.warning(
                 "phase.c.stop_loss_partial_or_unfilled",
                 ticker=bracket.market_ticker,
@@ -940,6 +953,15 @@ class TemperatureStrategy:
                 notes=result.notes,
                 last_price=bracket.last_price,
             )
+            if bracket._consecutive_unfilled_sl >= self.config.stop_loss_max_unfilled_attempts:
+                bracket._stop_loss_abandoned = True
+                logger.warning(
+                    "phase.c.stop_loss_abandoned_no_liquidity",
+                    ticker=bracket.market_ticker,
+                    attempts=bracket._consecutive_unfilled_sl,
+                    last_price=bracket.last_price,
+                    remaining_qty=bracket.position_quantity,
+                )
 
     async def _fetch_market_data_via_rest(self, ticker: str) -> Optional[dict]:
         """

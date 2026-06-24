@@ -38,6 +38,8 @@ class AppConfig(BaseSettings):
     hedge_trigger_price: int = 0
     hedge_buy: int = 0
     dry_run: bool = False
+    held_position_price_refresh_seconds: int = 10
+    stop_loss_max_unfilled_attempts: int = 3
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
