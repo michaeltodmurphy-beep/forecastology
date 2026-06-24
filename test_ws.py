@@ -1,4 +1,5 @@
 import asyncio
+import os
 import pytest
 import json
 pytest.importorskip("websockets")
@@ -8,6 +9,8 @@ from app.config import AppConfig
 
 @pytest.mark.asyncio
 async def test_websocket_connection():
+    if not os.path.exists("kalshi_private_key.pem"):
+        pytest.skip("no private key in CI")
     c = AppConfig.from_env()
     key = load_private_key("kalshi_private_key.pem")
     headers = build_ws_headers(key, c.kalshi_api_key)
@@ -22,5 +25,4 @@ async def test_websocket_connection():
             print("Response:", resp)
     except Exception as e:
         print("Failed:", type(e).__name__, str(e))
-
 
