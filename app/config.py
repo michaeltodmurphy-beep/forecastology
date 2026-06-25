@@ -40,11 +40,16 @@ class AppConfig(BaseSettings):
     dry_run: bool = False
     held_position_price_refresh_seconds: int = 10
     stop_loss_max_unfilled_attempts: int = 3
+    # Maximum bid-ask spread (in cents) at which the stop-loss is allowed to fire.
+    # When the YES spread exceeds this value the bot holds rather than selling into
+    # a wide, indecisive book. Set via MAX_SL_SPREAD env var (e.g. "0.20" → 20¢).
+    max_sl_spread: int = 20
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
+        'max_sl_spread',
         mode='before'
     )
     @classmethod

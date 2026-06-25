@@ -870,12 +870,43 @@ class TemperatureStrategy:
                         logger.info("phase.c.stop_loss_abandoned_holding", ticker=ticker,
                                     remaining_qty=bracket.position_quantity, last_price=current_price)
                     continue
+                # Spread guard: only allow the stop-loss to fire when the YES
+                # bid-ask spread is tight, meaning the market agrees the position
+                # is a loser. A wide spread means the book is indecisive — the
+                # position may recover, so we hold rather than sell into thin air.
+                if yes_ask is not None and yes_ask > 0:
+                    sl_spread = yes_ask - current_price
+                    spread_wide = sl_spread > self.config.max_sl_spread
+                else:
+                    # No ask (one-sided book) → treat as wide; PR #29 abandon
+                    # logic will take over after enough zero-fill attempts.
+                    sl_spread = None
+                    spread_wide = True
+                if spread_wide:
+                    bracket._sl_held_for_spread = True
+                    now_spread = asyncio.get_event_loop().time()
+                    last_sl_held_log = getattr(bracket, "_last_sl_held_log", 0)
+                    if now_spread - last_sl_held_log >= 60:
+                        bracket._last_sl_held_log = now_spread
+                        logger.info("phase.c.sl_held_for_spread", ticker=ticker,
+                                    yes_bid=current_price, yes_ask=yes_ask,
+                                    spread=sl_spread, max_spread=self.config.max_sl_spread)
+                    continue
+                # Spread is tight — reset guard state and fire the stop-loss.
+                bracket._sl_held_for_spread = False
+                bracket._last_sl_held_log = 0
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
                                last_price=current_price, stop_loss=self.config.stop_loss_price)
                 if not getattr(bracket, "_stop_loss_counted", False):
                     await self._increment_stop_loss_count_for_market(bracket.market_ticker)
                     bracket._stop_loss_counted = True
                 await self._execute_stop_loss(bracket)
+            else:
+                # Bid has recovered above the stop threshold — clear the spread
+                # guard so a future re-trigger logs fresh.
+                if getattr(bracket, "_sl_held_for_spread", False):
+                    bracket._sl_held_for_spread = False
+                    bracket._last_sl_held_log = 0
 
     async def _execute_stop_loss(self, bracket: MarketBracket):
         """Execute a stop-loss: sell position at market (1¢) to guarantee fill."""
