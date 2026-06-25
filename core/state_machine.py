@@ -71,6 +71,49 @@ class TemperatureStrategy:
         self._running = False
 
     @staticmethod
+    def _first_non_none(*values):
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _to_cents(raw) -> Optional[int]:
+        if raw is None or raw == "":
+            return None
+        try:
+            return round(float(raw) * 100)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _market_is_settled(rest_data: Optional[dict]) -> bool:
+        if not rest_data:
+            return False
+        status = str(rest_data.get("status") or "").lower()
+        result = str(rest_data.get("result") or "").lower()
+        settlement_ts = rest_data.get("settlement_ts")
+        is_settled = rest_data.get("is_settled")
+        if isinstance(is_settled, str):
+            is_settled = is_settled.lower() == "true"
+        return bool(
+            is_settled
+            or settlement_ts
+            or status in {"settled", "finalized", "resolved"}
+            or result in {"yes", "no"}
+        )
+
+    async def _remove_active_position(self, ticker: str, bracket: MarketBracket):
+        bracket.phase = Phase.CLOSED
+        self.active_positions.pop(ticker, None)
+        self.brackets.pop(ticker, None)
+        async with await self.db.get_session() as session:
+            await session.execute(
+                delete(PositionModel).where(PositionModel.market_ticker == ticker)
+            )
+            await session.commit()
+
+    @staticmethod
     def _avg_buy_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
         total_count = 0.0
         weighted_dollars = 0.0
@@ -297,13 +340,19 @@ class TemperatureStrategy:
 
         last_price_raw = ticker_data.get("last_price")
         # Prefer *_dollars variants (authoritative); fall back to bare fields
-        yes_bid_raw = ticker_data.get("yes_bid_dollars") or ticker_data.get("yes_bid")
-        yes_ask_raw = ticker_data.get("yes_ask_dollars") or ticker_data.get("yes_ask")
+        yes_bid_raw = self._first_non_none(
+            ticker_data.get("yes_bid_dollars"),
+            ticker_data.get("yes_bid"),
+        )
+        yes_ask_raw = self._first_non_none(
+            ticker_data.get("yes_ask_dollars"),
+            ticker_data.get("yes_ask"),
+        )
 
         # Convert dollars to cents
-        last_price = round(float(last_price_raw) * 100) if last_price_raw is not None else None
-        yes_bid = round(float(yes_bid_raw) * 100) if yes_bid_raw is not None else None
-        yes_ask = round(float(yes_ask_raw) * 100) if yes_ask_raw is not None else None
+        last_price = self._to_cents(last_price_raw)
+        yes_bid = self._to_cents(yes_bid_raw)
+        yes_ask = self._to_cents(yes_ask_raw)
 
         if last_price is not None:
             self.cache.update_last_price(market_ticker, last_price)
@@ -739,50 +788,66 @@ class TemperatureStrategy:
             logger.error("phase.c.get_positions_failed", error=str(e))
             api_positions = {}
 
+        active_tickers = list(self.active_positions.keys())
+        absent_tickers = [
+            ticker for ticker in active_tickers
+            if ticker not in api_positions or api_positions.get(ticker) is None
+        ]
+        total_active = len(active_tickers)
+        mass_absence = (
+            total_active >= 2
+            and len(absent_tickers) / total_active > 0.5
+        )
+        if mass_absence:
+            now_mass = asyncio.get_event_loop().time()
+            last_mass_log = getattr(self, "_last_mass_absence_log", 0)
+            if now_mass - last_mass_log >= 60:
+                self._last_mass_absence_log = now_mass
+                logger.warning(
+                    "phase.c.positions_api_mass_absence",
+                    count_absent=len(absent_tickers),
+                    count_total=total_active,
+                )
+
         for ticker, bracket in list(self.active_positions.items()):
             pos_data = api_positions.get(ticker)
-            if not pos_data:
-                now_ts = asyncio.get_event_loop().time()
-                last_seen = getattr(bracket, '_last_seen_in_api', 0)
+            position_absent = ticker not in api_positions or pos_data is None
+            now_ts = asyncio.get_event_loop().time()
+            last_seen = getattr(bracket, "_last_seen_in_api", 0)
+            if position_absent:
                 if last_seen == 0:
                     bracket._last_seen_in_api = now_ts
-                    continue
+                    last_seen = now_ts
+                seconds_absent = now_ts - last_seen
                 grace = 30
-                if now_ts - last_seen < grace:
+                if seconds_absent < grace:
                     logger.debug("phase.c.position_missing_within_grace", ticker=ticker,
-                                 seconds_absent=int(now_ts - last_seen))
+                                 seconds_absent=int(seconds_absent))
+                elif not mass_absence:
+                    last_absent_log = getattr(bracket, "_last_position_absent_log", 0)
+                    if now_ts - last_absent_log >= 60:
+                        bracket._last_position_absent_log = now_ts
+                        logger.warning(
+                            "phase.c.position_not_in_api_after_grace",
+                            ticker=ticker,
+                            qty=bracket.position_quantity,
+                            phase=bracket.phase.name,
+                            action="retained_pending_settlement_confirmation",
+                        )
+            else:
+                bracket._last_seen_in_api = now_ts
+                bracket._last_position_absent_log = 0
+
+                api_count = pos_data.get("count", 1)
+                if api_count == 0:
+                    logger.info("phase.c.position_settled", ticker=ticker,
+                                qty=bracket.position_quantity, api_count=api_count)
+                    await self._remove_active_position(ticker, bracket)
                     continue
-                logger.warning("phase.c.position_not_in_api_after_grace", ticker=ticker,
-                               qty=bracket.position_quantity, phase=bracket.phase.name)
-                bracket.phase = Phase.CLOSED
-                self.active_positions.pop(ticker, None)
-                self.brackets.pop(ticker, None)
-                async with await self.db.get_session() as session:
-                    await session.execute(
-                        delete(PositionModel).where(PositionModel.market_ticker == ticker)
-                    )
-                    await session.commit()
-                continue
-
-            bracket._last_seen_in_api = asyncio.get_event_loop().time()
-
-            api_count = pos_data.get("count", 1)
-            if api_count == 0:
-                logger.info("phase.c.position_settled", ticker=ticker,
-                            qty=bracket.position_quantity, api_count=api_count)
-                bracket.phase = Phase.CLOSED
-                self.active_positions.pop(ticker, None)
-                self.brackets.pop(ticker, None)
-                async with await self.db.get_session() as session:
-                    await session.execute(
-                        delete(PositionModel).where(PositionModel.market_ticker == ticker)
-                    )
-                    await session.commit()
-                continue
 
             if not bracket.avg_entry or bracket.avg_entry <= 0:
                 heal_source: Optional[str] = None
-                avg_cents = int(pos_data.get("average_fill_cost_cents") or 0)
+                avg_cents = int((pos_data or {}).get("average_fill_cost_cents") or 0)
                 if avg_cents > 0:
                     bracket.avg_entry = avg_cents
                     heal_source = "positions_inline"
@@ -817,11 +882,19 @@ class TemperatureStrategy:
 
             current_price = None
             yes_ask = None
+            rest_data = None
+            zero_bid_collapse = False
+            blind_below_stop = False
+            last_known_price = self.cache.get_last_price(ticker)
+            if last_known_price is None:
+                last_known_price = bracket.last_price
             quote = self.cache.get_quote(ticker)
             if quote is not None:
                 yes_bid, yes_ask = quote
                 if yes_bid > 0:
                     current_price = yes_bid
+                elif yes_bid == 0:
+                    zero_bid_collapse = True
 
             if current_price is None:
                 now_fetch = asyncio.get_event_loop().time()
@@ -834,8 +907,22 @@ class TemperatureStrategy:
                         rest_yes_bid = rest_data.get("yes_bid")
                         if rest_yes_bid is not None and rest_yes_bid > 0:
                             current_price = rest_yes_bid
+                            zero_bid_collapse = False
+                        elif rest_yes_bid == 0:
+                            zero_bid_collapse = True
                         elif rest_data.get("price") is not None:
                             current_price = rest_data["price"]
+
+            if position_absent and not mass_absence and self._market_is_settled(rest_data):
+                logger.info(
+                    "phase.c.position_settled",
+                    ticker=ticker,
+                    qty=bracket.position_quantity,
+                    source="market_status",
+                    market_status=rest_data.get("status") if rest_data else None,
+                )
+                await self._remove_active_position(ticker, bracket)
+                continue
 
             if current_price is None:
                 last_price = self.cache.get_last_price(ticker)
@@ -846,16 +933,63 @@ class TemperatureStrategy:
                 ):
                     current_price = last_price
 
-            if current_price is None:
+            if current_price is None and not zero_bid_collapse:
+                bracket._consecutive_no_price_cycles = getattr(
+                    bracket, "_consecutive_no_price_cycles", 0
+                ) + 1
+                if not getattr(bracket, "_no_price_since", 0):
+                    bracket._no_price_since = asyncio.get_event_loop().time()
                 now_warn = asyncio.get_event_loop().time()
                 last_warn = getattr(bracket, "_last_no_price_log", 0)
                 if now_warn - last_warn >= 60:
                     bracket._last_no_price_log = now_warn
                     logger.warning("phase.c.no_live_price", ticker=ticker)
-                continue
+                if (
+                    bracket.position_quantity > 0
+                    and bracket._consecutive_no_price_cycles > self.config.max_no_price_cycles
+                ):
+                    last_alert = getattr(bracket, "_last_unprotected_log", 0)
+                    if now_warn - last_alert >= 60:
+                        bracket._last_unprotected_log = now_warn
+                        logger.warning(
+                            "phase.c.held_position_unprotected",
+                            ticker=ticker,
+                            qty=bracket.position_quantity,
+                            blind_cycles=bracket._consecutive_no_price_cycles,
+                            seconds_blind=int(now_warn - bracket._no_price_since),
+                            last_known_price=last_known_price,
+                        )
+                    # When we've gone blind for too long and the last known price
+                    # was already below the stop threshold, the safe action is to
+                    # attempt protection. If the last known price was still healthy,
+                    # alert loudly but do not force an exit on data loss alone.
+                    if (
+                        last_known_price is not None
+                        and last_known_price < self.config.stop_loss_price
+                    ):
+                        current_price = last_known_price
+                        blind_below_stop = True
+                if current_price is None:
+                    continue
+
+            bracket._consecutive_no_price_cycles = 0
+            bracket._no_price_since = 0
 
             bracket.last_price = current_price
-            if current_price < self.config.stop_loss_price:
+            bypass_spread_guard = zero_bid_collapse or blind_below_stop
+            stop_loss_reason = None
+            if zero_bid_collapse:
+                if bracket.last_price != 0:
+                    bracket.last_price = 0
+                current_price = 0
+                stop_loss_reason = "zero_bid_collapse"
+                yes_ask = yes_ask if yes_ask and yes_ask > 0 else None
+            elif blind_below_stop:
+                stop_loss_reason = "blind_last_known_below_stop"
+            elif current_price < self.config.stop_loss_price:
+                stop_loss_reason = "price_below_stop"
+
+            if stop_loss_reason is not None:
                 if bracket.position_quantity <= 0:
                     bracket.phase = Phase.CLOSED
                     self.active_positions.pop(ticker, None)
@@ -874,14 +1008,17 @@ class TemperatureStrategy:
                 # bid-ask spread is tight, meaning the market agrees the position
                 # is a loser. A wide spread means the book is indecisive — the
                 # position may recover, so we hold rather than sell into thin air.
-                if yes_ask is not None and yes_ask > 0:
+                if not bypass_spread_guard and yes_ask is not None and yes_ask > 0:
                     sl_spread = yes_ask - current_price
                     spread_wide = sl_spread > self.config.max_sl_spread
-                else:
+                elif not bypass_spread_guard:
                     # No ask (one-sided book) → treat as wide; PR #29 abandon
                     # logic will take over after enough zero-fill attempts.
                     sl_spread = None
                     spread_wide = True
+                else:
+                    sl_spread = None
+                    spread_wide = False
                 if spread_wide:
                     bracket._sl_held_for_spread = True
                     now_spread = asyncio.get_event_loop().time()
@@ -896,7 +1033,8 @@ class TemperatureStrategy:
                 bracket._sl_held_for_spread = False
                 bracket._last_sl_held_log = 0
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
-                               last_price=current_price, stop_loss=self.config.stop_loss_price)
+                               last_price=current_price, stop_loss=self.config.stop_loss_price,
+                               reason=stop_loss_reason)
                 if not getattr(bracket, "_stop_loss_counted", False):
                     await self._increment_stop_loss_count_for_market(bracket.market_ticker)
                     bracket._stop_loss_counted = True
@@ -1011,22 +1149,38 @@ class TemperatureStrategy:
                     mkt = resp.json().get("market", {})
                     result = {}
 
-                    ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
-                    if ya and float(ya) > 0:
-                        result["yes_ask"] = round(float(ya) * 100)
+                    ya = self._first_non_none(mkt.get("yes_ask_dollars"), mkt.get("yes_ask"))
+                    ya_cents = self._to_cents(ya)
+                    if ya_cents is not None:
+                        result["yes_ask"] = ya_cents
 
-                    yb = mkt.get("yes_bid_dollars") or mkt.get("yes_bid")
-                    if yb and float(yb) > 0:
-                        result["yes_bid"] = round(float(yb) * 100)
+                    yb = self._first_non_none(mkt.get("yes_bid_dollars"), mkt.get("yes_bid"))
+                    yb_cents = self._to_cents(yb)
+                    if yb_cents is not None:
+                        result["yes_bid"] = yb_cents
 
-                    lp = mkt.get("last_price_dollars") or mkt.get("last_price")
-                    if lp and float(lp) > 0:
-                        result["price"] = round(float(lp) * 100)
+                    lp = self._first_non_none(
+                        mkt.get("last_price_dollars"),
+                        mkt.get("last_price"),
+                    )
+                    lp_cents = self._to_cents(lp)
+                    if lp_cents is not None:
+                        result["price"] = lp_cents
                     elif "yes_ask" in result:
                         result["price"] = result["yes_ask"]
 
                     if "yes_ask" in result and "yes_bid" in result:
                         result["spread"] = result["yes_ask"] - result["yes_bid"]
+
+                    status = self._first_non_none(mkt.get("status"), mkt.get("market_status"))
+                    if status is not None:
+                        result["status"] = status
+                    if mkt.get("result") is not None:
+                        result["result"] = mkt.get("result")
+                    if mkt.get("settlement_ts") is not None:
+                        result["settlement_ts"] = mkt.get("settlement_ts")
+                    if mkt.get("is_settled") is not None:
+                        result["is_settled"] = mkt.get("is_settled")
 
                     return result if result else None
         except Exception as e:

@@ -39,6 +39,7 @@ class AppConfig(BaseSettings):
     hedge_buy: int = 0
     dry_run: bool = False
     held_position_price_refresh_seconds: int = 10
+    max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
     # Maximum bid-ask spread (in cents) at which the stop-loss is allowed to fire.
     # When the YES spread exceeds this value the bot holds rather than selling into
