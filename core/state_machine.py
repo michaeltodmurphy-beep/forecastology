@@ -31,6 +31,25 @@ def parse_series_and_date(market_ticker: str) -> Optional[tuple[str, str]]:
     return match.group(1), match.group(2)
 
 
+_MONTH_NUM = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _parse_date_prefix(date_prefix: str) -> Optional[datetime.date]:
+    """Parse a ticker date prefix like '26JUN25' into a datetime.date, or None on failure."""
+    try:
+        year = 2000 + int(date_prefix[:2])
+        month = _MONTH_NUM.get(date_prefix[2:5])
+        day = int(date_prefix[5:])
+        if month is None:
+            return None
+        return datetime.date(year, month, day)
+    except (ValueError, IndexError):
+        return None
+
+
 class TemperatureStrategy:
     """
     Core state machine for daily high/low temperature market brackets.
@@ -240,6 +259,8 @@ class TemperatureStrategy:
             db_positions = result.scalars().all()
         db_by_ticker = {pos.market_ticker: pos for pos in db_positions}
 
+        today_utc = datetime.datetime.utcnow().date()
+
         # In LIVE mode, also fetch positions directly from Kalshi API
         if self.config.trading_mode == "LIVE":
             try:
@@ -249,6 +270,16 @@ class TemperatureStrategy:
                     qty = int(float(pos_data.get("count", 0)))
                     if qty <= 0:
                         continue
+                    # Skip positions whose market date is before today — they have
+                    # already settled overnight and no longer exist on the exchange.
+                    parsed = parse_series_and_date(ticker)
+                    if parsed is not None:
+                        _, date_prefix = parsed
+                        market_date = _parse_date_prefix(date_prefix)
+                        if market_date is not None and market_date < today_utc:
+                            logger.info("strategy.skipped_stale_position",
+                                        ticker=ticker, date_prefix=date_prefix)
+                            continue
                     bracket = self.brackets.get(ticker)
                     if bracket is None:
                         bracket = MarketBracket(
@@ -285,6 +316,16 @@ class TemperatureStrategy:
 
         for pos in db_positions:
             ticker = pos.market_ticker
+            # Skip positions whose market date is before today — they have
+            # already settled overnight and no longer exist on the exchange.
+            parsed = parse_series_and_date(ticker)
+            if parsed is not None:
+                _, date_prefix = parsed
+                market_date = _parse_date_prefix(date_prefix)
+                if market_date is not None and market_date < today_utc:
+                    logger.info("strategy.skipped_stale_position",
+                                ticker=ticker, date_prefix=date_prefix)
+                    continue
             bracket = self.brackets.get(ticker)
             if bracket is None:
                 bracket = MarketBracket(
@@ -777,6 +818,25 @@ class TemperatureStrategy:
                 row.updated_at = datetime.datetime.utcnow()
             await session.commit()
 
+    async def _decrement_stop_loss_count_for_market(self, market_ticker: str) -> None:
+        parsed = parse_series_and_date(market_ticker)
+        if not parsed:
+            return
+
+        series_ticker, date_prefix = parsed
+        async with await self.db.get_session() as session:
+            result = await session.execute(
+                select(StopLossLedger).where(
+                    StopLossLedger.series_ticker == series_ticker,
+                    StopLossLedger.date_prefix == date_prefix,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is not None and row.stop_loss_count > 0:
+                row.stop_loss_count -= 1
+                row.updated_at = datetime.datetime.utcnow()
+                await session.commit()
+
     async def _evaluate_held_positions(self):
         """Phase C: manage held positions with live sellable-price stop-losses."""
         if not self.active_positions:
@@ -1038,7 +1098,12 @@ class TemperatureStrategy:
                 if not getattr(bracket, "_stop_loss_counted", False):
                     await self._increment_stop_loss_count_for_market(bracket.market_ticker)
                     bracket._stop_loss_counted = True
-                await self._execute_stop_loss(bracket)
+                market_gone = await self._execute_stop_loss(bracket)
+                if market_gone:
+                    # The sell returned market_not_found: the market settled.
+                    # Undo the ledger increment since no real stop-loss occurred.
+                    await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
+                    bracket._stop_loss_counted = False
             else:
                 # Bid has recovered above the stop threshold — clear the spread
                 # guard so a future re-trigger logs fresh.
@@ -1047,11 +1112,16 @@ class TemperatureStrategy:
                     bracket._last_sl_held_log = 0
 
     async def _execute_stop_loss(self, bracket: MarketBracket):
-        """Execute a stop-loss: sell position at market (1¢) to guarantee fill."""
+        """Execute a stop-loss: sell position at market (1¢) to guarantee fill.
+
+        Returns True if the sell was rejected with market_not_found (the market
+        has settled and is gone — position is cleaned up quietly as confirmed
+        settlement).  Returns False in all other cases.
+        """
         now = asyncio.get_event_loop().time()
         last_attempt = getattr(bracket, '_last_stop_loss_attempt', 0)
         if now - last_attempt < 60:
-            return
+            return False
         bracket._last_stop_loss_attempt = now
 
         price = 1  # Sell at minimum price to guarantee fill at stop loss
@@ -1065,6 +1135,25 @@ class TemperatureStrategy:
         )
 
         result = await self.executor.sell_yes(order)
+
+        # Detect market_not_found (HTTP 404): the market has already settled and
+        # no longer exists on the exchange.  Treat this as confirmed settlement —
+        # clean up the position quietly without logging a false stop-loss.
+        if not result.success and "market_not_found" in (result.notes or ""):
+            logger.info(
+                "phase.c.position_settled_market_gone",
+                ticker=bracket.market_ticker,
+                qty=bracket.position_quantity,
+            )
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    delete(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
+                )
+                await session.commit()
+            bracket.phase = Phase.CLOSED
+            self.active_positions.pop(bracket.market_ticker, None)
+            self.brackets.pop(bracket.market_ticker, None)
+            return True
 
         async with await self.db.get_session() as session:
             et = ExecutedTrade(
@@ -1131,6 +1220,7 @@ class TemperatureStrategy:
                     last_price=bracket.last_price,
                     remaining_qty=bracket.position_quantity,
                 )
+        return False
 
     async def _fetch_market_data_via_rest(self, ticker: str) -> Optional[dict]:
         """

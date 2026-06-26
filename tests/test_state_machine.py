@@ -503,7 +503,8 @@ async def test_entry_self_heal_from_fills_updates_avg_entry(monkeypatch):
 @pytest.mark.asyncio
 async def test_restore_positions_uses_db_cost_basis_when_api_entry_missing(monkeypatch):
     logged = capture_logs(monkeypatch)
-    ticker = "KXLOWTSEA-26JUN22-B61.5"
+    today_prefix = get_eastern_today_date_prefix()
+    ticker = f"KXLOWTSEA-{today_prefix}-B61.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 0}}
     db = InMemoryDB(
@@ -1837,3 +1838,230 @@ async def test_max_sl_spread_config_from_env(monkeypatch):
 
     cfg = AppConfig.from_env()
     assert cfg.max_sl_spread == 15
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: market_not_found / 404 treated as confirmed settlement
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_market_not_found_treated_as_settled_cleanup(monkeypatch):
+    """sell_yes returning market_not_found/404 cleans up position and logs
+    phase.c.position_settled_market_gone; phase.c.stop_loss_executed must NOT appear."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTCHI",
+            side="yes",
+            quantity=1,
+            avg_entry_price=80,
+            last_price=0,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    # Position present in positions API so the stop-loss code can proceed to fire
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    market_not_found_result = ExecutionResult(
+        success=False,
+        market_ticker=ticker,
+        side="yes",
+        price=1,
+        quantity=1,
+        fill_price=0,
+        fill_quantity=0,
+        total_cost_cents=0,
+        status="REJECTED",
+        notes='{"error": {"code": "market_not_found", "message": "market not found"}}',
+    )
+    executor.sell_yes = AsyncMock(return_value=market_not_found_result)
+
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTCHI",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    bracket.last_price = 80
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Trigger zero_bid_collapse (bid=0, ask=None) to fire stop-loss path
+    strategy.cache.update_quote(ticker, 0, 0)
+
+    await strategy._evaluate_held_positions()
+
+    # Position must be cleaned up
+    assert ticker not in strategy.active_positions
+    assert ticker not in strategy.brackets
+    assert bracket.phase == Phase.CLOSED
+    assert db.store[PositionModel] == []
+
+    # Correct settlement log must appear; false "executed" log must NOT appear
+    events = [event for event, _ in logged]
+    assert "phase.c.position_settled_market_gone" in events
+    assert "phase.c.stop_loss_executed" not in events
+
+    settled_log = next(kwargs for event, kwargs in logged if event == "phase.c.position_settled_market_gone")
+    assert settled_log["ticker"] == ticker
+    assert settled_log["qty"] == 1
+
+
+@pytest.mark.asyncio
+async def test_market_not_found_does_not_increment_ledger_or_abandon(monkeypatch):
+    """market_not_found cleanup must not count against the StopLossLedger and
+    must not advance _consecutive_unfilled_sl or set _stop_loss_abandoned."""
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTCHI",
+            side="yes",
+            quantity=1,
+            avg_entry_price=80,
+            last_price=0,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    market_not_found_result = ExecutionResult(
+        success=False,
+        market_ticker=ticker,
+        side="yes",
+        price=1,
+        quantity=1,
+        fill_price=0,
+        fill_quantity=0,
+        total_cost_cents=0,
+        status="REJECTED",
+        notes='{"error": {"code": "market_not_found", "message": "market not found"}}',
+    )
+    executor.sell_yes = AsyncMock(return_value=market_not_found_result)
+
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTCHI",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    bracket.last_price = 80
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 0, 0)
+
+    await strategy._evaluate_held_positions()
+
+    # StopLossLedger must be 0 (ledger increment undone)
+    assert await strategy._get_stop_loss_count_for_market(ticker) == 0
+
+    # Abandon counters must not be advanced
+    assert getattr(bracket, "_consecutive_unfilled_sl", 0) == 0
+    assert not getattr(bracket, "_stop_loss_abandoned", False)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: _restore_positions skips stale-dated positions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restore_skips_previous_day_positions(monkeypatch):
+    """Positions whose market date is before today (UTC) are skipped on restore;
+    strategy.skipped_stale_position is logged and no stop-loss is attempted."""
+    logged = capture_logs(monkeypatch)
+
+    today_prefix = get_eastern_today_date_prefix()
+    today_ticker = f"KXLOWTCHI-{today_prefix}-B62.5"
+    # Use a clearly past date (definitely before today)
+    stale_ticker = "KXLOWTATL-24DEC25-T55"
+
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=today_ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTCHI",
+            side="yes",
+            quantity=2,
+            avg_entry_price=80,
+            last_price=80,
+            position_ts=datetime.datetime.utcnow(),
+        ),
+        PositionModel(
+            market_ticker=stale_ticker,
+            event_ticker="EVT2",
+            series_ticker="KXLOWTATL",
+            side="yes",
+            quantity=3,
+            avg_entry_price=75,
+            last_price=75,
+            position_ts=datetime.datetime.utcnow(),
+        ),
+    ])
+    executor = FakeExecutor()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="PAPER")
+
+    # Ensure _execute_stop_loss is not called for stale positions
+    strategy._execute_stop_loss = AsyncMock()
+
+    await strategy._restore_positions()
+
+    # Today-dated position must be restored
+    assert today_ticker in strategy.active_positions
+
+    # Stale position must NOT be restored
+    assert stale_ticker not in strategy.active_positions
+
+    # Stale skip must be logged
+    skip_logs = [kwargs for event, kwargs in logged if event == "strategy.skipped_stale_position"]
+    assert any(kwargs["ticker"] == stale_ticker for kwargs in skip_logs)
+
+    # No stop-loss should have been attempted
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restore_keeps_unparseable_ticker(monkeypatch):
+    """A position whose ticker cannot be parsed for a date is still restored
+    (fallback: do not silently drop positions with unexpected ticker formats)."""
+    logged = capture_logs(monkeypatch)
+
+    unparseable_ticker = "UNKNOWN-MARKET"
+
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=unparseable_ticker,
+            event_ticker="EVT1",
+            series_ticker="UNKNOWN",
+            side="yes",
+            quantity=1,
+            avg_entry_price=70,
+            last_price=70,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="PAPER")
+
+    await strategy._restore_positions()
+
+    # Position with unparseable ticker must still be restored
+    assert unparseable_ticker in strategy.active_positions
+
+    # No skipped_stale_position log for unparseable ticker
+    skip_logs = [kwargs for event, kwargs in logged if event == "strategy.skipped_stale_position"]
+    assert not any(kwargs.get("ticker") == unparseable_ticker for kwargs in skip_logs)
