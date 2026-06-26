@@ -839,14 +839,14 @@ class TemperatureStrategy:
 
     async def _evaluate_held_positions(self):
         """Phase C: manage held positions with live sellable-price stop-losses."""
-        if not self.active_positions:
-            return
-
         try:
             api_positions = await self.executor.get_positions()
         except Exception as e:
             logger.error("phase.c.get_positions_failed", error=str(e))
             api_positions = {}
+        await self._adopt_untracked_exchange_fills(api_positions)
+        if not self.active_positions:
+            return
 
         active_tickers = list(self.active_positions.keys())
         absent_tickers = [
@@ -1110,6 +1110,69 @@ class TemperatureStrategy:
                 if getattr(bracket, "_sl_held_for_spread", False):
                     bracket._sl_held_for_spread = False
                     bracket._last_sl_held_log = 0
+
+    async def _adopt_untracked_exchange_fills(self, api_positions: dict[str, dict]) -> None:
+        for ticker, bracket in list(self.brackets.items()):
+            if bracket.phase == Phase.HOLDING:
+                continue
+            pos_data = api_positions.get(ticker) or {}
+            qty = int(float(pos_data.get("count", 0) or 0))
+            if qty <= 0:
+                continue
+
+            prior_phase = bracket.phase.name
+            entry = int(pos_data.get("average_fill_cost_cents", 0) or 0)
+            if entry <= 0:
+                backfilled_cents, _source = await self._resolve_entry_cost_basis(ticker)
+                if backfilled_cents > 0:
+                    entry = backfilled_cents
+
+            bracket.phase = Phase.HOLDING
+            bracket.crossed_buy = True
+            bracket.position_quantity = qty
+            if entry > 0:
+                bracket.avg_entry = entry
+                bracket.last_price = entry
+            self.active_positions[ticker] = bracket
+
+            async with await self.db.get_session() as session:
+                existing = await session.execute(
+                    select(PositionModel).where(PositionModel.market_ticker == ticker)
+                )
+                pos = existing.scalar_one_or_none()
+                if pos:
+                    pos.quantity = qty
+                    if entry > 0:
+                        pos.avg_entry_price = entry
+                        pos.last_price = entry
+                else:
+                    pos = PositionModel(
+                        market_ticker=ticker,
+                        event_ticker=bracket.event_ticker,
+                        series_ticker=bracket.series_ticker,
+                        side="yes",
+                        quantity=qty,
+                        avg_entry_price=entry,
+                        last_price=entry,
+                    )
+                    session.add(pos)
+                try:
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    logger.error("phase.b.untracked_fill_db_error", ticker=ticker, error=str(e))
+
+            now_ts = asyncio.get_event_loop().time()
+            last_log = getattr(bracket, "_last_untracked_fill_adopted_log", 0)
+            if now_ts - last_log >= 60:
+                bracket._last_untracked_fill_adopted_log = now_ts
+                logger.warning(
+                    "phase.b.untracked_fill_adopted",
+                    ticker=ticker,
+                    qty=qty,
+                    cost_basis_cents=entry,
+                    prior_phase=prior_phase,
+                )
 
     async def _execute_stop_loss(self, bracket: MarketBracket):
         """Execute a stop-loss: sell position at market (1¢) to guarantee fill.

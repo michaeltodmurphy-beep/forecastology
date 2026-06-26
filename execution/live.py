@@ -133,7 +133,10 @@ class LiveTradeExecutor(BaseExecutor):
             )
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
-        payload = order.to_kalshi_payload(max_price)
+        payload = order.to_kalshi_payload(
+            max_price,
+            time_in_force="immediate_or_cancel",
+        )
         logger.info("live.buy_yes_payload", ticker=order.market_ticker,
                      payload=json.dumps(payload), price=order.price)
         headers = self._headers("POST", path)

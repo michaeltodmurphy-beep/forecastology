@@ -43,7 +43,8 @@ class AppConfig(BaseSettings):
     stop_loss_max_unfilled_attempts: int = 3
     # Maximum bid-ask spread (in cents) at which the stop-loss is allowed to fire.
     # When the YES spread exceeds this value the bot holds rather than selling into
-    # a wide, indecisive book. Set via MAX_SL_SPREAD env var (e.g. "0.20" → 20¢).
+    # a wide, indecisive book. Set via `max_sl_spread` in dollar format
+    # (e.g. `max_sl_spread=0.15` -> 15¢); default 20 is fallback when env is absent.
     max_sl_spread: int = 20
 
     @field_validator(
