@@ -14,9 +14,10 @@ from app.config import AppConfig
 from app.models import ExecutedTrade, Position as PositionModel, StopLossLedger
 from core.constants import get_eastern_today_date_prefix
 from core.state_machine import TemperatureStrategy, parse_series_and_date
-from core.types import MarketBracket, OrderBook, OrderBookLevel, Phase
+from core.types import MarketBracket, OrderBook, OrderBookLevel, OrderRequest, OrderSide, Phase
 from data.ticker_cache import TickerCache
 from execution.base import ExecutionResult
+from execution.live import LiveTradeExecutor
 
 
 class FakeWSManager:
@@ -209,6 +210,10 @@ class FakeExecutor:
 
 
 def make_config(**overrides):
+    if "max_sl_spread" not in overrides:
+        raw_max_sl = os.getenv("max_sl_spread")
+        if raw_max_sl is not None:
+            overrides["max_sl_spread"] = AppConfig.convert_dollars_to_cents(raw_max_sl)
     config = AppConfig(
         kalshi_api_key="test-key",
         kalshi_private_key_path="unused.pem",
@@ -458,6 +463,129 @@ async def test_execute_entry_reconciles_fill_price_from_positions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_entry_uses_ioc_time_in_force(monkeypatch):
+    captured = {}
+
+    class FakeResp:
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"order_id": "oid", "fill_count_fp": "1.00", "taker_fill_cost_dollars": "0.90"}
+
+    monkeypatch.setattr("execution.live.load_private_key", lambda _path: object())
+    executor = LiveTradeExecutor("https://example.com", "k", "unused.pem")
+
+    async def fake_post(_url, json=None, headers=None):
+        captured["payload"] = json
+        return FakeResp()
+
+    executor._client.post = fake_post
+    executor._headers = lambda *_args, **_kwargs: {}
+    await executor.buy_yes(
+        OrderRequest(
+            market_ticker="KXLOWTOKC-26JUN26-B72.5",
+            side=OrderSide.BUY_YES,
+            price=86,
+            quantity=5,
+        ),
+        max_price=90,
+    )
+
+    assert captured["payload"]["time_in_force"] == "immediate_or_cancel"
+
+
+@pytest.mark.asyncio
+async def test_zero_fill_entry_leaves_no_resting_order_and_monitoring(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    executor = FakeExecutor()
+
+    async def buy_yes(order, max_price=None):
+        executor.orders.append((order, max_price))
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            notes='{"fill_count":"0.00","remaining_count":"5.00","time_in_force":"immediate_or_cancel"}',
+        )
+
+    executor.buy_yes = buy_yes
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTOKC-26JUN26-B72.5",
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="entry",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=86, quantity=10, order_count=1)]),
+        quantity=5,
+    )
+
+    assert bracket.phase == Phase.MONITORING
+    assert bracket.market_ticker not in strategy.active_positions
+    assert db.store[PositionModel] == []
+    assert any(event == "phase.b.entry_failed" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_path_unchanged(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    executor = FakeExecutor()
+    ticker = "KXLOWTOKC-26JUN26-B72.5"
+    executor.positions = {ticker: {"average_fill_cost_cents": 90}}
+
+    async def buy_yes(order, max_price=None):
+        executor.orders.append((order, max_price))
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=3,
+            total_cost_cents=0,
+            order_id="partial-fill",
+            notes='{"fill_count":"3.00","remaining_count":"2.00"}',
+        )
+
+    executor.buy_yes = buy_yes
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="entry",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=90, quantity=10, order_count=1)]),
+        quantity=5,
+    )
+
+    assert bracket.phase == Phase.HOLDING
+    assert bracket.position_quantity == 3
+    assert bracket.avg_entry == 90
+    assert any(event == "phase.b.entry_cost_reconciled" for event, _ in logged)
+    assert db.store[PositionModel][0].quantity == 3
+
+
+@pytest.mark.asyncio
 async def test_entry_self_heal_from_fills_updates_avg_entry(monkeypatch):
     logged = capture_logs(monkeypatch)
     executor = FakeExecutor()
@@ -498,6 +626,88 @@ async def test_entry_self_heal_from_fills_updates_avg_entry(monkeypatch):
     assert any(event == "phase.c.entry_self_healed" for event, _ in logged)
     stored = db.store[PositionModel][0]
     assert stored.avg_entry_price == 83
+
+
+@pytest.mark.asyncio
+async def test_untracked_fill_is_adopted_to_holding(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTOKC-26JUN26-B72.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 90}}
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="entry",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_held_positions()
+
+    assert bracket.phase == Phase.HOLDING
+    assert bracket.position_quantity == 5
+    assert bracket.avg_entry == 90
+    assert ticker in strategy.active_positions
+    assert db.store[PositionModel][0].quantity == 5
+    assert db.store[PositionModel][0].avg_entry_price == 90
+    assert any(event == "phase.b.untracked_fill_adopted" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_adopted_fill_then_stop_loss_protects(monkeypatch):
+    ticker = "KXLOWTOKC-26JUN26-B72.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 90}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock(return_value=False)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="entry",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+
+    strategy.cache.update_quote(ticker, 80, 82)
+    await strategy._evaluate_held_positions()
+    strategy.cache.update_quote(ticker, 1, 2)
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_adoption_is_idempotent(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTOKC-26JUN26-B72.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 90}}
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=0)
+    strategy._execute_stop_loss = AsyncMock()
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="entry",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_held_positions()
+    await strategy._evaluate_held_positions()
+
+    adopted_logs = [event for event, _ in logged if event == "phase.b.untracked_fill_adopted"]
+    assert len(adopted_logs) == 1
+    assert len(db.store[PositionModel]) == 1
+    assert db.store[PositionModel][0].quantity == 5
 
 
 @pytest.mark.asyncio
@@ -1809,10 +2019,11 @@ async def test_one_sided_book_holds_spread_guard(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_max_sl_spread_config_default():
-    """max_sl_spread defaults to 20 cents and is loaded from MAX_SL_SPREAD env var."""
+async def test_max_sl_spread_loaded_from_env(monkeypatch):
+    """max_sl_spread is read from env and converted dollars->cents (not hardcoded)."""
+    monkeypatch.setenv("max_sl_spread", "0.17")
     cfg = make_config()
-    assert cfg.max_sl_spread == 20
+    assert cfg.max_sl_spread == 17
 
 
 @pytest.mark.asyncio
