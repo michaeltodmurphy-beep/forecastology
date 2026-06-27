@@ -206,6 +206,7 @@ class TemperatureStrategy:
                         series_ticker=m.get("series_ticker", ""),
                         bracket_label=m.get("title", ""),
                         phase=Phase.MONITORING,
+                        falling_knife_guard=False,
                     )
 
         tickers = list(self.brackets.keys())
@@ -288,6 +289,7 @@ class TemperatureStrategy:
                             series_ticker="",
                             bracket_label="",
                             phase=Phase.HOLDING,
+                            falling_knife_guard=False,
                         )
                         self.brackets[ticker] = bracket
                     bracket.phase = Phase.HOLDING
@@ -334,6 +336,7 @@ class TemperatureStrategy:
                     series_ticker=pos.series_ticker or "",
                     bracket_label="",
                     phase=Phase.HOLDING,
+                    falling_knife_guard=False,
                 )
                 self.brackets[ticker] = bracket
 
@@ -366,6 +369,7 @@ class TemperatureStrategy:
             series_ticker=series_ticker,
             bracket_label=bracket_label,
             phase=Phase.MONITORING,
+            falling_knife_guard=False,
         )
         logger.debug("strategy.new_bracket_discovered", ticker=market_ticker, label=bracket_label)
 
@@ -586,9 +590,6 @@ class TemperatureStrategy:
         max_rest_per_cycle = 5
 
         for ticker, bracket in list(self.brackets.items()):
-            if bracket.crossed_buy or bracket.phase != Phase.MONITORING:
-                continue
-
             price = None
             spread = None
             rest_data = None
@@ -604,8 +605,10 @@ class TemperatureStrategy:
                 price = yes_ask_q
                 spread = yes_ask_q - yes_bid_q
 
-            # Fallback: REST endpoint
-            if price is None and rest_calls_this_cycle < max_rest_per_cycle:
+            should_evaluate_entry = not bracket.crossed_buy and bracket.phase == Phase.MONITORING
+
+            # Fallback: REST endpoint (entry-evaluation brackets only)
+            if price is None and should_evaluate_entry and rest_calls_this_cycle < max_rest_per_cycle:
                 rest_data = await self._fetch_market_data_via_rest(ticker)
                 rest_calls_this_cycle += 1
                 if rest_data:
@@ -621,11 +624,22 @@ class TemperatureStrategy:
                     if spread is None and rest_data and "spread" in rest_data:
                         spread = rest_data["spread"]
 
-            # Skip if we don't have both price (yes_ask) and spread
-            if price is None or spread is None:
+            if price is None:
                 continue
 
             bracket.last_price = price
+
+            if price > self.config.spread_monitor_price:
+                bracket.falling_knife_guard = True
+            elif price < self.config.buy_trigger_price:
+                bracket.falling_knife_guard = False
+
+            if not should_evaluate_entry:
+                continue
+
+            # Skip if we don't have both price (yes_ask) and spread
+            if spread is None:
+                continue
 
             if (
                 yes_bid is not None
@@ -648,6 +662,10 @@ class TemperatureStrategy:
                 # Price above the maximum we're willing to enter; log and skip
                 logger.info("phase.b.missed_entry", ticker=ticker,
                             price=price, max_price=self.config.spread_monitor_price)
+                continue
+
+            if bracket.falling_knife_guard:
+                logger.info("phase.b.falling_knife_blocked", ticker=ticker, price=price)
                 continue
 
             if spread <= self.config.minimum_spread:
