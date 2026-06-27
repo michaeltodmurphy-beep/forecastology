@@ -331,6 +331,80 @@ async def test_evaluate_watchlist_uses_rest_spread_when_orderbook_missing(monkey
 
 
 @pytest.mark.asyncio
+async def test_evaluate_watchlist_blocks_falling_knife_entry(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTBOS-26JUN22-B71.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTBOS",
+        bracket_label="knife",
+        phase=Phase.MONITORING,
+    )
+    bracket.falling_knife_guard = True
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 79, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    assert bracket.crossed_buy is False
+    strategy._execute_entry.assert_not_awaited()
+    assert "phase.b.falling_knife_blocked" in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_falling_knife_guard_resets_below_floor_then_allows_entry(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTLAX-26JUN22-B72.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTLAX",
+        bracket_label="reset",
+        phase=Phase.MONITORING,
+    )
+    bracket.falling_knife_guard = True
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    strategy.cache.update_quote(bracket.market_ticker, 80, 81)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is False
+    strategy._execute_entry.assert_not_awaited()
+
+    strategy.cache.update_quote(bracket.market_ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.crossed_buy is True
+    strategy._execute_entry.assert_awaited_once_with(bracket)
+
+
+@pytest.mark.asyncio
+async def test_falling_knife_guard_updates_for_non_monitoring_brackets(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTDEN-26JUN22-B53.5",
+        event_ticker="EVT1",
+        series_ticker="KXLOWTDEN",
+        bracket_label="holding",
+        phase=Phase.HOLDING,
+        crossed_buy=True,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    strategy.cache.update_quote(bracket.market_ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is True
+
+    strategy.cache.update_quote(bracket.market_ticker, 80, 81)
+    await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is False
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_eval_price_floor_skips_without_below_trigger_log(monkeypatch):
     logged = capture_logs(monkeypatch)
     strategy = make_strategy(monkeypatch, eval_price_floor=5)
