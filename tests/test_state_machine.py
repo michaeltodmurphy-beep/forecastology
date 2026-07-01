@@ -21,6 +21,7 @@ from core.types import MarketBracket, OrderBook, OrderBookLevel, OrderRequest, O
 from data.ticker_cache import TickerCache
 from execution.base import ExecutionResult
 from execution.live import LiveTradeExecutor
+from execution.sl_watcher import StopLossWatcher
 
 
 class FakeWSManager:
@@ -2835,3 +2836,163 @@ async def test_monitor_run_cycle_does_not_submit_stop_loss(monkeypatch):
     # Should run without error and without placing any orders
     await monitor_module.run_monitor_cycle(config, db)
     assert sell_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Phase C price-check reliability tests (stop-loss watcher interaction)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_phase_c_with_watcher_defers_when_ws_price_present(monkeypatch):
+    """When stop_loss_watcher is active and a live WebSocket quote is present,
+    Phase C defers to the watcher and does NOT call _execute_stop_loss directly.
+    price_source='websocket' + watcher guard → continue."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHLAX-26JUL01-B71.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+
+    bracket = _make_held_bracket(ticker, "KXHIGHLAX")
+    bracket.position_quantity = 2
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # WS quote: bid=40 (below stop_loss=50), ask=42 — tight spread
+    strategy.cache.update_quote(ticker, 40, 42)
+
+    # Attach watcher — Phase C must defer to it for websocket-driven prices
+    async def no_op_exit(t, s, q, p):
+        return True
+
+    watcher = StopLossWatcher(no_op_exit)
+    await watcher.register_position(ticker, side="yes", quantity=2, sl_price=50)
+    strategy.stop_loss_watcher = watcher
+
+    await strategy._evaluate_held_positions()
+
+    # Watcher guard active → Phase C must not fire the stop-loss directly
+    strategy._execute_stop_loss.assert_not_awaited()
+    # price_check log must show websocket source
+    price_check = next(
+        (kw for event, kw in logged if event == "phase.c.price_check"), None
+    )
+    assert price_check is not None
+    assert price_check["price_source"] == "websocket"
+    assert price_check["trigger_met"] is True
+
+
+@pytest.mark.asyncio
+async def test_phase_c_with_watcher_fires_via_rest_fallback_when_ws_missing(monkeypatch):
+    """When stop_loss_watcher is active but NO WebSocket quote is cached,
+    Phase C must fetch a REST fallback quote and fire the stop-loss directly
+    (the watcher has no live tick and cannot act)."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTDAL-26JUL01-B79.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    # REST returns a below-stop bid
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 42, "yes_bid": 40, "spread": 2}
+    )
+
+    bracket = _make_held_bracket(ticker, "KXLOWTDAL")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # No WS quote in cache
+
+    async def no_op_exit(t, s, q, p):
+        return True
+
+    watcher = StopLossWatcher(no_op_exit)
+    await watcher.register_position(ticker, side="yes", quantity=1, sl_price=50)
+    strategy.stop_loss_watcher = watcher
+
+    await strategy._evaluate_held_positions()
+
+    # REST fallback path must have been consulted
+    strategy._fetch_market_data_via_rest.assert_awaited_once_with(ticker)
+    # Phase C must fire directly since watcher has no tick
+    strategy._execute_stop_loss.assert_awaited_once()
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    # price_check log must show fallback_quote source
+    price_check = next(
+        (kw for event, kw in logged if event == "phase.c.price_check"), None
+    )
+    assert price_check is not None
+    assert price_check["price_source"] == "fallback_quote"
+    assert price_check["trigger_met"] is True
+    assert not any(event == "phase.c.no_live_price" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_phase_c_with_watcher_logs_skip_when_both_sources_missing(monkeypatch):
+    """When stop_loss_watcher is active and BOTH WebSocket and REST price
+    are unavailable, Phase C must log phase.c.no_live_price and not crash."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTDAL-26JUL01-B79.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXLOWTDAL")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # No WS quote, no last_price
+
+    async def no_op_exit(t, s, q, p):
+        return True
+
+    watcher = StopLossWatcher(no_op_exit)
+    await watcher.register_position(ticker, side="yes", quantity=1, sl_price=50)
+    strategy.stop_loss_watcher = watcher
+
+    # Must not raise
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert any(event == "phase.c.no_live_price" for event, _ in logged)
+    no_price_log = next(kw for event, kw in logged if event == "phase.c.no_live_price")
+    assert no_price_log["price_source"] == "none"
+    assert no_price_log["reason"] == "no_websocket_or_rest_price"
+
+
+@pytest.mark.asyncio
+async def test_phase_c_ticker_key_consistency_regression(monkeypatch):
+    """Regression: the ticker key used by active_positions must match the key
+    used by cache.update_quote / cache.get_quote.  A mismatch would cause
+    permanent phase.c.no_live_price even when data is available."""
+    logged = capture_logs(monkeypatch)
+    # Use the canonical ticker format as returned by the Kalshi API
+    ticker = "KXHIGHLAX-26JUL01-B71.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+
+    bracket = _make_held_bracket(ticker, "KXHIGHLAX")
+    bracket.position_quantity = 1
+    # Store the bracket under the canonical key
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # Update the cache using the EXACT same ticker string
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_held_positions()
+
+    # The quote was found → no no_live_price log
+    assert not any(event == "phase.c.no_live_price" for event, _ in logged)
+    price_check = next(
+        (kw for event, kw in logged if event == "phase.c.price_check"), None
+    )
+    assert price_check is not None
+    assert price_check["price_source"] == "websocket"
+    assert price_check["price"] == 80
