@@ -2350,3 +2350,75 @@ async def test_restore_keeps_unparseable_ticker(monkeypatch):
     # No skipped_stale_position log for unparseable ticker
     skip_logs = [kwargs for event, kwargs in logged if event == "strategy.skipped_stale_position"]
     assert not any(kwargs.get("ticker") == unparseable_ticker for kwargs in skip_logs)
+
+
+# Critical #3 – startup reconciliation: positions loaded from DB/API are
+# registered with the StopLossWatcher so that WebSocket-driven SL is
+# immediately active from the moment run.py completes its start-up phase.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restore_positions_registers_with_sl_watcher(monkeypatch):
+    """Positions restored from DB on startup are registered with the
+    StopLossWatcher so the WebSocket-driven SL path is active immediately."""
+    today_prefix = get_eastern_today_date_prefix()
+    ticker = f"KXLOWTSEA-{today_prefix}-B61.5"
+
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTSEA",
+            side="yes",
+            quantity=3,
+            avg_entry_price=82,
+            last_price=82,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="PAPER")
+
+    # Attach a real StopLossWatcher with a no-op exit handler
+    from execution.sl_watcher import StopLossWatcher
+    async def _noop_exit(ticker, side, qty, ask):
+        return True
+    watcher = StopLossWatcher(_noop_exit)
+    strategy.stop_loss_watcher = watcher
+
+    await strategy._restore_positions()
+
+    # Position must be in active_positions
+    assert ticker in strategy.active_positions
+
+    # Position must be registered with the SL watcher
+    assert ticker in watcher._positions
+    wp = watcher._positions[ticker]
+    assert wp.quantity == 3
+    assert wp.side == "yes"
+
+
+@pytest.mark.asyncio
+async def test_restore_live_positions_registers_with_sl_watcher(monkeypatch):
+    """Positions fetched from the exchange API in LIVE mode are also
+    registered with the StopLossWatcher during startup reconciliation."""
+    today_prefix = get_eastern_today_date_prefix()
+    ticker = f"KXHIGHTSEA-{today_prefix}-T75"
+
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 85}}
+
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="LIVE")
+
+    from execution.sl_watcher import StopLossWatcher
+    async def _noop_exit(ticker, side, qty, ask):
+        return True
+    watcher = StopLossWatcher(_noop_exit)
+    strategy.stop_loss_watcher = watcher
+
+    await strategy._restore_positions()
+
+    assert ticker in strategy.active_positions
+    assert ticker in watcher._positions
+    assert watcher._positions[ticker].quantity == 2
