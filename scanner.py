@@ -1,19 +1,24 @@
 """
 forecastology-scanner
 
-A lightweight, stateless scanner that reads market data from the shared
-state file (written by run.py WS daemon) and buys when conditions are met.
+Standalone buy scanner that fetches current market data via the Kalshi REST
+API and places buy orders when conditions are met.
 
-NO in-memory bracket tracking. NO WebSocket connection. NO loops through all markets.
-Just: read state -> check prices -> buy if conditions met.
+IMPORTANT: This script gates execution against the run.py daemon lockfile.
+If run.py is already running, the scanner exits immediately without placing
+any orders.  When run.py is active ALL buy decisions are handled by its
+integrated TemperatureStrategy / WebSocket state machine, and a parallel
+scanner would cause split-brain order execution.
 
-Designed to run as a systemd timer every ~2 seconds.
+This script is intended for use only in legacy deployments where run.py is
+NOT running as an always-on daemon.  When both services are deployed, disable
+the scanner systemd timer and rely on run.py exclusively.
 """
 
 import asyncio
-import json
+import fcntl
+import os
 import uuid
-import datetime
 import httpx
 import structlog
 from typing import Optional
@@ -22,20 +27,87 @@ from app.config import AppConfig
 from app.signing import load_private_key, build_auth_headers
 from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
-from sqlalchemy import select, delete, update
+from core.constants import SERIES_LIST, get_eastern_today_date_prefix
+from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
 
-SHARED_STATE_FILE = "/dev/shm/forecastology_state.json"
+DAEMON_LOCKFILE = os.getenv("FORECASTOLOGY_LOCKFILE", "/tmp/forecastology.lock")
 
 
-def _read_state() -> dict:
-    """Read the shared state file written by the WS daemon."""
+def _daemon_is_running() -> bool:
+    """Return True if the run.py daemon currently holds the process lockfile.
+
+    Uses a non-blocking exclusive flock attempt.  If the lock is already held
+    by another process the acquisition fails, meaning run.py is active.
+    """
     try:
-        with open(SHARED_STATE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, Exception):
-        return {"prices": {}, "orderbooks": {}, "all_markets": []}
+        handle = open(DAEMON_LOCKFILE, "r")
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Successfully acquired → no daemon running; release immediately.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+        return False
+    except OSError:
+        # Lock is held by another process → daemon is running.
+        handle.close()
+        return True
+
+
+async def _fetch_markets_via_rest(
+    config: AppConfig,
+    client: httpx.AsyncClient,
+) -> tuple[list, dict]:
+    """
+    Fetch today's temperature markets and their prices via the Kalshi REST API.
+
+    Returns:
+        all_markets: list of market tickers available today
+        orderbooks:  dict[ticker -> {"best_ask": int, "best_bid": int, "spread": int|None}]
+    """
+    today_prefix = get_eastern_today_date_prefix()
+    all_markets: list = []
+    orderbooks: dict = {}
+
+    private_key = load_private_key(config.kalshi_private_key_path)
+    path = "/trade-api/v2/markets"
+    url = f"{config.rest_base_url}{path}"
+
+    event_tickers = [f"{s}-{today_prefix}" for s in SERIES_LIST]
+
+    async def _fetch_event(event_ticker: str) -> list:
+        headers = build_auth_headers(private_key, config.kalshi_api_key, "GET", path)
+        try:
+            resp = await client.get(url, headers=headers,
+                                    params={"event_ticker": event_ticker, "limit": 100})
+            if resp.status_code in (200, 201):
+                return resp.json().get("markets", [])
+        except Exception as e:
+            logger.warning("scanner.fetch_event_error", event_ticker=event_ticker, error=str(e))
+        return []
+
+    results = await asyncio.gather(*[_fetch_event(et) for et in event_tickers])
+
+    for mkts in results:
+        for m in mkts:
+            ticker = m.get("ticker", "")
+            if not ticker:
+                continue
+            all_markets.append(ticker)
+            ya = m.get("yes_ask")
+            yb = m.get("yes_bid")
+            if ya and float(ya) > 0:
+                ask = round(float(ya) * 100)
+                bid = round(float(yb) * 100) if yb and float(yb) > 0 else 0
+                spread = ask - bid if bid > 0 else None
+                orderbooks[ticker] = {"best_ask": ask, "best_bid": bid, "spread": spread}
+
+    logger.debug("scanner.markets_fetched", count=len(all_markets),
+                 with_prices=len(orderbooks))
+    return all_markets, orderbooks
 
 
 async def buy_market(
@@ -98,58 +170,56 @@ async def buy_market(
 async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
     """
     One scan cycle:
-    1. Read state from shared file (written by WS daemon)
+    1. Fetch today's markets and prices via REST API
     2. For each market with price data, check buy conditions
     3. If price >= buy_trigger and spread <= min_spread, buy
     4. Log successful buys to DB as positions
 
-    Runs every ~2 seconds via systemd timer.
+    Runs every ~2 seconds via systemd timer (only when run.py daemon is not active).
     """
-    state = _read_state()
-    all_markets = state.get("all_markets", [])
-    prices = state.get("prices", {})
-    orderbooks = state.get("orderbooks", {})
-
-    if not all_markets:
-        logger.debug("scanner.no_markets")
-        return
-
-    logger.debug("scanner.state_read", markets=len(all_markets),
-                 prices=len(prices), orderbooks=len(orderbooks))
-
-    # Load held tickers from DB to avoid re-buying
+    markets_to_check: list = []
     held_tickers: set[str] = set()
-    async with await db.get_session() as session:
-        result = await session.execute(
-            select(PositionModel.market_ticker).where(PositionModel.quantity > 0)
-        )
-        held_tickers = {row[0] for row in result.fetchall()}
-
-    buy_trigger = config.buy_trigger_price      # 85
-    min_spread = config.minimum_spread            # 7
-
-    # Track which tickers we attempt to buy (max 3 per cycle)
     buy_attempts = 0
-    max_buy_attempts = 3
 
-    # Check all markets that have price data
-    markets_to_check = [t for t in all_markets if t in orderbooks and t not in held_tickers]
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        all_markets, orderbooks = await _fetch_markets_via_rest(config, client)
 
-    for ticker in markets_to_check:
-        ob = orderbooks[ticker]
-        ask = ob.get("best_ask")
-        bid = ob.get("best_bid")
-        spread = ob.get("spread")
+        if not all_markets:
+            logger.debug("scanner.no_markets")
+            return
 
-        if ask is None or bid is None or spread is None:
-            continue
+        logger.debug("scanner.markets_loaded", markets=len(all_markets),
+                     with_prices=len(orderbooks))
 
-        # Condition: ask >= buy_trigger AND spread <= min_spread
-        if ask >= buy_trigger and spread <= min_spread:
-            logger.info("scanner.buy_signal", ticker=ticker,
-                        ask=ask, bid=bid, spread=spread)
+        # Load held tickers from DB to avoid re-buying
+        async with await db.get_session() as session:
+            result = await session.execute(
+                select(PositionModel.market_ticker).where(PositionModel.quantity > 0)
+            )
+            held_tickers = {row[0] for row in result.fetchall()}
 
-            async with httpx.AsyncClient(timeout=15.0) as client:
+        buy_trigger = config.buy_trigger_price
+        min_spread = config.minimum_spread
+
+        max_buy_attempts = 3
+
+        # Check all markets that have price data
+        markets_to_check = [t for t in all_markets if t in orderbooks and t not in held_tickers]
+
+        for ticker in markets_to_check:
+            ob = orderbooks[ticker]
+            ask = ob.get("best_ask")
+            bid = ob.get("best_bid")
+            spread = ob.get("spread")
+
+            if ask is None or bid is None or spread is None:
+                continue
+
+            # Condition: ask >= buy_trigger AND spread <= min_spread
+            if ask >= buy_trigger and spread <= min_spread:
+                logger.info("scanner.buy_signal", ticker=ticker,
+                            ask=ask, bid=bid, spread=spread)
+
                 success = await buy_market(config, ticker, ask, client)
 
                 if success:
@@ -196,7 +266,20 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
 
 
 def main():
-    """Entry point for systemd timer. Runs one scan cycle and exits."""
+    """Entry point for systemd timer. Runs one scan cycle and exits.
+
+    Exits immediately (without placing any orders) if the run.py daemon is
+    already running, to prevent split-brain order execution.
+    """
+    # Critical #1 guard: do not compete with the always-on run.py daemon.
+    if _daemon_is_running():
+        logger.info(
+            "scanner.daemon_active_skip",
+            message="run.py daemon is running — scanner will not execute to avoid split-brain",
+            lockfile=DAEMON_LOCKFILE,
+        )
+        return
+
     config = AppConfig.from_env()
 
     logger.info("scanner.start", mode=config.trading_mode)

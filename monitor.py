@@ -2,13 +2,20 @@
 forecastology-monitor
 
 Monitors open positions for hedge and reconciliation conditions.
-Reads positions from DB, checks current prices via shared state file or REST.
+Reads positions from DB, checks current prices via REST.
+
+Responsibilities:
+  - Price reconciliation and last_price updates in DB
+  - Cleanup of expired/settled positions
+  - Optional hedge bracket execution when price drops below hedge_trigger
+
+Stop-loss execution is owned exclusively by the WebSocket-driven
+StopLossWatcher in run.py and is NOT performed here.
 
 Runs every ~30 seconds via systemd timer.
 """
 
 import asyncio
-import json
 import uuid
 import datetime
 import httpx
@@ -23,7 +30,6 @@ from sqlalchemy import select, delete, update
 
 logger = structlog.get_logger(__name__)
 
-SHARED_STATE_FILE = "/dev/shm/forecastology_state.json"
 MONTH_ORD = {m: i+1 for i, m in enumerate(["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"])}
 
 
@@ -50,15 +56,6 @@ def _get_event_ticker(ticker: str) -> str:
     return ticker
 
 
-def _read_state() -> dict:
-    """Read the shared state file."""
-    try:
-        with open(SHARED_STATE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, Exception):
-        return {"prices": {}, "orderbooks": {}, "all_markets": []}
-
-
 async def _get_market_price_rest(
     ticker: str,
     private_key,
@@ -66,7 +63,7 @@ async def _get_market_price_rest(
     base_url: str,
     client: httpx.AsyncClient,
 ) -> Optional[dict]:
-    """Fetch market data via REST as fallback."""
+    """Fetch market data via REST."""
     path = f"/trade-api/v2/markets/{ticker}"
     url = f"{base_url}{path}"
     headers = build_auth_headers(private_key, api_key, "GET", path)
@@ -86,22 +83,6 @@ async def _get_market_price_rest(
             return result
     except Exception:
         pass
-    return None
-
-
-async def _get_current_price(ticker: str) -> Optional[dict]:
-    """Get current price from shared state first, then REST."""
-    state = _read_state()
-    ob = state.get("orderbooks", {}).get(ticker)
-    if ob:
-        return {
-            "last_price": ob.get("best_ask"),
-            "yes_ask": ob.get("best_ask"),
-            "yes_bid": ob.get("best_bid"),
-        }
-    price = state.get("prices", {}).get(ticker)
-    if price:
-        return {"last_price": price, "yes_ask": price, "yes_bid": None}
     return None
 
 
@@ -225,9 +206,12 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
     """
     One monitor cycle:
     1. Load open positions from DB
-    2. For each position, get current price (shared state -> REST)
-    3. If price <= hedge_trigger (48): buy opposite bracket
+    2. For each position, fetch current price via REST
+    3. If price <= hedge_trigger: buy opposite bracket
     4. Clean up old/expired positions
+
+    Stop-loss is owned exclusively by the WebSocket-driven StopLossWatcher in
+    run.py and is NOT executed here.
     """
     today = datetime.date.today()
 
@@ -243,21 +227,19 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
 
     logger.info("monitor.positions_to_check", count=len(positions))
 
+    private_key = load_private_key(config.kalshi_private_key_path)
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         for pos in positions:
             ticker = pos.market_ticker
 
-            # Get current price (shared state first, REST fallback)
-            price_data = await _get_current_price(ticker)
-            if not price_data or (price_data.get("yes_ask") is None and price_data.get("last_price") is None):
-                # REST fallback
-                private_key = load_private_key(config.kalshi_private_key_path)
-                price_data = await _get_market_price_rest(
-                    ticker, private_key,
-                    config.kalshi_api_key, config.rest_base_url, client
-                )
-                if not price_data:
-                    continue
+            # Fetch current price via REST (authoritative source).
+            price_data = await _get_market_price_rest(
+                ticker, private_key,
+                config.kalshi_api_key, config.rest_base_url, client
+            )
+            if not price_data:
+                continue
 
             current_price = price_data.get("last_price") or price_data.get("yes_ask") or 0
             yes_ask = price_data.get("yes_ask") or 0
@@ -304,7 +286,7 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                 # Get hedge bracket price
                 hedge_data = await _get_market_price_rest(
                     hedge_ticker,
-                    load_private_key(config.kalshi_private_key_path),
+                    private_key,
                     config.kalshi_api_key, config.rest_base_url, client
                 )
                 if not hedge_data:
