@@ -9,8 +9,12 @@ Responsibilities:
   - Cleanup of expired/settled positions
   - Optional hedge bracket execution when price drops below hedge_trigger
 
-Stop-loss execution is owned exclusively by the WebSocket-driven
-StopLossWatcher in run.py and is NOT performed here.
+Role: READ-ONLY / NON-PRIMARY EXECUTOR
+  This process must never submit stop-loss sells or primary exit orders.
+  Stop-loss execution is owned exclusively by the WebSocket-driven
+  StopLossWatcher in run.py.  Hedge buys are the only order-submission
+  permitted here, and only when explicitly triggered by the hedge_trigger
+  price condition.
 
 Runs every ~30 seconds via systemd timer.
 """
@@ -123,44 +127,6 @@ async def _find_hedge_bracket(
     return None
 
 
-async def _sell_position(
-    ticker: str,
-    qty: int,
-    price_cents: int,
-    config: AppConfig,
-    client: httpx.AsyncClient,
-) -> bool:
-    """Sell a position at 1¢ for stop-loss."""
-    private_key = load_private_key(config.kalshi_private_key_path)
-    order_id = str(uuid.uuid4())
-    payload = {
-        "ticker": ticker,
-        "side": "ask",
-        "type": "limit",
-        "price": f"{price_cents / 100:.4f}",
-        "count": f"{qty}.00",
-        "client_order_id": order_id,
-        "time_in_force": "good_till_canceled",
-        "self_trade_prevention_type": "taker_at_cross",
-    }
-    path = "/trade-api/v2/portfolio/orders"
-    url = f"{config.rest_base_url}{path}"
-    headers = build_auth_headers(private_key, config.kalshi_api_key, "POST", path)
-    headers["Content-Type"] = "application/json"
-    try:
-        resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code in (200, 201):
-            logger.info("monitor.sold", ticker=ticker, price=price_cents, qty=qty)
-            return True
-        else:
-            logger.warning("monitor.sell_rejected", ticker=ticker,
-                           status=resp.status_code)
-            return False
-    except Exception as e:
-        logger.error("monitor.sell_error", ticker=ticker, error=str(e))
-        return False
-
-
 async def _buy_hedge(
     ticker: str,
     price_cents: int,
@@ -210,8 +176,12 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
     3. If price <= hedge_trigger: buy opposite bracket
     4. Clean up old/expired positions
 
-    Stop-loss is owned exclusively by the WebSocket-driven StopLossWatcher in
-    run.py and is NOT executed here.
+    Stop-loss execution is owned exclusively by the WebSocket-driven
+    StopLossWatcher in run.py and is NOT executed here.
+
+    Role enforcement: this function must never submit primary exit/stop-loss
+    orders.  It is a read-mostly reconciliation process.  Only hedge buys
+    are permitted.
     """
     today = datetime.date.today()
 

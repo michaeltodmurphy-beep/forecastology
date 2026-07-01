@@ -93,3 +93,20 @@ CREATE TABLE IF NOT EXISTS stop_loss_ledger (
     UNIQUE KEY uq_series_date (series_ticker, date_prefix),
     INDEX idx_series_ticker (series_ticker)
 ) ENGINE=InnoDB;
+
+-- Migration: persistent idempotency for order actions (exits, stop-losses).
+-- action_key uniquely identifies one logical action per position per type.
+-- Lifecycle: PENDING → SUBMITTED → SUCCEEDED | FAILED
+CREATE TABLE IF NOT EXISTS order_actions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    action_key VARCHAR(400) NOT NULL,
+    action_type VARCHAR(50) NOT NULL,
+    market_ticker VARCHAR(200) NOT NULL,
+    status ENUM('PENDING','SUBMITTED','SUCCEEDED','FAILED') NOT NULL DEFAULT 'PENDING',
+    error_class VARCHAR(50) DEFAULT NULL,
+    notes TEXT DEFAULT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_order_action_key (action_key),
+    INDEX idx_order_actions_market (market_ticker)
+) ENGINE=InnoDB;
