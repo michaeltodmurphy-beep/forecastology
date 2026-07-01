@@ -1029,6 +1029,10 @@ class TemperatureStrategy:
             rest_data = None
             zero_bid_collapse = False
             blind_below_stop = False
+            # Track where the price ultimately came from so the watcher guard
+            # can decide whether to defer to the WebSocket-driven StopLossWatcher
+            # or to act directly (when the watcher has no live tick).
+            price_source = "none"
             last_known_price = self.cache.get_last_price(ticker)
             if last_known_price is None:
                 last_known_price = bracket.last_price
@@ -1037,8 +1041,10 @@ class TemperatureStrategy:
                 yes_bid, yes_ask = quote
                 if yes_bid > 0:
                     current_price = yes_bid
+                    price_source = "websocket"
                 elif yes_bid == 0:
                     zero_bid_collapse = True
+                    price_source = "websocket"
 
             if current_price is None:
                 now_fetch = asyncio.get_event_loop().time()
@@ -1052,10 +1058,13 @@ class TemperatureStrategy:
                         if rest_yes_bid is not None and rest_yes_bid > 0:
                             current_price = rest_yes_bid
                             zero_bid_collapse = False
+                            price_source = "fallback_quote"
                         elif rest_yes_bid == 0:
                             zero_bid_collapse = True
+                            price_source = "fallback_quote"
                         elif rest_data.get("price") is not None:
                             current_price = rest_data["price"]
+                            price_source = "fallback_quote"
 
             if position_absent and not mass_absence and self._market_is_settled(rest_data):
                 logger.info(
@@ -1076,6 +1085,7 @@ class TemperatureStrategy:
                     and last_price <= yes_ask
                 ):
                     current_price = last_price
+                    price_source = "last_price"
 
             if current_price is None and not zero_bid_collapse:
                 bracket._consecutive_no_price_cycles = getattr(
@@ -1087,7 +1097,12 @@ class TemperatureStrategy:
                 last_warn = getattr(bracket, "_last_no_price_log", 0)
                 if now_warn - last_warn >= 60:
                     bracket._last_no_price_log = now_warn
-                    logger.warning("phase.c.no_live_price", ticker=ticker)
+                    logger.warning(
+                        "phase.c.no_live_price",
+                        ticker=ticker,
+                        price_source="none",
+                        reason="no_websocket_or_rest_price",
+                    )
                 if (
                     bracket.position_quantity > 0
                     and bracket._consecutive_no_price_cycles > self.config.max_no_price_cycles
@@ -1113,6 +1128,7 @@ class TemperatureStrategy:
                     ):
                         current_price = last_known_price
                         blind_below_stop = True
+                        price_source = "blind_last_known"
                 if current_price is None:
                     continue
 
@@ -1133,8 +1149,25 @@ class TemperatureStrategy:
             elif current_price < self.config.stop_loss_price:
                 stop_loss_reason = "price_below_stop"
 
+            logger.debug(
+                "phase.c.price_check",
+                ticker=ticker,
+                side="yes",
+                stop_loss=self.config.stop_loss_price,
+                price_source=price_source,
+                price=current_price,
+                trigger_met=stop_loss_reason is not None,
+            )
+
             if stop_loss_reason is not None:
-                if self.stop_loss_watcher is not None:
+                # Defer to the WebSocket-driven StopLossWatcher only when the
+                # price came directly from the live WS quote cache — the watcher
+                # holds the same tick and will fire immediately.
+                # For zero_bid_collapse the ask is usually above stop_loss so
+                # the watcher will NOT fire; Phase C must act.
+                # For REST-fallback, last_price, or blind prices the watcher has
+                # no live tick and cannot act; Phase C is the only safety net.
+                if self.stop_loss_watcher is not None and price_source == "websocket" and not zero_bid_collapse:
                     continue
                 if bracket.position_quantity <= 0:
                     bracket.phase = Phase.CLOSED
