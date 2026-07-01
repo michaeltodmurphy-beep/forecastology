@@ -8,6 +8,7 @@ from app.database import DatabaseManager
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.factory import create_executor
+from execution.sl_watcher import StopLossWatcher
 from core.state_machine import TemperatureStrategy
 
 logger = structlog.get_logger(__name__)
@@ -31,6 +32,8 @@ async def main():
     ws_manager = None
     executor = None
     strategy = None
+    stop_loss_watcher = None
+    stop_loss_task = None
     try:
         config = AppConfig.from_env()
         logger.info("app.config_loaded", mode=config.trading_mode)
@@ -55,7 +58,10 @@ async def main():
             dry_run=config.dry_run,
         )
         strategy = TemperatureStrategy(config=config, cache=cache, ws_manager=ws_manager, executor=executor, db=db)
+        stop_loss_watcher = StopLossWatcher(strategy._execute_stop_loss_from_watcher)
+        strategy.stop_loss_watcher = stop_loss_watcher
         await ws_manager.connect()
+        stop_loss_task = asyncio.create_task(stop_loss_watcher.run())
         await strategy.start()
         try:
             await ws_manager.listen()
@@ -64,6 +70,13 @@ async def main():
         except asyncio.CancelledError:
             pass
     finally:
+        if stop_loss_watcher is not None:
+            await stop_loss_watcher.stop()
+        if stop_loss_task is not None:
+            try:
+                await stop_loss_task
+            except asyncio.CancelledError:
+                pass
         if strategy is not None:
             await strategy.stop()
         if ws_manager is not None:

@@ -1,7 +1,7 @@
 """
 forecastology-monitor
 
-Monitors open positions for hedge and stop-loss conditions.
+Monitors open positions for hedge and reconciliation conditions.
 Reads positions from DB, checks current prices via shared state file or REST.
 
 Runs every ~30 seconds via systemd timer.
@@ -226,9 +226,8 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
     One monitor cycle:
     1. Load open positions from DB
     2. For each position, get current price (shared state -> REST)
-    3. If price <= stop_loss (35): sell at 1¢
-    4. If price <= hedge_trigger (48): buy opposite bracket
-    5. Clean up old/expired positions
+    3. If price <= hedge_trigger (48): buy opposite bracket
+    4. Clean up old/expired positions
     """
     today = datetime.date.today()
 
@@ -288,36 +287,10 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                         await session.commit()
                     continue
 
-            # STOP LOSS: price <= stop_loss (35¢)
-            if current_price <= config.stop_loss_price and current_price > 0:
-                logger.info("monitor.stop_loss_triggered", ticker=ticker,
-                           price=current_price, stop_loss=config.stop_loss_price)
-
-                success = await _sell_position(
-                    ticker, pos.quantity, 1, config, client
-                )
-
-                if success:
-                    async with await db.get_session() as session:
-                        session.add(ExecutedTrade(
-                            market_ticker=ticker,
-                            action=TradeAction.STOP_LOSS,
-                            side="yes",
-                            price=1,
-                            quantity=pos.quantity,
-                            total_cost_cents=1 * pos.quantity,
-                            trade_mode=config.trading_mode,
-                            status=TradeStatus.FILLED,
-                        ))
-                        await session.execute(
-                            delete(PositionModel).where(PositionModel.market_ticker == ticker)
-                        )
-                        await session.commit()
-                    logger.info("monitor.stop_loss_executed", ticker=ticker)
-
-            # HEDGE TRIGGER: price <= hedge_trigger (48¢) — only if not already hedged
-            elif (current_price <= config.hedge_trigger_price and current_price > 0
-                  and not pos.hedge_market_ticker):
+            # Stop-loss execution is owned by the websocket-driven watcher in run.py.
+            # Keep monitor focused on reconciliation and hedge fallback logic.
+            if (current_price <= config.hedge_trigger_price and current_price > 0
+                    and not pos.hedge_market_ticker):
                 event_ticker = _get_event_ticker(ticker)
 
                 hedge_ticker = await _find_hedge_bracket(
