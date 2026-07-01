@@ -27,6 +27,13 @@ class TradeStatus(str, enum.Enum):
     REJECTED = "REJECTED"
 
 
+class OrderActionStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    SUBMITTED = "SUBMITTED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 class StreamedTrade(Base):
     """Logs every trade/tick received via WebSocket."""
     __tablename__ = "streamed_trades"
@@ -145,4 +152,45 @@ class StopLossLedger(Base):
     series_ticker = Column(String(200), nullable=False, index=True)
     date_prefix = Column(String(20), nullable=False)
     stop_loss_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class OrderAction(Base):
+    """
+    Persistent idempotency record for order actions (exits, stop-losses).
+
+    Each row represents one logical action attempt on a position.  The
+    ``action_key`` column has a DB-level unique constraint, which prevents
+    duplicate submissions across retries, reconnect bursts, or process
+    restarts.
+
+    Lifecycle:  PENDING → SUBMITTED → SUCCEEDED | FAILED
+
+    * PENDING   – record created, order not yet sent to exchange
+    * SUBMITTED – API call in flight
+    * SUCCEEDED – exchange confirmed the order was accepted / filled
+    * FAILED    – exchange permanently rejected the order (do not retry
+                  without operator review); transient network failures do
+                  NOT set FAILED – they leave the record in SUBMITTED so
+                  the next cycle can retry
+    """
+
+    __tablename__ = "order_actions"
+    __table_args__ = (
+        UniqueConstraint("action_key", name="uq_order_action_key"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # Deterministic idempotency key: "{market_ticker}:{action_type}"
+    # One SUCCEEDED record per position per action type prevents duplicate exits.
+    action_key = Column(String(400), nullable=False, index=True)
+    action_type = Column(String(50), nullable=False)   # e.g. "STOP_LOSS"
+    market_ticker = Column(String(200), nullable=False, index=True)
+    status = Column(
+        Enum(OrderActionStatus), nullable=False, default=OrderActionStatus.PENDING
+    )
+    # "transient" | "validation" | "permanent" – populated on FAILED transitions
+    error_class = Column(String(50), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

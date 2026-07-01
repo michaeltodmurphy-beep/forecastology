@@ -11,6 +11,7 @@ from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
+from execution.errors import TransientExecutionError, PermanentExecutionError
 from execution.sl_watcher import StopLossWatcher
 from app.database import DatabaseManager
 from app.config import AppConfig
@@ -18,8 +19,9 @@ from app.signing import load_private_key
 from app.models import (
     StreamedTicker, StreamedTrade, ExecutedTrade, TradeAction, TradeStatus,
     Position as PositionModel, PortfolioSnapshot, StopLossLedger,
+    OrderAction, OrderActionStatus,
 )
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 
 logger = structlog.get_logger(__name__)
 SERIES_DATE_RE = re.compile(r"^(.+?)-(\d{2}[A-Z]{3}\d{2})-(?:T\d+|B\d+\.?\d*)$")
@@ -91,6 +93,11 @@ class TemperatureStrategy:
 
         # Running flag
         self._running = False
+
+        # Readiness gate: set to True after _restore_positions() completes
+        # successfully.  Risk-critical execution paths must not fire until
+        # this is True to prevent acting on stale/incomplete in-memory state.
+        self._reconciliation_complete = False
 
     @staticmethod
     def _first_non_none(*values):
@@ -242,7 +249,12 @@ class TemperatureStrategy:
 
         # Restore positions BEFORE starting the strategy loop, so we don't
         # attempt to re-buy markets we already hold.
+        logger.info("strategy.reconciliation_starting")
         await self._restore_positions()
+        logger.info(
+            "strategy.reconciliation_complete",
+            restored_positions=len(self.active_positions),
+        )
 
         # Start the strategy evaluation loop
         asyncio.create_task(self._strategy_loop())
@@ -262,10 +274,29 @@ class TemperatureStrategy:
     async def _restore_positions(self):
         """
         On startup, re-populate active_positions from the database
-        so that position management continues
-        across restarts.  Also mark restored brackets as crossed_buy
-        so the strategy does not attempt to re-enter them.
+        so that position management continues across restarts.  Also mark
+        restored brackets as crossed_buy so the strategy does not attempt
+        to re-enter them.
+
+        Sets ``_reconciliation_complete = True`` on success so that
+        risk-critical execution paths (the readiness gate) know they can
+        safely act on in-memory state.
         """
+        self._reconciliation_complete = False
+        try:
+            await self._restore_positions_inner()
+        except Exception as exc:
+            logger.error(
+                "strategy.reconciliation_failed",
+                error=str(exc),
+                restored_so_far=len(self.active_positions),
+            )
+            raise
+        else:
+            self._reconciliation_complete = True
+
+    async def _restore_positions_inner(self):
+        """Internal implementation of position restore; called by _restore_positions."""
         async with await self.db.get_session() as session:
             # Only restore positions from the last 3 days (old settled positions
             # cause noise on every restart as they get immediately cleaned up).
@@ -568,6 +599,17 @@ class TemperatureStrategy:
         Evaluates all brackets and transitions phases.
         """
         while self._running:
+            if not self._reconciliation_complete:
+                now_gate = asyncio.get_event_loop().time()
+                last_gate_log = getattr(self, "_last_gate_log", 0)
+                if now_gate - last_gate_log >= 10:
+                    self._last_gate_log = now_gate
+                    logger.warning(
+                        "strategy.readiness_gate_blocking",
+                        msg="strategy loop blocked until reconciliation completes",
+                    )
+                await asyncio.sleep(1)
+                continue
             try:
                 await asyncio.wait_for(self._evaluate_watchlist(), timeout=30.0)
                 await asyncio.wait_for(self._evaluate_held_positions(), timeout=30.0)
@@ -1222,6 +1264,10 @@ class TemperatureStrategy:
     async def _execute_stop_loss(self, bracket: MarketBracket):
         """Execute a stop-loss: sell position at market (1¢) to guarantee fill.
 
+        Checks a persistent idempotency record (``OrderAction``) before placing
+        the order so that retries and reconnect bursts cannot submit duplicate
+        stop-loss sells for the same position.
+
         Returns True if the sell was rejected with market_not_found (the market
         has settled and is gone — position is cleaned up quietly as confirmed
         settlement).  Returns False in all other cases.
@@ -1232,9 +1278,91 @@ class TemperatureStrategy:
             return False
         bracket._last_stop_loss_attempt = now
 
+        action_key = f"{bracket.market_ticker}:STOP_LOSS"
+
+        # --- Idempotency check -------------------------------------------------
+        # If a SUCCEEDED record already exists for this action_key the position
+        # was already exited (possibly in a previous process lifetime).  Clean
+        # up in-memory state and return True (treated as market_gone / settled).
+        async with await self.db.get_session() as session:
+            existing = await session.execute(
+                select(OrderAction).where(OrderAction.action_key == action_key)
+            )
+            action_row = existing.scalar_one_or_none()
+
+        if action_row is not None and action_row.status == OrderActionStatus.SUCCEEDED:
+            logger.info(
+                "phase.c.stop_loss_duplicate_suppressed",
+                ticker=bracket.market_ticker,
+                action_key=action_key,
+            )
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    delete(PositionModel).where(
+                        PositionModel.market_ticker == bracket.market_ticker
+                    )
+                )
+                await session.commit()
+            bracket.phase = Phase.CLOSED
+            self.active_positions.pop(bracket.market_ticker, None)
+            self.brackets.pop(bracket.market_ticker, None)
+            await self._unregister_stop_loss_watcher(bracket.market_ticker)
+            return True
+
+        # Create or reset the idempotency record to PENDING.
+        # An existing FAILED record is retried; an existing SUBMITTED record
+        # means another attempt is in-flight — skip this cycle.
+        if action_row is None:
+            async with await self.db.get_session() as session:
+                action_row = OrderAction(
+                    action_key=action_key,
+                    action_type="STOP_LOSS",
+                    market_ticker=bracket.market_ticker,
+                    status=OrderActionStatus.PENDING,
+                )
+                session.add(action_row)
+                try:
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    # A concurrent process beat us to it — re-query and check.
+                    async with await self.db.get_session() as session2:
+                        existing2 = await session2.execute(
+                            select(OrderAction).where(
+                                OrderAction.action_key == action_key
+                            )
+                        )
+                        action_row = existing2.scalar_one_or_none()
+                    if action_row is not None and action_row.status in (
+                        OrderActionStatus.SUBMITTED, OrderActionStatus.SUCCEEDED
+                    ):
+                        logger.info(
+                            "phase.c.stop_loss_concurrent_skip",
+                            ticker=bracket.market_ticker,
+                            action_key=action_key,
+                            status=action_row.status,
+                        )
+                        return False
+        elif action_row.status == OrderActionStatus.SUBMITTED:
+            logger.info(
+                "phase.c.stop_loss_in_flight_skip",
+                ticker=bracket.market_ticker,
+                action_key=action_key,
+            )
+            return False
+
+        # Transition to SUBMITTED before API call so crash recovery knows a
+        # call was in-flight.
+        async with await self.db.get_session() as session:
+            await session.execute(
+                update(OrderAction)
+                .where(OrderAction.action_key == action_key)
+                .values(status=OrderActionStatus.SUBMITTED)
+            )
+            await session.commit()
+
         price = 1  # Sell at minimum price to guarantee fill at stop loss
 
-        import uuid
         order = OrderRequest(
             market_ticker=bracket.market_ticker,
             side=OrderSide.SELL_YES,
@@ -1256,6 +1384,13 @@ class TemperatureStrategy:
             async with await self.db.get_session() as session:
                 await session.execute(
                     delete(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
+                )
+                # Also mark action as SUCCEEDED so it is not retried.
+                await session.execute(
+                    update(OrderAction)
+                    .where(OrderAction.action_key == action_key)
+                    .values(status=OrderActionStatus.SUCCEEDED,
+                            notes="market_not_found: settled")
                 )
                 await session.commit()
             bracket.phase = Phase.CLOSED
@@ -1289,14 +1424,20 @@ class TemperatureStrategy:
             else:
                 live_count = max(int(live_position.get("count", 0) or 0), 0)
         except Exception as e:
-            logger.warning("phase.c.stop_loss_verify_failed", ticker=bracket.market_ticker, error=str(e))
+            logger.warning("phase.c.stop_loss_verify_failed", ticker=bracket.market_ticker,
+                           action_key=action_key, error=str(e))
             live_count = max(bracket.position_quantity - result.fill_quantity, 0)
 
         if live_count == 0:
-            # Remove from positions table
+            # Remove from positions table and mark action SUCCEEDED.
             async with await self.db.get_session() as session:
                 await session.execute(
                     delete(PositionModel).where(PositionModel.market_ticker == bracket.market_ticker)
+                )
+                await session.execute(
+                    update(OrderAction)
+                    .where(OrderAction.action_key == action_key)
+                    .values(status=OrderActionStatus.SUCCEEDED)
                 )
                 await session.commit()
             bracket.phase = Phase.CLOSED
@@ -1304,8 +1445,17 @@ class TemperatureStrategy:
             self.brackets.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
+                        action_key=action_key,
                         price=result.fill_price, proceeds=-result.total_cost_cents)
         else:
+            # Partial or unfilled — reset action to PENDING so the next cycle retries.
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    update(OrderAction)
+                    .where(OrderAction.action_key == action_key)
+                    .values(status=OrderActionStatus.PENDING)
+                )
+                await session.commit()
             prev_qty = bracket.position_quantity
             bracket.position_quantity = live_count
             if result.fill_quantity > 0 or live_count < prev_qty:
@@ -1315,6 +1465,7 @@ class TemperatureStrategy:
             logger.warning(
                 "phase.c.stop_loss_partial_or_unfilled",
                 ticker=bracket.market_ticker,
+                action_key=action_key,
                 attempted_qty=order.quantity,
                 filled_qty=result.fill_quantity,
                 remaining_count=live_count,
@@ -1340,6 +1491,17 @@ class TemperatureStrategy:
         quantity: int,
         trigger_price: int,
     ) -> bool:
+        # Readiness gate: do not execute risk actions until startup reconciliation
+        # has fully completed.  Firing before state is restored could act on
+        # incomplete in-memory position data.
+        if not self._reconciliation_complete:
+            logger.warning(
+                "phase.c.stop_loss_readiness_gate",
+                ticker=ticker,
+                msg="blocked: reconciliation not yet complete",
+            )
+            return False
+
         bracket = self.active_positions.get(ticker)
         if bracket is None:
             await self._unregister_stop_loss_watcher(ticker)

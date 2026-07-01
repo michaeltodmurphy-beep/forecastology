@@ -4,6 +4,8 @@ from typing import Awaitable, Callable, Literal, Optional
 
 import structlog
 
+from execution.errors import ExecutionError, PermanentExecutionError, TransientExecutionError
+
 logger = structlog.get_logger(__name__)
 
 PositionSide = Literal["yes", "no"]
@@ -88,8 +90,50 @@ class StopLossWatcher:
 
         try:
             success = await self._exit_handler(ticker, side, quantity, best_ask)
+        except PermanentExecutionError as exc:
+            # Permanent rejection: log with context and do NOT reset exit_in_progress
+            # so this position is not retried automatically from this watcher cycle.
+            logger.error(
+                "sl.exit_order_permanent_failure",
+                ticker=ticker,
+                side=side,
+                quantity=quantity,
+                error_class=exc.error_class,
+                error=str(exc),
+            )
+            # Re-enable retries so a manual reconciliation pass or the strategy
+            # loop can attempt recovery, but mark as failed for observability.
+            async with self._lock:
+                current = self._positions.get(ticker)
+                if current is not None:
+                    current.exit_in_progress = False
+            logger.warning(
+                "sl.exit_order_failed",
+                ticker=ticker,
+                quantity=quantity,
+                error_class=exc.error_class,
+            )
+            return False
+        except TransientExecutionError as exc:
+            logger.warning(
+                "sl.exit_order_transient_failure",
+                ticker=ticker,
+                side=side,
+                quantity=quantity,
+                error_class=exc.error_class,
+                error=str(exc),
+            )
+            success = False
         except Exception as exc:
-            logger.error("sl.exit_order_failed", ticker=ticker, error=str(exc))
+            # Unknown error – treat conservatively as transient so we retry.
+            logger.error(
+                "sl.exit_order_unexpected_error",
+                ticker=ticker,
+                side=side,
+                quantity=quantity,
+                error_class="unknown",
+                error=str(exc),
+            )
             success = False
 
         if success:
