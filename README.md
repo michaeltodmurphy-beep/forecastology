@@ -12,9 +12,9 @@ The system runs as three coordinating processes:
 
 | Process | File | Role |
 |---|---|---|
-| **WS Daemon** | `run.py` | Connects to Kalshi WebSocket, maintains live order book cache, runs `TemperatureStrategy` |
+| **WS Daemon** | `run.py` | Connects to Kalshi WebSocket, maintains live order book cache, runs `TemperatureStrategy`, and executes websocket-driven stop-losses |
 | **Scanner** | `scanner.py` | Reads shared state from `/dev/shm/forecastology_state.json`, places buy orders when conditions are met (systemd timer, ~every 2s) |
-| **Monitor** | `monitor.py` | Reads open positions from DB, checks prices, and triggers stop-losses (systemd timer, ~every 30s) |
+| **Monitor** | `monitor.py` | Reads open positions from DB, reconciles prices, and handles hedge fallback logic (systemd timer, ~every 30s) |
 
 > **Note:** `scanner.py` (shared-state version) requires the WS daemon (`run.py`) to write market state to `/dev/shm/forecastology_state.json`. The current `run.py` uses the integrated `TemperatureStrategy` approach which handles scanning internally — the standalone `scanner.py` is for a future decoupled architecture.
 
@@ -61,7 +61,7 @@ Key variables:
 | `TRADING_MODE` | `PAPER` (simulated) or `LIVE` (real money) |
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
-| `STOP_LOSS_PRICE` | Last trade strictly below this (cents) triggers the stop-loss sell (default `0.35`) |
+| `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |

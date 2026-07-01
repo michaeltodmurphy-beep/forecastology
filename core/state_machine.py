@@ -11,6 +11,7 @@ from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
+from execution.sl_watcher import StopLossWatcher
 from app.database import DatabaseManager
 from app.config import AppConfig
 from app.signing import load_private_key
@@ -66,12 +67,14 @@ class TemperatureStrategy:
         ws_manager: WebSocketManager,
         executor: BaseExecutor,
         db: DatabaseManager,
+        stop_loss_watcher: Optional[StopLossWatcher] = None,
     ):
         self.config = config
         self.cache = cache
         self.ws = ws_manager
         self.executor = executor
         self.db = db
+        self.stop_loss_watcher = stop_loss_watcher
 
         # Cached loaded date flags (set of date strings already loaded)
         # State: market_ticker -> MarketBracket
@@ -126,11 +129,27 @@ class TemperatureStrategy:
         bracket.phase = Phase.CLOSED
         self.active_positions.pop(ticker, None)
         self.brackets.pop(ticker, None)
+        await self._unregister_stop_loss_watcher(ticker)
         async with await self.db.get_session() as session:
             await session.execute(
                 delete(PositionModel).where(PositionModel.market_ticker == ticker)
             )
             await session.commit()
+
+    async def _register_stop_loss_watcher(self, bracket: MarketBracket) -> None:
+        if self.stop_loss_watcher is None or bracket.position_quantity <= 0:
+            return
+        await self.stop_loss_watcher.register_position(
+            bracket.market_ticker,
+            side="yes",
+            quantity=bracket.position_quantity,
+            sl_price=self.config.stop_loss_price,
+        )
+
+    async def _unregister_stop_loss_watcher(self, ticker: str) -> None:
+        if self.stop_loss_watcher is None:
+            return
+        await self.stop_loss_watcher.unregister_position(ticker)
 
     @staticmethod
     def _avg_buy_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
@@ -311,6 +330,7 @@ class TemperatureStrategy:
                     elif not bracket.avg_entry or bracket.avg_entry <= 0:
                         bracket.avg_entry = 0
                     self.active_positions[ticker] = bracket
+                    await self._register_stop_loss_watcher(bracket)
                     logger.info("strategy.restored_live_position", ticker=ticker,
                                 qty=qty, entry=bracket.avg_entry, entry_source=entry_source)
             except Exception as e:
@@ -349,6 +369,7 @@ class TemperatureStrategy:
             bracket.hedge_quantity = pos.hedge_quantity
 
             self.active_positions[ticker] = bracket
+            await self._register_stop_loss_watcher(bracket)
             logger.info("strategy.restored_position", ticker=ticker,
                         qty=pos.quantity, entry=bracket.avg_entry,
                         hedge_market=bracket.hedge_market)
@@ -405,6 +426,8 @@ class TemperatureStrategy:
         # Cache YES bid/ask from ticker channel — this is the authoritative price source
         if yes_bid is not None and yes_ask is not None:
             self.cache.update_quote(market_ticker, yes_bid, yes_ask)
+            if self.stop_loss_watcher is not None:
+                await self.stop_loss_watcher.on_market_update(market_ticker, yes_ask)
 
         # Update brackets in state
         if market_ticker in self.brackets:
@@ -753,6 +776,7 @@ class TemperatureStrategy:
             bracket.position_quantity = result.fill_quantity
             bracket.avg_entry = reconciled_fill_price
             self.active_positions[bracket.market_ticker] = bracket
+            await self._register_stop_loss_watcher(bracket)
             logger.info("phase.b.entry_filled", ticker=bracket.market_ticker,
                         price=result.fill_price, qty=result.fill_quantity,
                         cost=result.total_cost_cents,
@@ -1068,6 +1092,8 @@ class TemperatureStrategy:
                 stop_loss_reason = "price_below_stop"
 
             if stop_loss_reason is not None:
+                if self.stop_loss_watcher is not None:
+                    continue
                 if bracket.position_quantity <= 0:
                     bracket.phase = Phase.CLOSED
                     self.active_positions.pop(ticker, None)
@@ -1152,6 +1178,7 @@ class TemperatureStrategy:
                 bracket.avg_entry = entry
                 bracket.last_price = entry
             self.active_positions[ticker] = bracket
+            await self._register_stop_loss_watcher(bracket)
 
             async with await self.db.get_session() as session:
                 existing = await session.execute(
@@ -1234,6 +1261,7 @@ class TemperatureStrategy:
             bracket.phase = Phase.CLOSED
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
+            await self._unregister_stop_loss_watcher(bracket.market_ticker)
             return True
 
         async with await self.db.get_session() as session:
@@ -1274,6 +1302,7 @@ class TemperatureStrategy:
             bracket.phase = Phase.CLOSED
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
+            await self._unregister_stop_loss_watcher(bracket.market_ticker)
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         price=result.fill_price, proceeds=-result.total_cost_cents)
         else:
@@ -1301,6 +1330,45 @@ class TemperatureStrategy:
                     last_price=bracket.last_price,
                     remaining_qty=bracket.position_quantity,
                 )
+            await self._register_stop_loss_watcher(bracket)
+        return False
+
+    async def _execute_stop_loss_from_watcher(
+        self,
+        ticker: str,
+        side: str,
+        quantity: int,
+        trigger_price: int,
+    ) -> bool:
+        bracket = self.active_positions.get(ticker)
+        if bracket is None:
+            await self._unregister_stop_loss_watcher(ticker)
+            logger.info("phase.c.stop_loss_position_missing", ticker=ticker)
+            return True
+
+        bracket.position_quantity = quantity
+        logger.warning(
+            "phase.c.stop_loss_triggered",
+            ticker=ticker,
+            side=side,
+            last_price=trigger_price,
+            stop_loss=self.config.stop_loss_price,
+            source="websocket_watcher",
+        )
+        if not getattr(bracket, "_stop_loss_counted", False):
+            await self._increment_stop_loss_count_for_market(bracket.market_ticker)
+            bracket._stop_loss_counted = True
+
+        market_gone = await self._execute_stop_loss(bracket)
+        if market_gone:
+            await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
+            bracket._stop_loss_counted = False
+            return True
+
+        if ticker not in self.active_positions:
+            return True
+
+        await self._register_stop_loss_watcher(bracket)
         return False
 
     async def _fetch_market_data_via_rest(self, ticker: str) -> Optional[dict]:
