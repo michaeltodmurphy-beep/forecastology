@@ -3222,6 +3222,8 @@ async def test_panic_flatten_submits_at_panic_price(monkeypatch):
     strategy.brackets[ticker] = bracket
     bracket._reconciliation_complete = True
     strategy._reconciliation_complete = True
+    # Pre-submit revalidation requires a cached YES ask at or below stop (50¢)
+    strategy.cache.update_quote(ticker, 45, 48)
 
     await strategy._run_panic_flatten_exit(
         bracket,
@@ -3292,6 +3294,8 @@ async def test_panic_flatten_retries_on_unfilled(monkeypatch):
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
     strategy._reconciliation_complete = True
+    # Pre-submit revalidation requires a cached YES ask at or below stop (50¢)
+    strategy.cache.update_quote(ticker, 45, 48)
 
     await strategy._run_panic_flatten_exit(
         bracket,
@@ -3354,6 +3358,8 @@ async def test_panic_flatten_respects_max_retries(monkeypatch):
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
     strategy._reconciliation_complete = True
+    # Pre-submit revalidation requires a cached YES ask at or below stop (50¢)
+    strategy.cache.update_quote(ticker, 45, 48)
 
     await strategy._run_panic_flatten_exit(
         bracket,
@@ -3408,6 +3414,8 @@ async def test_panic_flatten_idempotency_suppresses_concurrent_triggers(monkeypa
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
     strategy._reconciliation_complete = True
+    # Pre-submit revalidation requires a cached YES ask at or below stop (50¢)
+    strategy.cache.update_quote(ticker, 45, 48)
 
     # First dispatch creates a task and starts it
     await strategy._dispatch_stop_loss_exit(bracket, trigger_price=49, trigger_source="test")
@@ -3465,6 +3473,8 @@ async def test_panic_flatten_logs_panic_triggered_and_submit(monkeypatch):
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
     strategy._reconciliation_complete = True
+    # Pre-submit revalidation requires a cached YES ask at or below stop (50¢)
+    strategy.cache.update_quote(ticker, 45, 48)
 
     await strategy._run_panic_flatten_exit(
         bracket,
@@ -3534,6 +3544,8 @@ async def test_panic_flatten_logs_retry_event(monkeypatch):
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
     strategy._reconciliation_complete = True
+    # Pre-submit revalidation requires a cached YES ask at or below stop (50¢)
+    strategy.cache.update_quote(ticker, 45, 48)
 
     await strategy._run_panic_flatten_exit(
         bracket,
@@ -3607,3 +3619,456 @@ async def test_aggressive_limit_mode_unchanged_when_panic_flatten_disabled(monke
     # Price must be the ladder price (reference - offset), not the panic floor
     first_order_price = executor.orders[0][0].price
     assert first_order_price != 1 or strategy.config.sl_exit_aggressive_offset_ticks == 0
+
+
+# ---------------------------------------------------------------------------
+# PANIC_FLATTEN ASK-based trigger and pre-submit revalidation tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_panic_flatten_no_submit_when_ask_above_stop(monkeypatch):
+    """ask=0.88 (88¢), stop=0.48 (48¢) → no panic sell submission.
+
+    The pre-submit revalidation must abort because 88 > 48.
+    """
+    ticker = "KXLOWTBOS-26JUN23-B71.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=48)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Cache: ask=88¢ which is ABOVE the 48¢ stop — revalidation must abort
+    strategy.cache.update_quote(ticker, 85, 88)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=47,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # No sell orders must have been placed
+    assert len(executor.orders) == 0
+    # Revalidation abort must be logged
+    abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
+    assert len(abort_logs) >= 1
+    assert abort_logs[0]["reason"] == "ask_above_stop"
+    assert abort_logs[0]["best_ask_yes"] == 88
+    assert abort_logs[0]["stop_loss_price"] == 48
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_submits_when_ask_equals_stop(monkeypatch):
+    """ask=0.48 (48¢), stop=0.48 (48¢) → panic sell submission occurs.
+
+    Boundary condition: ask == stop_loss_price must trigger (<=).
+    """
+    ticker = "KXLOWTBOS-26JUN23-B72.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="ask-eq-stop-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=48)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Cache: ask=48¢ exactly equals the 48¢ stop — must trigger (<=)
+    strategy.cache.update_quote(ticker, 45, 48)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=48,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert len(executor.orders) == 1
+    assert executor.orders[0][0].price == 1  # panic floor price
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_aborts_when_ask_rebounds_before_submit(monkeypatch):
+    """Trigger fires (ask <= stop), then ask rebounds above stop before the
+    task reaches pre-submit revalidation → submit must be canceled."""
+    ticker = "KXLOWTBOS-26JUN23-B73.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    # Step 1: set cache with ask=48¢ (below stop=50¢) → trigger fires
+    strategy.cache.update_quote(ticker, 45, 48)
+
+    # Step 2: simulate ask rebounding to 80¢ before the task executes
+    # by overwriting the cache between trigger and submit
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=48,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # Revalidation sees ask=80¢ > stop=50¢ → no sell
+    assert len(executor.orders) == 0
+    abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
+    assert len(abort_logs) >= 1
+    assert abort_logs[0]["reason"] == "ask_above_stop"
+    assert abort_logs[0]["best_ask_yes"] == 80
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_aborts_when_no_cached_quote(monkeypatch):
+    """If no cached quote is available at pre-submit time, panic submit is
+    aborted and the reason is logged as 'no_cached_quote'."""
+    ticker = "KXLOWTBOS-26JUN23-B74.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # No cache update — cache is empty for this ticker
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=49,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert len(executor.orders) == 0
+    abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
+    assert len(abort_logs) >= 1
+    assert abort_logs[0]["reason"] == "no_cached_quote"
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_aborts_on_stale_quote(monkeypatch):
+    """If the cached quote is older than sl_panic_max_quote_age_ms, panic
+    submit is aborted with reason 'stale_quote'."""
+    import time as _time
+    ticker = "KXLOWTBOS-26JUN23-B75.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(
+        monkeypatch, executor=executor, db=db,
+        stop_loss_price=50,
+        sl_panic_max_quote_age_ms=1000,  # 1 second max age
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Inject a quote with a timestamp 2 seconds in the past (older than 1s limit)
+    strategy.cache.update_quote(ticker, 45, 48)
+    strategy.cache.quote_timestamps[ticker] = _time.time() - 2.0
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=48,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert len(executor.orders) == 0
+    abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
+    assert len(abort_logs) >= 1
+    assert abort_logs[0]["reason"] == "stale_quote"
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_phase_c_no_trigger_when_ask_above_stop(monkeypatch):
+    """Phase C with PANIC_FLATTEN: when yes_ask > stop_loss_price, no trigger fires
+    even if yes_bid < stop_loss_price (e.g., ask=0.88, stop=0.48)."""
+    ticker = "KXLOWTBOS-26JUN23-B76.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, stop_loss_price=48)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # bid=30¢ is below stop=48¢, but ask=88¢ is well above stop
+    strategy.cache.update_quote(ticker, 30, 88)
+
+    await strategy._evaluate_held_positions()
+
+    # PANIC_FLATTEN must NOT have triggered — ask is above stop
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    # No panic trigger log either
+    assert not any(event == "sl.panic_trigger_evaluated" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_phase_c_triggers_when_ask_at_stop(monkeypatch):
+    """Phase C with PANIC_FLATTEN: trigger fires via the fallback REST path when
+    yes_ask <= stop_loss_price."""
+    ticker = "KXLOWTBOS-26JUN23-B77.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    # REST returns ask=48¢ (below stop=50¢)
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 48, "yes_bid": 45, "spread": 3}
+    )
+    # No WebSocket quote in cache → fallback to REST
+    dispatch_calls = []
+    original_dispatch = strategy._dispatch_stop_loss_exit
+
+    async def spy_dispatch(bracket, *, trigger_price, trigger_source):
+        dispatch_calls.append({"trigger_price": trigger_price, "trigger_source": trigger_source})
+        # Don't actually start the panic task (would need cache quote)
+
+    strategy._dispatch_stop_loss_exit = spy_dispatch
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    await strategy._evaluate_held_positions()
+
+    # Trigger must have fired (ask=48 <= stop=50)
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0]["trigger_source"] == "phase_c"
+    assert dispatch_calls[0]["trigger_price"] == 48  # yes_ask passed as trigger_price
+    assert any(event == "sl.panic_trigger_evaluated" for event, _ in logged)
+    trigger_log = next(kw for event, kw in logged if event == "sl.panic_trigger_evaluated")
+    assert trigger_log["best_ask_yes"] == 48
+    assert trigger_log["stop_loss_price"] == 50
+    assert trigger_log["units"] == "cents"
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_unit_normalization(monkeypatch):
+    """Unit normalization: stop_loss_price in .env as dollars (0.48) is stored
+    as cents (48) by AppConfig. The cache stores ask in cents. Comparing 48 <= 48
+    must be True (no mixed-unit false-positive or false-negative)."""
+    ticker = "KXLOWTBOS-26JUN23-B78.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="unit-norm-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+
+    # AppConfig.convert_dollars_to_cents converts "0.48" → 48 (cents)
+    # Simulate that: pass stop_loss_price already in cents (48)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=48)
+    assert strategy.config.stop_loss_price == 48  # must be in cents
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Cache stores ask in cents: 48¢ == 0.48 dollars
+    strategy.cache.update_quote(ticker, 45, 48)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=48,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # 48 <= 48 → must submit (no mixed-unit confusion)
+    assert len(executor.orders) == 1
+    assert executor.orders[0][0].price == 1  # panic floor
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_unit_normalization_no_false_trigger(monkeypatch):
+    """Anti-regression: ask=88¢ with stop=48¢ must NOT trigger even after any
+    unit conversion path (0.48 dollars → 48 cents; 0.88 dollars → 88 cents)."""
+    ticker = "KXLOWTBOS-26JUN23-B79.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=48)
+    # stop_loss_price stored in cents
+    assert strategy.config.stop_loss_price == 48
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Cache ask=88¢ > stop=48¢ → must NOT submit
+    strategy.cache.update_quote(ticker, 85, 88)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=47,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert len(executor.orders) == 0
+    abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
+    assert abort_logs[0]["reason"] == "ask_above_stop"
+    # Confirm both values are in cents (not a mixed-unit compare of 88 vs 0.48)
+    assert abort_logs[0]["best_ask_yes"] == 88
+    assert abort_logs[0]["stop_loss_price"] == 48
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_zero_bid_no_trigger_when_ask_above_stop(monkeypatch):
+    """Zero-bid-collapse scenario for PANIC_FLATTEN: bid drops to 0 but ask=88¢
+    is above stop=48¢ → must NOT trigger panic exit (ask-only rule)."""
+    ticker = "KXLOWTBOS-26JUN23-B80.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, stop_loss_price=48)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # bid=0 (collapse) but ask=88¢ (well above 48¢ stop)
+    strategy.cache.update_quote(ticker, 0, 88)
+
+    await strategy._evaluate_held_positions()
+
+    # Must not trigger: ask > stop
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+

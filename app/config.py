@@ -63,6 +63,9 @@ class AppConfig(BaseSettings):
     sl_panic_retry_ms: int = 250
     # Max retry attempts for panic-flatten exit (default 5).
     sl_panic_max_retries: int = 5
+    # Maximum age (ms) of a cached YES ask quote before it is considered stale
+    # for PANIC_FLATTEN pre-submit revalidation. Set to 0 to disable the check.
+    sl_panic_max_quote_age_ms: int = 30000
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
