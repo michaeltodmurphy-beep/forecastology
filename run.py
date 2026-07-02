@@ -58,7 +58,10 @@ async def main():
             dry_run=config.dry_run,
         )
         strategy = TemperatureStrategy(config=config, cache=cache, ws_manager=ws_manager, executor=executor, db=db)
-        stop_loss_watcher = StopLossWatcher(strategy._execute_stop_loss_from_watcher)
+        stop_loss_watcher = StopLossWatcher(
+            strategy._execute_stop_loss_from_watcher,
+            poll_interval_ms=config.sl_worker_interval_ms,
+        )
         strategy.stop_loss_watcher = stop_loss_watcher
         await ws_manager.connect()
         stop_loss_task = asyncio.create_task(stop_loss_watcher.run())
