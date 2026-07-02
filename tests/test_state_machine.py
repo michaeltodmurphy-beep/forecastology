@@ -2604,6 +2604,172 @@ async def test_stop_loss_in_flight_skip(monkeypatch):
     assert executor.orders == []
 
 
+@pytest.mark.asyncio
+async def test_fast_sl_phase_c_dispatches_immediately_without_waiting(monkeypatch):
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=50,
+        trading_mode="LIVE",
+        enable_fast_sl_exit=True,
+    )
+    strategy._dispatch_stop_loss_exit = AsyncMock()
+    strategy._execute_stop_loss = AsyncMock()
+    bracket = _make_held_bracket(ticker, "KXLOWTCHI")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 40, 42)
+
+    await strategy._evaluate_held_positions()
+
+    strategy._dispatch_stop_loss_exit.assert_awaited_once()
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fast_sl_dispatch_is_idempotent_per_ticker(monkeypatch):
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    strategy = make_strategy(monkeypatch, trading_mode="LIVE", enable_fast_sl_exit=True)
+    bracket = _make_held_bracket(ticker, "KXLOWTCHI")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def fake_runner(*_args, **_kwargs):
+        calls.append("run")
+        started.set()
+        await release.wait()
+
+    strategy._run_fast_sl_exit = fake_runner
+
+    await strategy._dispatch_stop_loss_exit(
+        bracket, trigger_price=40, trigger_source="phase_c"
+    )
+    await started.wait()
+    await strategy._dispatch_stop_loss_exit(
+        bracket, trigger_price=39, trigger_source="phase_c"
+    )
+
+    assert len(calls) == 1
+    task = strategy._sl_exit_tasks[ticker]
+    release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_fast_sl_repricing_ladder_respects_slippage_cap(monkeypatch):
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    strategy = make_strategy(
+        monkeypatch,
+        trading_mode="LIVE",
+        enable_fast_sl_exit=True,
+        sl_exit_max_attempts=3,
+        sl_exit_retry_interval_ms=1,
+        sl_exit_aggressive_offset_ticks=2,
+        sl_exit_max_slippage=4,
+    )
+    bracket = _make_held_bracket(ticker, "KXLOWTCHI")
+    bracket.position_quantity = 1
+    bracket.last_price = 50
+    strategy.active_positions[ticker] = bracket
+    strategy._execute_stop_loss = AsyncMock(return_value=False)
+
+    await strategy._run_fast_sl_exit(
+        bracket,
+        trigger_price=50,
+        trigger_source="phase_c",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    prices = [call.kwargs["override_price"] for call in strategy._execute_stop_loss.await_args_list]
+    assert prices == [48, 46, 46]
+
+
+@pytest.mark.asyncio
+async def test_fast_sl_dispatch_runs_per_ticker_in_parallel(monkeypatch):
+    strategy = make_strategy(monkeypatch, trading_mode="LIVE", enable_fast_sl_exit=True)
+    b1 = _make_held_bracket("KXLOWTCHI-26JUN25-B62.5", "KXLOWTCHI")
+    b2 = _make_held_bracket("KXLOWTBOS-26JUN25-B62.5", "KXLOWTBOS")
+    b1.position_quantity = 1
+    b2.position_quantity = 1
+    strategy.active_positions[b1.market_ticker] = b1
+    strategy.active_positions[b2.market_ticker] = b2
+
+    started = set()
+    release = asyncio.Event()
+
+    async def fake_runner(bracket, **_kwargs):
+        started.add(bracket.market_ticker)
+        await release.wait()
+
+    strategy._run_fast_sl_exit = fake_runner
+    await strategy._dispatch_stop_loss_exit(b1, trigger_price=40, trigger_source="phase_c")
+    await strategy._dispatch_stop_loss_exit(b2, trigger_price=39, trigger_source="phase_c")
+    await asyncio.sleep(0)
+
+    assert started == {b1.market_ticker, b2.market_ticker}
+    tasks = list(strategy._sl_exit_tasks.values())
+    release.set()
+    await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_fast_sl_telemetry_logs_trigger_submit_and_fill(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    executor = FakeExecutor()
+    executor.sell_success = True
+    executor.positions = {}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        trading_mode="LIVE",
+        enable_fast_sl_exit=True,
+    )
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTCHI",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    bracket.last_price = 40
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    trigger_ts_ms = strategy._now_ms()
+    await strategy._execute_stop_loss(
+        bracket,
+        override_price=39,
+        bypass_cooldown=True,
+        trigger_ts_ms=trigger_ts_ms,
+        attempt=1,
+    )
+
+    events = [event for event, _ in logged]
+    assert "sl.exit_submit_start" in events
+    assert "sl.exit_submitted" in events
+    assert "sl.exit_fill_observed" in events
+    submit_start = next(kwargs for event, kwargs in logged if event == "sl.exit_submit_start")
+    submitted = next(kwargs for event, kwargs in logged if event == "sl.exit_submitted")
+    filled = next(kwargs for event, kwargs in logged if event == "sl.exit_fill_observed")
+    assert submit_start["action_key"] == f"{ticker}:STOP_LOSS"
+    assert submitted["action_key"] == f"{ticker}:STOP_LOSS"
+    assert filled["action_key"] == f"{ticker}:STOP_LOSS"
+    assert submit_start["elapsed_ms"] >= 0
+    assert filled["elapsed_ms"] >= 0
+
+
 # ---------------------------------------------------------------------------
 # Fix 2: Startup reconciliation completeness + readiness gate
 # ---------------------------------------------------------------------------

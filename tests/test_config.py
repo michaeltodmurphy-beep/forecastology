@@ -33,3 +33,22 @@ class TestAppConfig:
         assert cfg.monitor_start_price == 80
         assert cfg.spread_monitor_price == 90
         assert cfg.dry_run is True
+        assert cfg.enable_fast_sl_exit is False
+
+    def test_enable_fast_sl_exit_defaults_true_for_live(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        from app.config import AppConfig
+        cfg = AppConfig(
+            kalshi_api_key='k',
+            kalshi_private_key_path='k.pem',
+            mysql_database_url='******localhost:3306/test',
+            trading_mode='LIVE',
+            initial_contract_count=1,
+            monitor_start_price=80,
+            buy_trigger_price=82,
+            spread_monitor_price=90,
+            minimum_spread=4,
+            stop_loss_price=35,
+        )
+        assert cfg.enable_fast_sl_exit is True
