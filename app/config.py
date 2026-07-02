@@ -41,6 +41,11 @@ class AppConfig(BaseSettings):
     held_position_price_refresh_seconds: int = 10
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
+    enable_fast_sl_exit: bool | None = None
+    sl_exit_retry_interval_ms: int = 300
+    sl_exit_max_attempts: int = 3
+    sl_exit_aggressive_offset_ticks: int = 2
+    sl_exit_max_slippage: int = 20
     # Maximum bid-ask spread (in cents) at which the stop-loss is allowed to fire.
     # When the YES spread exceeds this value the bot holds rather than selling into
     # a wide, indecisive book. Set via `max_sl_spread` in dollar format
@@ -51,7 +56,7 @@ class AppConfig(BaseSettings):
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
-        'max_sl_spread',
+        'max_sl_spread', 'sl_exit_max_slippage',
         mode='before'
     )
     @classmethod
@@ -73,6 +78,8 @@ class AppConfig(BaseSettings):
     def normalize_trading_mode(self):
         if self.trading_mode:
             self.trading_mode = self.trading_mode.upper()
+        if self.enable_fast_sl_exit is None:
+            self.enable_fast_sl_exit = self.trading_mode == "LIVE"
         return self
 
     @classmethod

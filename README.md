@@ -101,6 +101,11 @@ Key variables:
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
 | `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
+| `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
+| `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
+| `SL_EXIT_MAX_ATTEMPTS` | Max fast stop-loss attempts per trigger (default `3`) |
+| `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Initial sell-price offset (in ticks/cents) from trigger reference for marketable exits (default `2`) |
+| `SL_EXIT_MAX_SLIPPAGE` | Max total slippage (dollar format accepted) allowed for fast stop-loss repricing (default `0.20`) |
 | `FORECASTOLOGY_LOCKFILE` | Path to the run.py process lockfile (default `/tmp/forecastology.lock`) |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -248,6 +253,11 @@ Key variables:
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
 | `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
+| `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
+| `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
+| `SL_EXIT_MAX_ATTEMPTS` | Max fast stop-loss attempts per trigger (default `3`) |
+| `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Initial sell-price offset (in ticks/cents) from trigger reference for marketable exits (default `2`) |
+| `SL_EXIT_MAX_SLIPPAGE` | Max total slippage (dollar format accepted) allowed for fast stop-loss repricing (default `0.20`) |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -309,14 +319,25 @@ With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the exact cap boundary
 High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
 
 ### Phase C — Position Management
-Held positions use the cached **last trade** only:
+When stop-loss trigger conditions are met, the strategy now dispatches an immediate per-ticker async stop-loss worker (LIVE fast mode) so one ticker's exit path does not block others.
 
-- `price = cache.get_last_price(ticker)`
-- if `price is None` → skip this cycle
-- if `price < STOP_LOSS_PRICE` → sell the entire holding through the existing 1¢ IOC reduce-only stop-loss path
-- comparison is **strictly `<`**, not `<=`
+Fast stop-loss behavior in LIVE:
 
-Immediately before the stop-loss order is sent, the bot increments `StopLossLedger` once per triggered position (guarded so 60-second retries do not double-count the same stop-loss).
+- structured trigger/submit/fill telemetry logs (`sl.trigger_detected`, `sl.exit_submit_start`, `sl.exit_submitted`, `sl.exit_fill_observed`/`sl.exit_failed`)
+- aggressive marketable sell ladder relative to trigger price using `SL_EXIT_AGGRESSIVE_OFFSET_TICKS`
+- bounded repricing capped by `SL_EXIT_MAX_SLIPPAGE`
+- rapid per-ticker retries at `SL_EXIT_RETRY_INTERVAL_MS` up to `SL_EXIT_MAX_ATTEMPTS`
+- persistent idempotency via `OrderAction(action_key=f"{ticker}:STOP_LOSS")` to prevent duplicate active exits
+
+Conservative mode remains available by setting `ENABLE_FAST_SL_EXIT=false` (default for PAPER).
+
+Recommended LIVE starting values:
+
+- `ENABLE_FAST_SL_EXIT=true`
+- `SL_EXIT_RETRY_INTERVAL_MS=250-300`
+- `SL_EXIT_MAX_ATTEMPTS=3`
+- `SL_EXIT_AGGRESSIVE_OFFSET_TICKS=2`
+- `SL_EXIT_MAX_SLIPPAGE=0.20`
 
 ### StopLossLedger
 `stop_loss_ledger` stores the persistent per-day martingale counter:

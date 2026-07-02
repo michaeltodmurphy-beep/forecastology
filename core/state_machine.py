@@ -2,6 +2,7 @@
 import asyncio
 import datetime
 import re
+import time
 import structlog
 from typing import Optional
 from core.types import (
@@ -98,6 +99,7 @@ class TemperatureStrategy:
         # successfully.  Risk-critical execution paths must not fire until
         # this is True to prevent acting on stale/incomplete in-memory state.
         self._reconciliation_complete = False
+        self._sl_exit_tasks: dict[str, asyncio.Task] = {}
 
     @staticmethod
     def _first_non_none(*values):
@@ -130,6 +132,100 @@ class TemperatureStrategy:
             or settlement_ts
             or status in {"settled", "finalized", "resolved"}
             or result in {"yes", "no"}
+        )
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time.time() * 1000)
+
+    def _compute_fast_sl_exit_price(self, reference_price: int, attempt: int) -> int:
+        offset = max(int(self.config.sl_exit_aggressive_offset_ticks or 0), 0)
+        max_slippage = max(int(self.config.sl_exit_max_slippage or 0), 0)
+        floor_price = max(1, reference_price - max_slippage)
+        ladder_step = max(offset, 1)
+        price = reference_price - offset - ((max(attempt, 1) - 1) * ladder_step)
+        return max(1, min(99, max(price, floor_price)))
+
+    async def _dispatch_stop_loss_exit(
+        self,
+        bracket: MarketBracket,
+        *,
+        trigger_price: int,
+        trigger_source: str,
+    ) -> None:
+        ticker = bracket.market_ticker
+        action_key = f"{ticker}:STOP_LOSS"
+        existing_task = self._sl_exit_tasks.get(ticker)
+        if existing_task is not None and not existing_task.done():
+            logger.info("sl.exit_dispatch_skipped", ticker=ticker, action_key=action_key)
+            return
+
+        trigger_ts_ms = self._now_ms()
+        logger.info(
+            "sl.trigger_detected",
+            ticker=ticker,
+            action_key=action_key,
+            trigger_source=trigger_source,
+            trigger_ts_ms=trigger_ts_ms,
+        )
+        task = asyncio.create_task(
+            self._run_fast_sl_exit(
+                bracket=bracket,
+                trigger_price=trigger_price,
+                trigger_source=trigger_source,
+                trigger_ts_ms=trigger_ts_ms,
+            )
+        )
+        self._sl_exit_tasks[ticker] = task
+
+        def _cleanup(_task: asyncio.Task) -> None:
+            current = self._sl_exit_tasks.get(ticker)
+            if current is _task:
+                self._sl_exit_tasks.pop(ticker, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def _run_fast_sl_exit(
+        self,
+        bracket: MarketBracket,
+        *,
+        trigger_price: int,
+        trigger_source: str,
+        trigger_ts_ms: int,
+    ) -> None:
+        ticker = bracket.market_ticker
+        action_key = f"{ticker}:STOP_LOSS"
+        max_attempts = max(int(self.config.sl_exit_max_attempts or 1), 1)
+        retry_sleep_s = max(int(self.config.sl_exit_retry_interval_ms or 0), 0) / 1000.0
+        for attempt in range(1, max_attempts + 1):
+            current = self.active_positions.get(ticker)
+            if current is None or current.position_quantity <= 0:
+                return
+            reference_price = current.last_price if current.last_price is not None else trigger_price
+            price = self._compute_fast_sl_exit_price(reference_price, attempt)
+            market_gone = await self._execute_stop_loss(
+                current,
+                override_price=price,
+                bypass_cooldown=True,
+                trigger_ts_ms=trigger_ts_ms,
+                attempt=attempt,
+            )
+            if market_gone:
+                await self._decrement_stop_loss_count_for_market(current.market_ticker)
+                current._stop_loss_counted = False
+                return
+            if ticker not in self.active_positions:
+                return
+            if attempt < max_attempts and retry_sleep_s > 0:
+                await asyncio.sleep(retry_sleep_s)
+        logger.warning(
+            "sl.exit_failed",
+            ticker=ticker,
+            action_key=action_key,
+            trigger_source=trigger_source,
+            attempts=max_attempts,
+            elapsed_ms=self._now_ms() - trigger_ts_ms,
+            reason="max_attempts_exhausted",
         )
 
     async def _remove_active_position(self, ticker: str, bracket: MarketBracket):
@@ -1217,12 +1313,19 @@ class TemperatureStrategy:
                 if not getattr(bracket, "_stop_loss_counted", False):
                     await self._increment_stop_loss_count_for_market(bracket.market_ticker)
                     bracket._stop_loss_counted = True
-                market_gone = await self._execute_stop_loss(bracket)
-                if market_gone:
-                    # The sell returned market_not_found: the market settled.
-                    # Undo the ledger increment since no real stop-loss occurred.
-                    await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
-                    bracket._stop_loss_counted = False
+                if self.config.enable_fast_sl_exit:
+                    await self._dispatch_stop_loss_exit(
+                        bracket,
+                        trigger_price=current_price,
+                        trigger_source="phase_c",
+                    )
+                else:
+                    market_gone = await self._execute_stop_loss(bracket)
+                    if market_gone:
+                        # The sell returned market_not_found: the market settled.
+                        # Undo the ledger increment since no real stop-loss occurred.
+                        await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
+                        bracket._stop_loss_counted = False
             else:
                 # Bid has recovered above the stop threshold — clear the spread
                 # guard so a future re-trigger logs fresh.
@@ -1294,7 +1397,15 @@ class TemperatureStrategy:
                     prior_phase=prior_phase,
                 )
 
-    async def _execute_stop_loss(self, bracket: MarketBracket):
+    async def _execute_stop_loss(
+        self,
+        bracket: MarketBracket,
+        *,
+        override_price: Optional[int] = None,
+        bypass_cooldown: bool = False,
+        trigger_ts_ms: Optional[int] = None,
+        attempt: int = 1,
+    ):
         """Execute a stop-loss: sell position at market (1¢) to guarantee fill.
 
         Checks a persistent idempotency record (``OrderAction``) before placing
@@ -1307,7 +1418,7 @@ class TemperatureStrategy:
         """
         now = asyncio.get_event_loop().time()
         last_attempt = getattr(bracket, '_last_stop_loss_attempt', 0)
-        if now - last_attempt < 60:
+        if not bypass_cooldown and now - last_attempt < 60:
             return False
         bracket._last_stop_loss_attempt = now
 
@@ -1394,7 +1505,7 @@ class TemperatureStrategy:
             )
             await session.commit()
 
-        price = 1  # Sell at minimum price to guarantee fill at stop loss
+        price = override_price if override_price is not None else 1
 
         order = OrderRequest(
             market_ticker=bracket.market_ticker,
@@ -1403,7 +1514,27 @@ class TemperatureStrategy:
             quantity=bracket.position_quantity,
         )
 
+        submit_start_ms = self._now_ms()
+        if trigger_ts_ms is not None:
+            logger.info(
+                "sl.exit_submit_start",
+                ticker=bracket.market_ticker,
+                action_key=action_key,
+                attempt=attempt,
+                price=price,
+                elapsed_ms=submit_start_ms - trigger_ts_ms,
+            )
         result = await self.executor.sell_yes(order)
+        if trigger_ts_ms is not None:
+            logger.info(
+                "sl.exit_submitted",
+                ticker=bracket.market_ticker,
+                action_key=action_key,
+                attempt=attempt,
+                order_id=result.order_id or None,
+                client_order_id=order.client_order_id,
+                elapsed_ms=submit_start_ms - trigger_ts_ms,
+            )
 
         # Detect market_not_found (HTTP 404): the market has already settled and
         # no longer exists on the exchange.  Treat this as confirmed settlement —
@@ -1430,6 +1561,16 @@ class TemperatureStrategy:
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
+            if trigger_ts_ms is not None:
+                logger.info(
+                    "sl.exit_fill_observed",
+                    ticker=bracket.market_ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    fill_qty=0,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="market_not_found",
+                )
             return True
 
         async with await self.db.get_session() as session:
@@ -1480,6 +1621,15 @@ class TemperatureStrategy:
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         action_key=action_key,
                         price=result.fill_price, proceeds=-result.total_cost_cents)
+            if trigger_ts_ms is not None:
+                logger.info(
+                    "sl.exit_fill_observed",
+                    ticker=bracket.market_ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    fill_qty=result.fill_quantity,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                )
         else:
             # Partial or unfilled — reset action to PENDING so the next cycle retries.
             async with await self.db.get_session() as session:
@@ -1515,6 +1665,17 @@ class TemperatureStrategy:
                     remaining_qty=bracket.position_quantity,
                 )
             await self._register_stop_loss_watcher(bracket)
+            if trigger_ts_ms is not None:
+                logger.warning(
+                    "sl.exit_failed",
+                    ticker=bracket.market_ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    remaining_count=live_count,
+                    filled_qty=result.fill_quantity,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="unfilled_or_partial",
+                )
         return False
 
     async def _execute_stop_loss_from_watcher(
@@ -1554,6 +1715,13 @@ class TemperatureStrategy:
             await self._increment_stop_loss_count_for_market(bracket.market_ticker)
             bracket._stop_loss_counted = True
 
+        if self.config.enable_fast_sl_exit:
+            await self._dispatch_stop_loss_exit(
+                bracket,
+                trigger_price=trigger_price,
+                trigger_source="websocket_watcher",
+            )
+            return False
         market_gone = await self._execute_stop_loss(bracket)
         if market_gone:
             await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
@@ -1687,4 +1855,8 @@ class TemperatureStrategy:
 
     async def stop(self):
         self._running = False
+        for task in list(self._sl_exit_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._sl_exit_tasks.clear()
         logger.info("strategy.stopped")
