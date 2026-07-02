@@ -51,6 +51,18 @@ class AppConfig(BaseSettings):
     # a wide, indecisive book. Set via `max_sl_spread` in dollar format
     # (e.g. `max_sl_spread=0.15` -> 15¢); default 20 is fallback when env is absent.
     max_sl_spread: int = 20
+    # Stop-loss exit mode.
+    # AGGRESSIVE_LIMIT (default): repricing ladder capped by SL_EXIT_MAX_SLIPPAGE.
+    # PANIC_FLATTEN: immediately submit at SL_PANIC_SELL_PRICE (1¢ floor) to
+    #   guarantee fill speed over exit price, then retry rapidly if unfilled.
+    sl_exit_mode: str = "AGGRESSIVE_LIMIT"
+    # Panic-flatten sell price floor in cents (default 1¢). A sell at 1¢ becomes
+    # immediately marketable — Kalshi fills it at the best available bid.
+    sl_panic_sell_price: int = 1
+    # Retry interval (ms) between panic-flatten re-submissions (default 250ms).
+    sl_panic_retry_ms: int = 250
+    # Max retry attempts for panic-flatten exit (default 5).
+    sl_panic_max_retries: int = 5
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
