@@ -251,10 +251,13 @@ class TemperatureStrategy:
         Retries rapidly up to ``sl_panic_max_retries`` with ``sl_panic_retry_ms``
         interval if the position is not fully cleared.
 
-        Before each submit attempt, re-fetches the cached YES ask and revalidates
-        the ASK-based stop-loss condition (ask <= stop_loss_price).  If the ask
-        has risen back above the threshold, or the cached quote is missing/stale,
-        the submit is aborted and the reason is logged.
+        Before each submit attempt, the latest cached YES ask is re-checked.
+        If the quote is missing or stale, the submit proceeds in *degraded mode*
+        (logged as ``sl.panic_revalidation_degraded``) rather than aborting —
+        failing to exit is worse than a marginal false positive.  A hard abort
+        only occurs when a fresh quote confirms the ask has genuinely recovered
+        above the stop threshold (``sl.panic_revalidation_aborted``,
+        ``reason="ask_above_stop"``).
         """
         ticker = bracket.market_ticker
         action_key = f"{ticker}:STOP_LOSS"
@@ -291,18 +294,24 @@ class TemperatureStrategy:
 
             # ------------------------------------------------------------------
             # Pre-submit revalidation: re-check ASK condition against the latest
-            # cached quote immediately before placing the panic order.  This
-            # prevents stale triggers (e.g. a zero-bid collapse or blind path
-            # that fired while the ask was still well above the stop) from
-            # actually submitting a sell.
+            # cached quote immediately before placing the panic order.
+            #
+            # If the quote is missing or stale, proceed in *degraded mode*
+            # rather than aborting — the initial trigger was already validated
+            # and failing to exit is worse than a marginal false positive.
+            # Degraded mode is logged explicitly so it is visible in production.
+            # A hard abort only occurs when a fresh quote confirms the ask has
+            # genuinely recovered above the stop threshold.
             # ------------------------------------------------------------------
             now_ms_rv = self._now_ms()
             quote_rv = self.cache.get_quote(ticker)
             quote_ts_rv = self.cache.get_quote_ts(ticker)
 
+            _degraded_mode = False
+
             if quote_rv is None:
                 logger.warning(
-                    "sl.panic_revalidation_aborted",
+                    "sl.panic_revalidation_degraded",
                     ticker=ticker,
                     action_key=action_key,
                     attempt=attempt,
@@ -310,56 +319,58 @@ class TemperatureStrategy:
                     stop_loss_price=stop_loss_cents,
                     elapsed_ms=now_ms_rv - trigger_ts_ms,
                 )
-                return
+                _degraded_mode = True
+            else:
+                best_ask_rv = quote_rv[1]
 
-            best_ask_rv = quote_rv[1]
+                # Freshness check (skip if max_quote_age_ms=0 or no timestamp)
+                if max_quote_age_ms > 0 and quote_ts_rv is not None:
+                    age_ms_rv = (now_ms_rv / 1000.0 - quote_ts_rv) * 1000.0
+                    if age_ms_rv > max_quote_age_ms:
+                        logger.warning(
+                            "sl.panic_revalidation_degraded",
+                            ticker=ticker,
+                            action_key=action_key,
+                            attempt=attempt,
+                            reason="stale_quote",
+                            quote_age_ms=int(age_ms_rv),
+                            max_quote_age_ms=max_quote_age_ms,
+                            best_ask_yes=best_ask_rv,
+                            stop_loss_price=stop_loss_cents,
+                            units="cents",
+                            elapsed_ms=now_ms_rv - trigger_ts_ms,
+                        )
+                        _degraded_mode = True
 
-            # Freshness check (skip if max_quote_age_ms=0 or no timestamp)
-            if max_quote_age_ms > 0 and quote_ts_rv is not None:
-                age_ms_rv = (now_ms_rv / 1000.0 - quote_ts_rv) * 1000.0
-                if age_ms_rv > max_quote_age_ms:
-                    logger.warning(
-                        "sl.panic_revalidation_aborted",
+                if not _degraded_mode:
+                    # ASK-based revalidation: abort only if a fresh quote
+                    # confirms the ask has genuinely recovered above the stop.
+                    trigger_met_rv = best_ask_rv <= stop_loss_cents
+                    logger.info(
+                        "sl.panic_revalidation",
                         ticker=ticker,
                         action_key=action_key,
                         attempt=attempt,
-                        reason="stale_quote",
-                        quote_age_ms=int(age_ms_rv),
-                        max_quote_age_ms=max_quote_age_ms,
                         best_ask_yes=best_ask_rv,
                         stop_loss_price=stop_loss_cents,
                         units="cents",
+                        trigger_met=trigger_met_rv,
                         elapsed_ms=now_ms_rv - trigger_ts_ms,
                     )
-                    return
 
-            # ASK-based revalidation: only submit if ask is still at/below stop
-            trigger_met_rv = best_ask_rv <= stop_loss_cents
-            logger.info(
-                "sl.panic_revalidation",
-                ticker=ticker,
-                action_key=action_key,
-                attempt=attempt,
-                best_ask_yes=best_ask_rv,
-                stop_loss_price=stop_loss_cents,
-                units="cents",
-                trigger_met=trigger_met_rv,
-                elapsed_ms=now_ms_rv - trigger_ts_ms,
-            )
-
-            if not trigger_met_rv:
-                logger.warning(
-                    "sl.panic_revalidation_aborted",
-                    ticker=ticker,
-                    action_key=action_key,
-                    attempt=attempt,
-                    reason="ask_above_stop",
-                    best_ask_yes=best_ask_rv,
-                    stop_loss_price=stop_loss_cents,
-                    units="cents",
-                    elapsed_ms=now_ms_rv - trigger_ts_ms,
-                )
-                return
+                    if not trigger_met_rv:
+                        logger.warning(
+                            "sl.panic_revalidation_aborted",
+                            ticker=ticker,
+                            action_key=action_key,
+                            attempt=attempt,
+                            reason="ask_above_stop",
+                            best_ask_yes=best_ask_rv,
+                            stop_loss_price=stop_loss_cents,
+                            units="cents",
+                            elapsed_ms=now_ms_rv - trigger_ts_ms,
+                        )
+                        return
             # ------------------------------------------------------------------
 
             if attempt == 1:
@@ -392,15 +403,17 @@ class TemperatureStrategy:
                 )
             except Exception as exc:
                 logger.error(
-                    "sl.panic_failed",
+                    "sl.panic_submit_error",
                     ticker=ticker,
                     action_key=action_key,
                     attempt=attempt,
                     error=str(exc),
                     elapsed_ms=self._now_ms() - trigger_ts_ms,
-                    reason="unexpected_error",
+                    reason="submit_error",
                 )
-                return
+                if attempt < max_retries and retry_sleep_s > 0:
+                    await asyncio.sleep(retry_sleep_s)
+                continue
 
             if market_gone:
                 logger.info(
@@ -1776,7 +1789,22 @@ class TemperatureStrategy:
                 price=price,
                 elapsed_ms=submit_start_ms - trigger_ts_ms,
             )
-        result = await self.executor.sell_yes(order)
+        try:
+            result = await self.executor.sell_yes(order)
+        except Exception:
+            # Reset to FAILED so the next retry is not blocked by the SUBMITTED
+            # in-flight guard.  Best-effort: a DB error here is non-fatal.
+            try:
+                async with await self.db.get_session() as session:
+                    await session.execute(
+                        update(OrderAction)
+                        .where(OrderAction.action_key == action_key)
+                        .values(status=OrderActionStatus.FAILED)
+                    )
+                    await session.commit()
+            except Exception:
+                pass
+            raise
         if trigger_ts_ms is not None:
             logger.info(
                 "sl.exit_submitted",

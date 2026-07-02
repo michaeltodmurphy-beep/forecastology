@@ -345,10 +345,10 @@ When stop-loss trigger conditions are met, the strategy dispatches an immediate 
 - **Trigger condition (strict ASK-only):** `trigger_met = (best_ask_yes is not None) AND (best_ask_yes <= STOP_LOSS_PRICE)`. Bid price, last-trade price, midpoint, and zero-bid-collapse paths are **not** used to trigger PANIC_FLATTEN.
 - On trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that Kalshi fills at the best available bid
 - no slow repricing ladder before the first submit: fill speed is prioritised over exit price
-- **Pre-submit revalidation:** immediately before placing each panic order, the latest cached YES ask is re-checked against `STOP_LOSS_PRICE`. If the ask has risen back above the stop, or the quote is missing/stale (older than `SL_PANIC_MAX_QUOTE_AGE_MS`), the submit is **canceled** and the reason is logged as `sl.panic_revalidation_aborted`. This prevents stale triggers from causing erroneous exits.
-- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price (with revalidation before each attempt)
+- **Pre-submit revalidation:** immediately before placing each panic order, the latest cached YES ask is re-checked against `STOP_LOSS_PRICE`. If the ask has risen back above the stop, the submit is **canceled** and the reason is logged as `sl.panic_revalidation_aborted` (`reason="ask_above_stop"`). If the quote is missing or stale (older than `SL_PANIC_MAX_QUOTE_AGE_MS`), the submit proceeds in **degraded mode** (`sl.panic_revalidation_degraded`) — failing to exit is worse than a marginal false positive.
+- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price (with revalidation before each attempt); transient submit errors are also retried with per-attempt logging (`sl.panic_submit_error`)
 - per-ticker task idempotency: repeated triggers while an exit is in-flight are silently suppressed
-- structured logs: `sl.panic_triggered`, `sl.panic_revalidation`, `sl.panic_revalidation_aborted`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_filled` / `sl.panic_failed`
+- structured logs: `sl.panic_triggered`, `sl.panic_revalidation`, `sl.panic_revalidation_degraded`, `sl.panic_revalidation_aborted`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_submit_error`, `sl.panic_filled` / `sl.panic_failed`
 - trade-off: fill speed is prioritised over exit price — you may receive less than 1¢; the intent is to get flat immediately
 - units: `STOP_LOSS_PRICE` and the cached YES ask are both stored in **cents** (integer); dollar-format `.env` values (e.g. `STOP_LOSS_PRICE=0.48`) are automatically converted to 48¢ by AppConfig.
 

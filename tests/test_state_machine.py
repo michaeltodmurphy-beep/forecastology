@@ -3771,12 +3771,33 @@ async def test_panic_flatten_aborts_when_ask_rebounds_before_submit(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_panic_flatten_aborts_when_no_cached_quote(monkeypatch):
-    """If no cached quote is available at pre-submit time, panic submit is
-    aborted and the reason is logged as 'no_cached_quote'."""
+async def test_panic_flatten_proceeds_when_no_cached_quote(monkeypatch):
+    """If no cached quote is available at pre-submit time, panic submit proceeds
+    in degraded mode: sl.panic_revalidation_degraded is logged with
+    reason='no_cached_quote' and the order is still submitted."""
     ticker = "KXLOWTBOS-26JUN23-B74.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    filled = []
+
+    async def sell_yes(order):
+        filled.append(order)
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="degraded-sell-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
     db = InMemoryDB()
     logged = capture_logs(monkeypatch)
     strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
@@ -3801,20 +3822,45 @@ async def test_panic_flatten_aborts_when_no_cached_quote(monkeypatch):
         trigger_ts_ms=strategy._now_ms(),
     )
 
-    assert len(executor.orders) == 0
+    # Must submit in degraded mode (not abort)
+    assert len(filled) >= 1
+    degraded_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_degraded"]
+    assert len(degraded_logs) >= 1
+    assert degraded_logs[0]["reason"] == "no_cached_quote"
+    # Must NOT log a hard abort
     abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
-    assert len(abort_logs) >= 1
-    assert abort_logs[0]["reason"] == "no_cached_quote"
+    assert len(abort_logs) == 0
 
 
 @pytest.mark.asyncio
-async def test_panic_flatten_aborts_on_stale_quote(monkeypatch):
-    """If the cached quote is older than sl_panic_max_quote_age_ms, panic
-    submit is aborted with reason 'stale_quote'."""
+async def test_panic_flatten_proceeds_on_stale_quote(monkeypatch):
+    """If the cached quote is older than sl_panic_max_quote_age_ms, panic submit
+    proceeds in degraded mode: sl.panic_revalidation_degraded is logged with
+    reason='stale_quote' and the order is still submitted."""
     import time as _time
     ticker = "KXLOWTBOS-26JUN23-B75.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    filled = []
+
+    async def sell_yes(order):
+        filled.append(order)
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="stale-degraded-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
     db = InMemoryDB()
     logged = capture_logs(monkeypatch)
     strategy = _make_panic_strategy(
@@ -3845,10 +3891,67 @@ async def test_panic_flatten_aborts_on_stale_quote(monkeypatch):
         trigger_ts_ms=strategy._now_ms(),
     )
 
-    assert len(executor.orders) == 0
+    # Must submit in degraded mode (not abort)
+    assert len(filled) >= 1
+    degraded_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_degraded"]
+    assert len(degraded_logs) >= 1
+    assert degraded_logs[0]["reason"] == "stale_quote"
+    # Must NOT log a hard abort
     abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
-    assert len(abort_logs) >= 1
-    assert abort_logs[0]["reason"] == "stale_quote"
+    assert len(abort_logs) == 0
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_retries_on_transient_exception(monkeypatch):
+    """PANIC_FLATTEN mode: transient exceptions during submit are retried up to
+    sl_panic_max_retries.  Each failed attempt logs sl.panic_submit_error and the
+    terminal failure logs sl.panic_failed with reason='max_retries_exhausted'."""
+    ticker = "KXLOWTBOS-26JUN23-B75.9"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    call_count = [0]
+
+    async def sell_yes_raises(order):
+        call_count[0] += 1
+        raise RuntimeError("network timeout")
+
+    executor.sell_yes = sell_yes_raises
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(
+        monkeypatch, executor=executor, db=db,
+        stop_loss_price=50,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    strategy.cache.update_quote(ticker, 45, 48)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=48,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # All three retry attempts must have been made
+    assert call_count[0] == 3
+    # Each attempt must log a per-attempt error
+    error_logs = [kw for event, kw in logged if event == "sl.panic_submit_error"]
+    assert len(error_logs) == 3
+    assert all(kw.get("reason") == "submit_error" for kw in error_logs)
+    # Terminal failure must be logged
+    failed_logs = [kw for event, kw in logged if event == "sl.panic_failed"]
+    assert any(kw.get("reason") == "max_retries_exhausted" for kw in failed_logs)
 
 
 @pytest.mark.asyncio
