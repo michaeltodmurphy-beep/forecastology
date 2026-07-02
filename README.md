@@ -110,6 +110,7 @@ Key variables:
 | `SL_PANIC_SELL_PRICE` | Panic-flatten floor price in cents (default `1`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for PANIC_FLATTEN pre-submit revalidation (default `30000`). Set to `0` to disable the freshness check. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `FORECASTOLOGY_LOCKFILE` | Path to the run.py process lockfile (default `/tmp/forecastology.lock`) |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -266,6 +267,7 @@ Key variables:
 | `SL_PANIC_SELL_PRICE` | Panic-flatten floor price in cents (default `1`). Sell placed at this price so Kalshi matches at best bid. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for pre-submit revalidation (default `30000`). Set to `0` to disable. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -340,12 +342,15 @@ When stop-loss trigger conditions are met, the strategy dispatches an immediate 
 
 **`PANIC_FLATTEN`** — immediate floor sell (recommended for LIVE):
 
-- on trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that Kalshi fills at the best available bid
+- **Trigger condition (strict ASK-only):** `trigger_met = (best_ask_yes is not None) AND (best_ask_yes <= STOP_LOSS_PRICE)`. Bid price, last-trade price, midpoint, and zero-bid-collapse paths are **not** used to trigger PANIC_FLATTEN.
+- On trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that Kalshi fills at the best available bid
 - no slow repricing ladder before the first submit: fill speed is prioritised over exit price
-- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price
+- **Pre-submit revalidation:** immediately before placing each panic order, the latest cached YES ask is re-checked against `STOP_LOSS_PRICE`. If the ask has risen back above the stop, or the quote is missing/stale (older than `SL_PANIC_MAX_QUOTE_AGE_MS`), the submit is **canceled** and the reason is logged as `sl.panic_revalidation_aborted`. This prevents stale triggers from causing erroneous exits.
+- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price (with revalidation before each attempt)
 - per-ticker task idempotency: repeated triggers while an exit is in-flight are silently suppressed
-- structured logs: `sl.panic_triggered`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_filled` / `sl.panic_failed`
+- structured logs: `sl.panic_triggered`, `sl.panic_revalidation`, `sl.panic_revalidation_aborted`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_filled` / `sl.panic_failed`
 - trade-off: fill speed is prioritised over exit price — you may receive less than 1¢; the intent is to get flat immediately
+- units: `STOP_LOSS_PRICE` and the cached YES ask are both stored in **cents** (integer); dollar-format `.env` values (e.g. `STOP_LOSS_PRICE=0.48`) are automatically converted to 48¢ by AppConfig.
 
 Conservative mode remains available by setting `ENABLE_FAST_SL_EXIT=false` (default for PAPER).
 

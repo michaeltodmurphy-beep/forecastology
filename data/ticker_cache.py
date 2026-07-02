@@ -1,4 +1,5 @@
 # data/ticker_cache.py
+import time
 from typing import Optional
 from core.types import OrderBook, OrderBookLevel
 import structlog
@@ -21,6 +22,8 @@ class TickerCache:
         self.market_metadata: dict[str, dict] = {}
         # market_ticker -> (yes_bid_cents, yes_ask_cents) from ticker channel
         self.quotes: dict[str, tuple[int, int]] = {}
+        # market_ticker -> unix timestamp (seconds, float) when quote was last updated
+        self.quote_timestamps: dict[str, float] = {}
 
     def update_last_price(self, ticker: str, price: int):
         self.last_prices[ticker] = price
@@ -28,10 +31,15 @@ class TickerCache:
     def update_quote(self, ticker: str, yes_bid: int, yes_ask: int):
         """Cache yes_bid/yes_ask (in cents) from the ticker channel."""
         self.quotes[ticker] = (yes_bid, yes_ask)
+        self.quote_timestamps[ticker] = time.time()
 
     def get_quote(self, ticker: str) -> Optional[tuple[int, int]]:
         """Return cached (yes_bid_cents, yes_ask_cents) or None if not yet seen."""
         return self.quotes.get(ticker)
+
+    def get_quote_ts(self, ticker: str) -> Optional[float]:
+        """Return unix timestamp (seconds) of the last quote update, or None."""
+        return self.quote_timestamps.get(ticker)
 
     def update_orderbook_snapshot(self, ticker: str, snapshot: dict):
         """Process an orderbook_snapshot message."""

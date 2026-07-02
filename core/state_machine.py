@@ -250,18 +250,27 @@ class TemperatureStrategy:
         Kalshi matches at the best available bid rather than chasing the ladder.
         Retries rapidly up to ``sl_panic_max_retries`` with ``sl_panic_retry_ms``
         interval if the position is not fully cleared.
+
+        Before each submit attempt, re-fetches the cached YES ask and revalidates
+        the ASK-based stop-loss condition (ask <= stop_loss_price).  If the ask
+        has risen back above the threshold, or the cached quote is missing/stale,
+        the submit is aborted and the reason is logged.
         """
         ticker = bracket.market_ticker
         action_key = f"{ticker}:STOP_LOSS"
         panic_price = max(1, int(self.config.sl_panic_sell_price or 1))
         max_retries = max(int(self.config.sl_panic_max_retries or 1), 1)
         retry_sleep_s = max(int(self.config.sl_panic_retry_ms or 0), 0) / 1000.0
+        stop_loss_cents = int(self.config.stop_loss_price)
+        max_quote_age_ms = int(self.config.sl_panic_max_quote_age_ms or 30000)
 
         logger.warning(
             "sl.panic_triggered",
             ticker=ticker,
             action_key=action_key,
             trigger_source=trigger_source,
+            trigger_price=trigger_price,
+            stop_loss_price=stop_loss_cents,
             panic_price=panic_price,
             qty=bracket.position_quantity,
             trigger_ts_ms=trigger_ts_ms,
@@ -279,6 +288,79 @@ class TemperatureStrategy:
                     reason="position_cleared",
                 )
                 return
+
+            # ------------------------------------------------------------------
+            # Pre-submit revalidation: re-check ASK condition against the latest
+            # cached quote immediately before placing the panic order.  This
+            # prevents stale triggers (e.g. a zero-bid collapse or blind path
+            # that fired while the ask was still well above the stop) from
+            # actually submitting a sell.
+            # ------------------------------------------------------------------
+            now_ms_rv = self._now_ms()
+            quote_rv = self.cache.get_quote(ticker)
+            quote_ts_rv = self.cache.get_quote_ts(ticker)
+
+            if quote_rv is None:
+                logger.warning(
+                    "sl.panic_revalidation_aborted",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    reason="no_cached_quote",
+                    stop_loss_price=stop_loss_cents,
+                    elapsed_ms=now_ms_rv - trigger_ts_ms,
+                )
+                return
+
+            best_ask_rv = quote_rv[1]
+
+            # Freshness check (skip if max_quote_age_ms=0 or no timestamp)
+            if max_quote_age_ms > 0 and quote_ts_rv is not None:
+                age_ms_rv = (now_ms_rv / 1000.0 - quote_ts_rv) * 1000.0
+                if age_ms_rv > max_quote_age_ms:
+                    logger.warning(
+                        "sl.panic_revalidation_aborted",
+                        ticker=ticker,
+                        action_key=action_key,
+                        attempt=attempt,
+                        reason="stale_quote",
+                        quote_age_ms=int(age_ms_rv),
+                        max_quote_age_ms=max_quote_age_ms,
+                        best_ask_yes=best_ask_rv,
+                        stop_loss_price=stop_loss_cents,
+                        units="cents",
+                        elapsed_ms=now_ms_rv - trigger_ts_ms,
+                    )
+                    return
+
+            # ASK-based revalidation: only submit if ask is still at/below stop
+            trigger_met_rv = best_ask_rv <= stop_loss_cents
+            logger.info(
+                "sl.panic_revalidation",
+                ticker=ticker,
+                action_key=action_key,
+                attempt=attempt,
+                best_ask_yes=best_ask_rv,
+                stop_loss_price=stop_loss_cents,
+                units="cents",
+                trigger_met=trigger_met_rv,
+                elapsed_ms=now_ms_rv - trigger_ts_ms,
+            )
+
+            if not trigger_met_rv:
+                logger.warning(
+                    "sl.panic_revalidation_aborted",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    reason="ask_above_stop",
+                    best_ask_yes=best_ask_rv,
+                    stop_loss_price=stop_loss_cents,
+                    units="cents",
+                    elapsed_ms=now_ms_rv - trigger_ts_ms,
+                )
+                return
+            # ------------------------------------------------------------------
 
             if attempt == 1:
                 logger.warning(
@@ -1362,18 +1444,38 @@ class TemperatureStrategy:
             bracket._no_price_since = 0
 
             bracket.last_price = current_price
-            bypass_spread_guard = zero_bid_collapse or blind_below_stop
-            stop_loss_reason = None
+
+            # Determine stop-loss exit mode for this evaluation cycle.
+            sl_exit_mode_upper = (self.config.sl_exit_mode or "AGGRESSIVE_LIMIT").upper()
+            is_panic_flatten = sl_exit_mode_upper == "PANIC_FLATTEN"
+
+            # --- Apply zero_bid_collapse side-effects (both modes) ----------
             if zero_bid_collapse:
                 if bracket.last_price != 0:
                     bracket.last_price = 0
                 current_price = 0
-                stop_loss_reason = "zero_bid_collapse"
+                # Discard ask=0 as invalid; keep a valid positive ask for PANIC check
                 yes_ask = yes_ask if yes_ask and yes_ask > 0 else None
-            elif blind_below_stop:
-                stop_loss_reason = "blind_last_known_below_stop"
-            elif current_price < self.config.stop_loss_price:
-                stop_loss_reason = "price_below_stop"
+
+            bypass_spread_guard = zero_bid_collapse or blind_below_stop
+
+            # --- Compute stop_loss_reason (mode-specific) -------------------
+            stop_loss_reason = None
+            if is_panic_flatten:
+                # Strict ASK-only trigger: only fire when the YES ask is present
+                # and at or below the configured stop-loss threshold.
+                # Bid, last-trade, blind prices, and zero-bid-collapse do NOT
+                # trigger PANIC_FLATTEN on their own.
+                if yes_ask is not None and yes_ask <= self.config.stop_loss_price:
+                    stop_loss_reason = "ask_at_or_below_stop"
+                    bypass_spread_guard = True  # revalidation in _run_panic_flatten_exit
+            else:
+                if zero_bid_collapse:
+                    stop_loss_reason = "zero_bid_collapse"
+                elif blind_below_stop:
+                    stop_loss_reason = "blind_last_known_below_stop"
+                elif current_price < self.config.stop_loss_price:
+                    stop_loss_reason = "price_below_stop"
 
             logger.debug(
                 "phase.c.price_check",
@@ -1382,6 +1484,8 @@ class TemperatureStrategy:
                 stop_loss=self.config.stop_loss_price,
                 price_source=price_source,
                 price=current_price,
+                yes_ask=yes_ask,
+                sl_exit_mode=sl_exit_mode_upper,
                 trigger_met=stop_loss_reason is not None,
             )
 
@@ -1393,6 +1497,8 @@ class TemperatureStrategy:
                 # the watcher will NOT fire; Phase C must act.
                 # For REST-fallback, last_price, or blind prices the watcher has
                 # no live tick and cannot act; Phase C is the only safety net.
+                # For PANIC_FLATTEN with websocket source: always defer to watcher
+                # because the watcher already uses yes_ask (ASK-based) correctly.
                 if self.stop_loss_watcher is not None and price_source == "websocket" and not zero_bid_collapse:
                     continue
                 if bracket.position_quantity <= 0:
@@ -1413,6 +1519,7 @@ class TemperatureStrategy:
                 # bid-ask spread is tight, meaning the market agrees the position
                 # is a loser. A wide spread means the book is indecisive — the
                 # position may recover, so we hold rather than sell into thin air.
+                # (Bypassed for zero_bid_collapse, blind_below_stop, and PANIC_FLATTEN.)
                 if not bypass_spread_guard and yes_ask is not None and yes_ask > 0:
                     sl_spread = yes_ask - current_price
                     spread_wide = sl_spread > self.config.max_sl_spread
@@ -1437,6 +1544,18 @@ class TemperatureStrategy:
                 # Spread is tight — reset guard state and fire the stop-loss.
                 bracket._sl_held_for_spread = False
                 bracket._last_sl_held_log = 0
+                # For PANIC_FLATTEN, log with ask-centric details for auditability.
+                if is_panic_flatten:
+                    logger.warning(
+                        "sl.panic_trigger_evaluated",
+                        ticker=ticker,
+                        side="yes",
+                        best_ask_yes=yes_ask,
+                        stop_loss_price=self.config.stop_loss_price,
+                        units="cents",
+                        source=price_source,
+                        trigger_met=True,
+                    )
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
                                last_price=current_price, stop_loss=self.config.stop_loss_price,
                                reason=stop_loss_reason)
@@ -1444,9 +1563,12 @@ class TemperatureStrategy:
                     await self._increment_stop_loss_count_for_market(bracket.market_ticker)
                     bracket._stop_loss_counted = True
                 if self.config.enable_fast_sl_exit:
+                    # For PANIC_FLATTEN pass yes_ask as trigger_price (the ASK
+                    # that actually met the threshold); other modes use current_price.
+                    trigger_px = yes_ask if is_panic_flatten else current_price
                     await self._dispatch_stop_loss_exit(
                         bracket,
-                        trigger_price=current_price,
+                        trigger_price=trigger_px if trigger_px is not None else current_price,
                         trigger_source="phase_c",
                     )
                 else:
@@ -1457,7 +1579,7 @@ class TemperatureStrategy:
                         await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
                         bracket._stop_loss_counted = False
             else:
-                # Bid has recovered above the stop threshold — clear the spread
+                # Price has recovered above the stop threshold — clear the spread
                 # guard so a future re-trigger logs fresh.
                 if getattr(bracket, "_sl_held_for_spread", False):
                     bracket._sl_held_for_spread = False
