@@ -3162,3 +3162,448 @@ async def test_phase_c_ticker_key_consistency_regression(monkeypatch):
     assert price_check is not None
     assert price_check["price_source"] == "websocket"
     assert price_check["price"] == 80
+
+
+# ---------------------------------------------------------------------------
+# PANIC_FLATTEN stop-loss mode tests
+# ---------------------------------------------------------------------------
+
+def _make_panic_strategy(monkeypatch, executor=None, db=None, **extra_config):
+    """Helper: build a strategy configured for PANIC_FLATTEN mode."""
+    return make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        sl_exit_mode="PANIC_FLATTEN",
+        sl_panic_sell_price=1,
+        sl_panic_retry_ms=0,    # no sleep in tests
+        sl_panic_max_retries=3,
+        enable_fast_sl_exit=True,
+        **extra_config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_submits_at_panic_price(monkeypatch):
+    """PANIC_FLATTEN mode: first sell order must be at the configured panic price (1¢)."""
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="panic-sell-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    bracket._reconciliation_complete = True
+    strategy._reconciliation_complete = True
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=49,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # The first (and only) order must be placed at the panic price floor: 1¢
+    assert len(executor.orders) >= 1
+    first_order = executor.orders[0][0]
+    assert first_order.price == 1
+    assert first_order.side.name == "SELL_YES"
+    assert first_order.quantity == 2
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_retries_on_unfilled(monkeypatch):
+    """PANIC_FLATTEN mode: retries up to sl_panic_max_retries when unfilled."""
+    ticker = "KXLOWTBOS-26JUN23-B66.5"
+    executor = FakeExecutor()
+    call_count = 0
+
+    async def sell_yes(order):
+        nonlocal call_count
+        call_count += 1
+        executor.orders.append((order, None))
+        if call_count >= 2:
+            executor.positions = {}
+            return ExecutionResult(
+                success=True,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=order.price,
+                fill_quantity=order.quantity,
+                total_cost_cents=-(order.price * order.quantity),
+                order_id="panic-retry-id",
+                notes="filled",
+            )
+        # First call: unfilled
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            notes="unfilled",
+        )
+
+    executor.sell_yes = sell_yes
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=49,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # Both attempts must use the panic price (1¢)
+    assert call_count == 2
+    for order, _ in executor.orders:
+        assert order.price == 1
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_respects_max_retries(monkeypatch):
+    """PANIC_FLATTEN mode: stops retrying after sl_panic_max_retries attempts."""
+    ticker = "KXLOWTBOS-26JUN23-B67.5"
+    executor = FakeExecutor()
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        # Always unfilled
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            notes="unfilled",
+        )
+
+    executor.sell_yes = sell_yes
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    # max_retries=2 so only 2 sell attempts should be made
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        sl_exit_mode="PANIC_FLATTEN",
+        sl_panic_sell_price=1,
+        sl_panic_retry_ms=0,
+        sl_panic_max_retries=2,
+        enable_fast_sl_exit=True,
+        stop_loss_price=50,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=49,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert len(executor.orders) == 2
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_idempotency_suppresses_concurrent_triggers(monkeypatch):
+    """PANIC_FLATTEN mode: repeated trigger calls while a task is in-flight must
+    not launch a second exit task for the same ticker."""
+    ticker = "KXLOWTBOS-26JUN23-B68.5"
+    started = asyncio.Event()
+    release = asyncio.Event()
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        started.set()
+        await release.wait()
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="idempotent-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    # First dispatch creates a task and starts it
+    await strategy._dispatch_stop_loss_exit(bracket, trigger_price=49, trigger_source="test")
+    await started.wait()
+
+    # Second dispatch while first is in-flight: must be suppressed
+    await strategy._dispatch_stop_loss_exit(bracket, trigger_price=49, trigger_source="test")
+
+    release.set()
+    # Wait for the running task to finish
+    existing_task = strategy._sl_exit_tasks.get(ticker)
+    if existing_task is not None:
+        await existing_task
+
+    # Only one sell order must have been submitted
+    assert len(executor.orders) == 1
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_logs_panic_triggered_and_submit(monkeypatch):
+    """PANIC_FLATTEN mode: sl.panic_triggered and sl.panic_submit are logged."""
+    ticker = "KXLOWTBOS-26JUN23-B69.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="log-test-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=49,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    log_events = [event for event, _ in logged]
+    assert "sl.panic_triggered" in log_events
+    assert "sl.panic_submit" in log_events
+    # sl.panic_filled should also appear (position cleared)
+    assert "sl.panic_filled" in log_events
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_logs_retry_event(monkeypatch):
+    """PANIC_FLATTEN mode: sl.panic_retry is emitted for the second attempt."""
+    ticker = "KXLOWTBOS-26JUN23-B70.5"
+    executor = FakeExecutor()
+    call_count = 0
+
+    async def sell_yes(order):
+        nonlocal call_count
+        call_count += 1
+        executor.orders.append((order, None))
+        if call_count >= 2:
+            executor.positions = {}
+            return ExecutionResult(
+                success=True,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=order.price,
+                fill_quantity=order.quantity,
+                total_cost_cents=-(order.price * order.quantity),
+                order_id="retry-log-id",
+                notes="filled",
+            )
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            notes="unfilled",
+        )
+
+    executor.sell_yes = sell_yes
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    db = InMemoryDB()
+    logged = capture_logs(monkeypatch)
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=49,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    log_events = [event for event, _ in logged]
+    assert "sl.panic_retry" in log_events
+    retry_log = next(kw for event, kw in logged if event == "sl.panic_retry")
+    assert retry_log["retry_index"] == 1
+    assert retry_log["panic_price"] == 1
+
+
+@pytest.mark.asyncio
+async def test_aggressive_limit_mode_unchanged_when_panic_flatten_disabled(monkeypatch):
+    """Backward compat: when sl_exit_mode is not PANIC_FLATTEN, the existing
+    repricing ladder (_run_fast_sl_exit) is used, not the panic path."""
+    ticker = "KXLOWTBOS-26JUN23-B64.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+    executor.sell_success = True
+    db = InMemoryDB()
+
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        sl_exit_mode="AGGRESSIVE_LIMIT",
+        sl_exit_aggressive_offset_ticks=5,
+        sl_exit_max_slippage=20,
+        sl_exit_max_attempts=1,
+        sl_exit_retry_interval_ms=0,
+        enable_fast_sl_exit=True,
+        stop_loss_price=50,
+    )
+
+    run_panic_called = []
+    original_panic = strategy._run_panic_flatten_exit
+
+    async def spy_panic(*args, **kwargs):
+        run_panic_called.append(True)
+        return await original_panic(*args, **kwargs)
+
+    strategy._run_panic_flatten_exit = spy_panic
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    bracket.last_price = 49
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    await strategy._dispatch_stop_loss_exit(bracket, trigger_price=49, trigger_source="test")
+    task = strategy._sl_exit_tasks.get(ticker)
+    if task is not None:
+        await task
+
+    # Panic path must NOT have been called
+    assert run_panic_called == []
+    # A sell order should still have been placed via the AGGRESSIVE_LIMIT path
+    assert len(executor.orders) >= 1
+    # Price must be the ladder price (reference - offset), not the panic floor
+    first_order_price = executor.orders[0][0].price
+    assert first_order_price != 1 or strategy.config.sl_exit_aggressive_offset_ticks == 0

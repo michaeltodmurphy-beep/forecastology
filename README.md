@@ -102,10 +102,14 @@ Key variables:
 | `WS_URL` | Kalshi WebSocket URL |
 | `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
 | `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
+| `SL_EXIT_MODE` | Stop-loss exit strategy: `AGGRESSIVE_LIMIT` (default, repricing ladder) or `PANIC_FLATTEN` (immediate 1¢ floor sell) |
 | `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
 | `SL_EXIT_MAX_ATTEMPTS` | Max fast stop-loss attempts per trigger (default `3`) |
 | `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Initial sell-price offset (in ticks/cents) from trigger reference for marketable exits (default `2`) |
 | `SL_EXIT_MAX_SLIPPAGE` | Max total slippage (dollar format accepted) allowed for fast stop-loss repricing (default `0.20`) |
+| `SL_PANIC_SELL_PRICE` | Panic-flatten floor price in cents (default `1`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `FORECASTOLOGY_LOCKFILE` | Path to the run.py process lockfile (default `/tmp/forecastology.lock`) |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -254,10 +258,14 @@ Key variables:
 | `WS_URL` | Kalshi WebSocket URL |
 | `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
 | `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
+| `SL_EXIT_MODE` | Stop-loss exit strategy: `AGGRESSIVE_LIMIT` (default, repricing ladder) or `PANIC_FLATTEN` (immediate 1¢ floor sell) |
 | `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
 | `SL_EXIT_MAX_ATTEMPTS` | Max fast stop-loss attempts per trigger (default `3`) |
 | `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Initial sell-price offset (in ticks/cents) from trigger reference for marketable exits (default `2`) |
 | `SL_EXIT_MAX_SLIPPAGE` | Max total slippage (dollar format accepted) allowed for fast stop-loss repricing (default `0.20`) |
+| `SL_PANIC_SELL_PRICE` | Panic-flatten floor price in cents (default `1`). Sell placed at this price so Kalshi matches at best bid. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -319,21 +327,40 @@ With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the exact cap boundary
 High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
 
 ### Phase C — Position Management
-When stop-loss trigger conditions are met, the strategy now dispatches an immediate per-ticker async stop-loss worker (LIVE fast mode) so one ticker's exit path does not block others.
+When stop-loss trigger conditions are met, the strategy dispatches an immediate per-ticker async stop-loss worker so one ticker's exit path does not block others.
 
-Fast stop-loss behavior in LIVE:
+#### Stop-loss exit modes (`SL_EXIT_MODE`)
 
-- structured trigger/submit/fill telemetry logs (`sl.trigger_detected`, `sl.exit_submit_start`, `sl.exit_submitted`, `sl.exit_fill_observed`/`sl.exit_failed`)
-- aggressive marketable sell ladder relative to trigger price using `SL_EXIT_AGGRESSIVE_OFFSET_TICKS`
+**`AGGRESSIVE_LIMIT` (default)** — repricing ladder:
+
+- aggressive marketable sell relative to trigger price using `SL_EXIT_AGGRESSIVE_OFFSET_TICKS`
 - bounded repricing capped by `SL_EXIT_MAX_SLIPPAGE`
 - rapid per-ticker retries at `SL_EXIT_RETRY_INTERVAL_MS` up to `SL_EXIT_MAX_ATTEMPTS`
-- persistent idempotency via `OrderAction(action_key=f"{ticker}:STOP_LOSS")` to prevent duplicate active exits
+- structured logs: `sl.trigger_detected`, `sl.exit_submit_start`, `sl.exit_submitted`, `sl.exit_fill_observed` / `sl.exit_failed`
+
+**`PANIC_FLATTEN`** — immediate floor sell (recommended for LIVE):
+
+- on trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that Kalshi fills at the best available bid
+- no slow repricing ladder before the first submit: fill speed is prioritised over exit price
+- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price
+- per-ticker task idempotency: repeated triggers while an exit is in-flight are silently suppressed
+- structured logs: `sl.panic_triggered`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_filled` / `sl.panic_failed`
+- trade-off: fill speed is prioritised over exit price — you may receive less than 1¢; the intent is to get flat immediately
 
 Conservative mode remains available by setting `ENABLE_FAST_SL_EXIT=false` (default for PAPER).
 
-Recommended LIVE starting values:
+Recommended LIVE defaults (`PANIC_FLATTEN`):
 
 - `ENABLE_FAST_SL_EXIT=true`
+- `SL_EXIT_MODE=PANIC_FLATTEN`
+- `SL_PANIC_SELL_PRICE=1`
+- `SL_PANIC_RETRY_MS=250`
+- `SL_PANIC_MAX_RETRIES=5`
+
+Recommended LIVE defaults (`AGGRESSIVE_LIMIT`, backward-compatible):
+
+- `ENABLE_FAST_SL_EXIT=true`
+- `SL_EXIT_MODE=AGGRESSIVE_LIMIT`
 - `SL_EXIT_RETRY_INTERVAL_MS=250-300`
 - `SL_EXIT_MAX_ATTEMPTS=3`
 - `SL_EXIT_AGGRESSIVE_OFFSET_TICKS=2`

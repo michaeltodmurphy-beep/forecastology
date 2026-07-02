@@ -168,14 +168,22 @@ class TemperatureStrategy:
             trigger_source=trigger_source,
             trigger_ts_ms=trigger_ts_ms,
         )
-        task = asyncio.create_task(
-            self._run_fast_sl_exit(
+        sl_exit_mode = (self.config.sl_exit_mode or "AGGRESSIVE_LIMIT").upper()
+        if sl_exit_mode == "PANIC_FLATTEN":
+            coro = self._run_panic_flatten_exit(
                 bracket=bracket,
                 trigger_price=trigger_price,
                 trigger_source=trigger_source,
                 trigger_ts_ms=trigger_ts_ms,
             )
-        )
+        else:
+            coro = self._run_fast_sl_exit(
+                bracket=bracket,
+                trigger_price=trigger_price,
+                trigger_source=trigger_source,
+                trigger_ts_ms=trigger_ts_ms,
+            )
+        task = asyncio.create_task(coro)
         self._sl_exit_tasks[ticker] = task
 
         def _cleanup(_task: asyncio.Task) -> None:
@@ -226,6 +234,128 @@ class TemperatureStrategy:
             attempts=max_attempts,
             elapsed_ms=self._now_ms() - trigger_ts_ms,
             reason="max_attempts_exhausted",
+        )
+
+    async def _run_panic_flatten_exit(
+        self,
+        bracket: MarketBracket,
+        *,
+        trigger_price: int,
+        trigger_source: str,
+        trigger_ts_ms: int,
+    ) -> None:
+        """Panic-flatten exit: immediately sell at floor price to guarantee fill speed.
+
+        On trigger, submits a sell at ``sl_panic_sell_price`` (default 1¢) so
+        Kalshi matches at the best available bid rather than chasing the ladder.
+        Retries rapidly up to ``sl_panic_max_retries`` with ``sl_panic_retry_ms``
+        interval if the position is not fully cleared.
+        """
+        ticker = bracket.market_ticker
+        action_key = f"{ticker}:STOP_LOSS"
+        panic_price = max(1, int(self.config.sl_panic_sell_price or 1))
+        max_retries = max(int(self.config.sl_panic_max_retries or 1), 1)
+        retry_sleep_s = max(int(self.config.sl_panic_retry_ms or 0), 0) / 1000.0
+
+        logger.warning(
+            "sl.panic_triggered",
+            ticker=ticker,
+            action_key=action_key,
+            trigger_source=trigger_source,
+            panic_price=panic_price,
+            qty=bracket.position_quantity,
+            trigger_ts_ms=trigger_ts_ms,
+        )
+
+        for attempt in range(1, max_retries + 1):
+            current = self.active_positions.get(ticker)
+            if current is None or current.position_quantity <= 0:
+                logger.info(
+                    "sl.panic_filled",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="position_cleared",
+                )
+                return
+
+            if attempt == 1:
+                logger.warning(
+                    "sl.panic_submit",
+                    ticker=ticker,
+                    action_key=action_key,
+                    panic_price=panic_price,
+                    qty=current.position_quantity,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                )
+            else:
+                logger.warning(
+                    "sl.panic_retry",
+                    ticker=ticker,
+                    action_key=action_key,
+                    retry_index=attempt - 1,
+                    panic_price=panic_price,
+                    qty=current.position_quantity,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                )
+
+            try:
+                market_gone = await self._execute_stop_loss(
+                    current,
+                    override_price=panic_price,
+                    bypass_cooldown=True,
+                    trigger_ts_ms=trigger_ts_ms,
+                    attempt=attempt,
+                )
+            except Exception as exc:
+                logger.error(
+                    "sl.panic_failed",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    error=str(exc),
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="unexpected_error",
+                )
+                return
+
+            if market_gone:
+                logger.info(
+                    "sl.panic_filled",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="market_gone",
+                )
+                await self._decrement_stop_loss_count_for_market(current.market_ticker)
+                current._stop_loss_counted = False
+                return
+
+            if ticker not in self.active_positions:
+                logger.info(
+                    "sl.panic_filled",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="position_cleared",
+                )
+                return
+
+            if attempt < max_retries and retry_sleep_s > 0:
+                await asyncio.sleep(retry_sleep_s)
+
+        logger.warning(
+            "sl.panic_failed",
+            ticker=ticker,
+            action_key=action_key,
+            trigger_source=trigger_source,
+            panic_price=panic_price,
+            attempts=max_retries,
+            elapsed_ms=self._now_ms() - trigger_ts_ms,
+            reason="max_retries_exhausted",
         )
 
     async def _remove_active_position(self, ticker: str, bracket: MarketBracket):
