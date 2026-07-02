@@ -2665,6 +2665,40 @@ async def test_fast_sl_dispatch_is_idempotent_per_ticker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fast_sl_dispatch_logs_in_flight_suppression(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    strategy = make_strategy(monkeypatch, trading_mode="LIVE", enable_fast_sl_exit=True)
+    bracket = _make_held_bracket(ticker, "KXLOWTCHI")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_runner(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+
+    strategy._run_fast_sl_exit = fake_runner
+
+    await strategy._dispatch_stop_loss_exit(
+        bracket, trigger_price=40, trigger_source="phase_c"
+    )
+    await started.wait()
+    await strategy._dispatch_stop_loss_exit(
+        bracket, trigger_price=39, trigger_source="phase_c"
+    )
+
+    release.set()
+    await strategy._sl_exit_tasks[ticker]
+
+    suppressed = [kw for event, kw in logged if event == "sl.trigger_suppressed_in_flight"]
+    assert suppressed
+    assert suppressed[0]["action_key"] == f"{ticker}:STOP_LOSS"
+
+
+@pytest.mark.asyncio
 async def test_fast_sl_repricing_ladder_respects_slippage_cap(monkeypatch):
     ticker = "KXLOWTCHI-26JUN25-B62.5"
     strategy = make_strategy(
@@ -2771,6 +2805,61 @@ async def test_fast_sl_telemetry_logs_trigger_submit_and_fill(monkeypatch):
     assert filled["elapsed_ms"] >= 0
 
 
+@pytest.mark.asyncio
+async def test_fast_sl_logs_position_gone_for_market_not_found(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTCHI-26JUN25-B62.5"
+    executor = FakeExecutor()
+
+    async def sell_yes_market_gone(order):
+        executor.orders.append((order, None))
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            notes="market_not_found",
+        )
+
+    executor.sell_yes = sell_yes_market_gone
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        trading_mode="LIVE",
+        enable_fast_sl_exit=True,
+    )
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTCHI",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    bracket.last_price = 40
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    await strategy._execute_stop_loss(
+        bracket,
+        override_price=39,
+        bypass_cooldown=True,
+        trigger_ts_ms=strategy._now_ms(),
+        attempt=1,
+    )
+
+    position_gone = [kw for event, kw in logged if event == "sl.position_gone"]
+    assert position_gone
+    assert position_gone[0]["action_key"] == f"{ticker}:STOP_LOSS"
+    assert position_gone[0]["reason"] == "market_not_found"
+
+
 # ---------------------------------------------------------------------------
 # Fix 2: Startup reconciliation completeness + readiness gate
 # ---------------------------------------------------------------------------
@@ -2855,7 +2944,8 @@ async def test_reconciliation_logs_start_and_complete(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sl_watcher_transient_error_resets_for_retry():
-    """A TransientExecutionError resets exit_in_progress so the next tick retries."""
+    """A TransientExecutionError moves the watcher into RETRYING so its own
+    worker can retry without waiting for another strategy loop pass."""
     from execution.errors import TransientExecutionError
     from execution.sl_watcher import StopLossWatcher
 
@@ -2871,22 +2961,23 @@ async def test_sl_watcher_transient_error_resets_for_retry():
     watcher = StopLossWatcher(exit_handler)
     await watcher.register_position("T", side="yes", quantity=1, sl_price=35)
 
-    # First call: TransientExecutionError → exit_in_progress reset → returns False
     result1 = await watcher.on_market_update("T", 30)
-    assert result1 is False
+    assert result1 is True
+    await watcher._run_cycle_once()
+    await watcher._worker_tasks["T"]
+    assert watcher._positions["T"].state == "RETRYING"
     assert watcher._positions["T"].exit_in_progress is False
 
-    # Second call: handler succeeds
-    result2 = await watcher.on_market_update("T", 30)
-    assert result2 is True
+    await watcher._run_cycle_once()
+    await watcher._worker_tasks["T"]
     assert "T" not in watcher._positions
     assert calls == 2
 
 
 @pytest.mark.asyncio
 async def test_sl_watcher_permanent_error_resets_for_manual_recovery():
-    """A PermanentExecutionError resets exit_in_progress (to allow manual reconciliation)
-    but logs with error_class=permanent."""
+    """A PermanentExecutionError leaves the watcher in RETRYING so the dedicated
+    worker can continue polling instead of waiting on the main loop."""
     from execution.errors import PermanentExecutionError
     from execution.sl_watcher import StopLossWatcher
     import structlog.testing
@@ -2899,10 +2990,12 @@ async def test_sl_watcher_permanent_error_resets_for_manual_recovery():
 
     with structlog.testing.capture_logs() as cap:
         result = await watcher.on_market_update("T", 30)
+        await watcher._run_cycle_once()
+        await watcher._worker_tasks["T"]
 
-    assert result is False
-    # exit_in_progress reset so reconciliation/next cycle can re-attempt
+    assert result is True
     assert watcher._positions["T"].exit_in_progress is False
+    assert watcher._positions["T"].state == "RETRYING"
     # permanent failure log emitted
     perm_logs = [e for e in cap if e.get("log_level") == "error"
                  and "permanent" in str(e.get("event", ""))]
@@ -2911,8 +3004,8 @@ async def test_sl_watcher_permanent_error_resets_for_manual_recovery():
 
 @pytest.mark.asyncio
 async def test_sl_watcher_unknown_error_treated_as_transient():
-    """An unexpected exception is treated conservatively as transient
-    (exit_in_progress reset, position retried on next tick)."""
+    """An unexpected exception is treated conservatively as transient and moved
+    into RETRYING for the watcher worker."""
     from execution.sl_watcher import StopLossWatcher
 
     async def exit_handler(_ticker, _side, _qty, _ask):
@@ -2922,9 +3015,12 @@ async def test_sl_watcher_unknown_error_treated_as_transient():
     await watcher.register_position("T", side="yes", quantity=1, sl_price=35)
 
     result = await watcher.on_market_update("T", 30)
+    await watcher._run_cycle_once()
+    await watcher._worker_tasks["T"]
 
-    assert result is False
+    assert result is True
     assert watcher._positions["T"].exit_in_progress is False
+    assert watcher._positions["T"].state == "RETRYING"
 
 
 # ---------------------------------------------------------------------------
@@ -3487,8 +3583,8 @@ async def test_panic_flatten_logs_panic_triggered_and_submit(monkeypatch):
     log_events = [event for event, _ in logged]
     assert "sl.panic_triggered" in log_events
     assert "sl.panic_submit" in log_events
-    # sl.panic_filled should also appear (position cleared)
-    assert "sl.panic_filled" in log_events
+    # Terminal completion must also be logged when the position clears.
+    assert "sl.panic_filled" in log_events or "sl.position_gone" in log_events
 
 
 @pytest.mark.asyncio
@@ -3905,7 +4001,7 @@ async def test_panic_flatten_proceeds_on_stale_quote(monkeypatch):
 async def test_panic_flatten_retries_on_transient_exception(monkeypatch):
     """PANIC_FLATTEN mode: transient exceptions during submit are retried up to
     sl_panic_max_retries.  Each failed attempt logs sl.panic_submit_error and the
-    terminal failure logs sl.panic_failed with reason='max_retries_exhausted'."""
+    terminal failure logs sl.exit_retry_exhausted with reason='max_retries_exhausted'."""
     ticker = "KXLOWTBOS-26JUN23-B75.9"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
@@ -3950,7 +4046,7 @@ async def test_panic_flatten_retries_on_transient_exception(monkeypatch):
     assert len(error_logs) == 3
     assert all(kw.get("reason") == "submit_error" for kw in error_logs)
     # Terminal failure must be logged
-    failed_logs = [kw for event, kw in logged if event == "sl.panic_failed"]
+    failed_logs = [kw for event, kw in logged if event == "sl.exit_retry_exhausted"]
     assert any(kw.get("reason") == "max_retries_exhausted" for kw in failed_logs)
 
 

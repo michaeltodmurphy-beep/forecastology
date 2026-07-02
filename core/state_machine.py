@@ -1,10 +1,11 @@
 # core/state_machine.py
 import asyncio
 import datetime
+from dataclasses import dataclass
 import re
 import time
 import structlog
-from typing import Optional
+from typing import Literal, Optional
 from core.types import (
     Phase, MarketBracket, OrderRequest, OrderSide, OrderBook, OrderBookLevel,
 )
@@ -26,6 +27,7 @@ from sqlalchemy import select, delete, update
 
 logger = structlog.get_logger(__name__)
 SERIES_DATE_RE = re.compile(r"^(.+?)-(\d{2}[A-Z]{3}\d{2})-(?:T\d+|B\d+\.?\d*)$")
+StopLossCycleState = Literal["TRIGGERED", "SUBMITTING", "RETRYING", "TERMINAL"]
 
 
 def parse_series_and_date(market_ticker: str) -> Optional[tuple[str, str]]:
@@ -52,6 +54,14 @@ def _parse_date_prefix(date_prefix: str) -> Optional[datetime.date]:
         return datetime.date(year, month, day)
     except (ValueError, IndexError):
         return None
+
+
+@dataclass
+class StopLossCycle:
+    action_key: str
+    state: StopLossCycleState
+    trigger_source: str
+    trigger_ts_ms: int
 
 
 class TemperatureStrategy:
@@ -100,6 +110,7 @@ class TemperatureStrategy:
         # this is True to prevent acting on stale/incomplete in-memory state.
         self._reconciliation_complete = False
         self._sl_exit_tasks: dict[str, asyncio.Task] = {}
+        self._sl_cycles: dict[str, StopLossCycle] = {}
 
     @staticmethod
     def _first_non_none(*values):
@@ -146,6 +157,11 @@ class TemperatureStrategy:
         price = reference_price - offset - ((max(attempt, 1) - 1) * ladder_step)
         return max(1, min(99, max(price, floor_price)))
 
+    def _set_sl_cycle_state(self, ticker: str, state: StopLossCycleState) -> None:
+        cycle = self._sl_cycles.get(ticker)
+        if cycle is not None:
+            cycle.state = state
+
     async def _dispatch_stop_loss_exit(
         self,
         bracket: MarketBracket,
@@ -155,12 +171,25 @@ class TemperatureStrategy:
     ) -> None:
         ticker = bracket.market_ticker
         action_key = f"{ticker}:STOP_LOSS"
+        current_cycle = self._sl_cycles.get(ticker)
         existing_task = self._sl_exit_tasks.get(ticker)
         if existing_task is not None and not existing_task.done():
-            logger.info("sl.exit_dispatch_skipped", ticker=ticker, action_key=action_key)
+            logger.info(
+                "sl.trigger_suppressed_in_flight",
+                ticker=ticker,
+                action_key=action_key,
+                state=current_cycle.state if current_cycle is not None else "SUBMITTING",
+                trigger_source=trigger_source,
+            )
             return
 
         trigger_ts_ms = self._now_ms()
+        self._sl_cycles[ticker] = StopLossCycle(
+            action_key=action_key,
+            state="TRIGGERED",
+            trigger_source=trigger_source,
+            trigger_ts_ms=trigger_ts_ms,
+        )
         logger.info(
             "sl.trigger_detected",
             ticker=ticker,
@@ -190,6 +219,7 @@ class TemperatureStrategy:
             current = self._sl_exit_tasks.get(ticker)
             if current is _task:
                 self._sl_exit_tasks.pop(ticker, None)
+            self._sl_cycles.pop(ticker, None)
 
         task.add_done_callback(_cleanup)
 
@@ -208,7 +238,17 @@ class TemperatureStrategy:
         for attempt in range(1, max_attempts + 1):
             current = self.active_positions.get(ticker)
             if current is None or current.position_quantity <= 0:
+                self._set_sl_cycle_state(ticker, "TERMINAL")
+                logger.info(
+                    "sl.position_gone",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="position_missing",
+                )
                 return
+            self._set_sl_cycle_state(ticker, "SUBMITTING")
             reference_price = current.last_price if current.last_price is not None else trigger_price
             price = self._compute_fast_sl_exit_price(reference_price, attempt)
             market_gone = await self._execute_stop_loss(
@@ -219,15 +259,28 @@ class TemperatureStrategy:
                 attempt=attempt,
             )
             if market_gone:
+                self._set_sl_cycle_state(ticker, "TERMINAL")
                 await self._decrement_stop_loss_count_for_market(current.market_ticker)
                 current._stop_loss_counted = False
                 return
             if ticker not in self.active_positions:
+                self._set_sl_cycle_state(ticker, "TERMINAL")
+                logger.info(
+                    "sl.position_gone",
+                    ticker=ticker,
+                    action_key=action_key,
+                    attempt=attempt,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms,
+                    reason="position_cleared",
+                )
                 return
+            if attempt < max_attempts:
+                self._set_sl_cycle_state(ticker, "RETRYING")
             if attempt < max_attempts and retry_sleep_s > 0:
                 await asyncio.sleep(retry_sleep_s)
+        self._set_sl_cycle_state(ticker, "TERMINAL")
         logger.warning(
-            "sl.exit_failed",
+            "sl.exit_retry_exhausted",
             ticker=ticker,
             action_key=action_key,
             trigger_source=trigger_source,
@@ -282,13 +335,14 @@ class TemperatureStrategy:
         for attempt in range(1, max_retries + 1):
             current = self.active_positions.get(ticker)
             if current is None or current.position_quantity <= 0:
+                self._set_sl_cycle_state(ticker, "TERMINAL")
                 logger.info(
-                    "sl.panic_filled",
+                    "sl.position_gone",
                     ticker=ticker,
                     action_key=action_key,
                     attempt=attempt,
                     elapsed_ms=self._now_ms() - trigger_ts_ms,
-                    reason="position_cleared",
+                    reason="position_missing",
                 )
                 return
 
@@ -359,6 +413,7 @@ class TemperatureStrategy:
                     )
 
                     if not trigger_met_rv:
+                        self._set_sl_cycle_state(ticker, "TERMINAL")
                         logger.warning(
                             "sl.panic_revalidation_aborted",
                             ticker=ticker,
@@ -370,10 +425,19 @@ class TemperatureStrategy:
                             units="cents",
                             elapsed_ms=now_ms_rv - trigger_ts_ms,
                         )
+                        logger.warning(
+                            "sl.exit_failed",
+                            ticker=ticker,
+                            action_key=action_key,
+                            attempt=attempt,
+                            elapsed_ms=now_ms_rv - trigger_ts_ms,
+                            reason="ask_above_stop",
+                        )
                         return
             # ------------------------------------------------------------------
 
             if attempt == 1:
+                self._set_sl_cycle_state(ticker, "SUBMITTING")
                 logger.warning(
                     "sl.panic_submit",
                     ticker=ticker,
@@ -383,6 +447,7 @@ class TemperatureStrategy:
                     elapsed_ms=self._now_ms() - trigger_ts_ms,
                 )
             else:
+                self._set_sl_cycle_state(ticker, "RETRYING")
                 logger.warning(
                     "sl.panic_retry",
                     ticker=ticker,
@@ -416,6 +481,7 @@ class TemperatureStrategy:
                 continue
 
             if market_gone:
+                self._set_sl_cycle_state(ticker, "TERMINAL")
                 logger.info(
                     "sl.panic_filled",
                     ticker=ticker,
@@ -429,8 +495,9 @@ class TemperatureStrategy:
                 return
 
             if ticker not in self.active_positions:
+                self._set_sl_cycle_state(ticker, "TERMINAL")
                 logger.info(
-                    "sl.panic_filled",
+                    "sl.position_gone",
                     ticker=ticker,
                     action_key=action_key,
                     attempt=attempt,
@@ -442,8 +509,9 @@ class TemperatureStrategy:
             if attempt < max_retries and retry_sleep_s > 0:
                 await asyncio.sleep(retry_sleep_s)
 
+        self._set_sl_cycle_state(ticker, "TERMINAL")
         logger.warning(
-            "sl.panic_failed",
+            "sl.exit_retry_exhausted",
             ticker=ticker,
             action_key=action_key,
             trigger_source=trigger_source,
@@ -1758,6 +1826,12 @@ class TemperatureStrategy:
                 ticker=bracket.market_ticker,
                 action_key=action_key,
             )
+            logger.info(
+                "sl.trigger_suppressed_in_flight",
+                ticker=bracket.market_ticker,
+                action_key=action_key,
+                state="SUBMITTING",
+            )
             return False
 
         # Transition to SUBMITTED before API call so crash recovery knows a
@@ -1843,7 +1917,7 @@ class TemperatureStrategy:
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             if trigger_ts_ms is not None:
                 logger.info(
-                    "sl.exit_fill_observed",
+                    "sl.position_gone",
                     ticker=bracket.market_ticker,
                     action_key=action_key,
                     attempt=attempt,
@@ -2139,4 +2213,5 @@ class TemperatureStrategy:
             if not task.done():
                 task.cancel()
         self._sl_exit_tasks.clear()
+        self._sl_cycles.clear()
         logger.info("strategy.stopped")

@@ -42,6 +42,7 @@ class AppConfig(BaseSettings):
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
     enable_fast_sl_exit: bool | None = None
+    sl_worker_interval_ms: int = 250
     sl_exit_retry_interval_ms: int = 300
     sl_exit_max_attempts: int = 3
     sl_exit_aggressive_offset_ticks: int = 2
