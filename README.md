@@ -115,6 +115,32 @@ Key variables:
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
+| `LOW_TRADES` | `yes` (default) / `no` — set to `no` to disable new **Low** ticker entries (existing positions still managed) |
+| `HIGH_TRADES` | `yes` (default) / `no` — set to `no` to disable new **High** ticker entries (existing positions still managed) |
+| `ENABLE_LOCAL_SETTLE_GATE` | `true` (default) / `false` — enable city-local-time entry gate; blocks new buys before the city's local rollover time |
+| `DEFAULT_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for all cities except Phoenix (default `01:00`) |
+| `PHOENIX_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for Phoenix (default `00:00`; Phoenix observes Mountain Standard Time year-round, no DST) |
+
+### City-local-time entry settle gate
+
+Kalshi settles temperature markets overnight.  By default (`ENABLE_LOCAL_SETTLE_GATE=true`) the bot will **not** open new positions until the city's local clock has passed the configured rollover threshold:
+
+| City group | Example cities | Threshold |
+|---|---|---|
+| Eastern Time | Atlanta, Boston, Miami, New York City, Philadelphia, Washington DC | 01:00 ET |
+| Central Time | Austin, Chicago, Dallas, Houston, Minneapolis, New Orleans, Oklahoma City, San Antonio | 01:00 CT |
+| Mountain Time | Denver | 01:00 MT |
+| Mountain Standard Time (no DST) | **Phoenix** | **00:00 MST** |
+| Pacific Time | Las Vegas, Los Angeles, San Francisco, Seattle | 01:00 PT |
+
+**Behavior examples**:
+
+- NYC at 12:59 AM ET → new buys **blocked** (logs `entry.blocked_local_settle_gate`)
+- NYC at 01:00 AM ET → new buys **allowed**
+- Phoenix at 11:59 PM MST → new buys **blocked**
+- Phoenix at 00:00 AM MST → new buys **allowed**
+
+**This gate applies to new entry orders only.**  Stop-loss execution, panic exits, sell paths, and all position management continue 24/7 regardless of this setting.
 
 ## Running
 

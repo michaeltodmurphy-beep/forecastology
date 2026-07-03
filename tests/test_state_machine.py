@@ -4410,3 +4410,158 @@ async def test_trade_toggle_does_not_affect_sl_exit_for_existing_positions(monke
 
     # SL should fire even though high_trades=False
     strategy._execute_stop_loss.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests for city-local-time entry settle gate (ENABLE_LOCAL_SETTLE_GATE)
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo as _ZoneInfo  # type: ignore[no-redef]
+
+from core.local_time_gate import is_entry_allowed as _is_entry_allowed
+
+
+def _gate_at_utc(blocked_utc: _dt.datetime):
+    """Return a gate function that always uses the given fixed UTC time."""
+    return lambda ticker, config, now_utc=None: _is_entry_allowed(
+        ticker, config, now_utc=blocked_utc
+    )
+
+
+@pytest.mark.asyncio
+async def test_settle_gate_blocks_entry_before_threshold(monkeypatch):
+    """Gate enabled + local time before threshold → entry blocked, log emitted."""
+    import core.state_machine as _sm
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, enable_local_settle_gate=True,
+                             default_entry_start_local="01:00")
+
+    ticker = "KXLOWTNYC-26JUN25-B72"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTNYC")
+    strategy.cache.update_quote(ticker, 82, 82)   # spread=0 → would normally buy
+    strategy._execute_entry = AsyncMock()
+
+    # 04:30 UTC = 00:30 EDT (UTC-4 in summer) → before 01:00 threshold → blocked
+    blocked_utc = _dt.datetime(2025, 6, 26, 4, 30, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(_sm, "is_entry_allowed", _gate_at_utc(blocked_utc))
+
+    await strategy._evaluate_watchlist()
+
+    assert strategy._execute_entry.await_count == 0
+    gate_logs = [kw for event, kw in logged if event == "entry.blocked_local_settle_gate"]
+    assert len(gate_logs) == 1
+    assert gate_logs[0]["ticker"] == ticker
+    assert gate_logs[0]["timezone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_settle_gate_allows_entry_at_threshold(monkeypatch):
+    """Gate enabled + local time at/after threshold → entry proceeds."""
+    import core.state_machine as _sm
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, enable_local_settle_gate=True,
+                             default_entry_start_local="01:00")
+
+    ticker = "KXLOWTNYC-26JUN25-B72"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTNYC")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    # 05:00 UTC = 01:00 EDT → at threshold → allowed
+    allowed_utc = _dt.datetime(2025, 6, 26, 5, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(_sm, "is_entry_allowed", _gate_at_utc(allowed_utc))
+
+    await strategy._evaluate_watchlist()
+
+    assert strategy._execute_entry.await_count == 1
+    gate_logs = [kw for event, kw in logged if event == "entry.blocked_local_settle_gate"]
+    assert gate_logs == []
+
+
+@pytest.mark.asyncio
+async def test_settle_gate_disabled_does_not_block(monkeypatch):
+    """Gate disabled → entry proceeds even when local time would be before threshold."""
+    import core.state_machine as _sm
+    strategy = make_strategy(monkeypatch, enable_local_settle_gate=False)
+
+    ticker = "KXLOWTNYC-26JUN25-B72"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTNYC")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    # 04:30 UTC = 00:30 EDT — would be blocked if gate were on
+    blocked_utc = _dt.datetime(2025, 6, 26, 4, 30, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(_sm, "is_entry_allowed", _gate_at_utc(blocked_utc))
+
+    await strategy._evaluate_watchlist()
+
+    assert strategy._execute_entry.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_settle_gate_does_not_affect_sl_exit(monkeypatch):
+    """Gate enabled (blocked time) must NOT prevent stop-loss for existing positions."""
+    import core.state_machine as _sm
+    ticker = "KXLOWTNYC-26JUN25-B72"
+    executor = FakeExecutor()
+    executor.sell_success = True
+    strategy = make_strategy(monkeypatch, executor=executor,
+                             enable_local_settle_gate=True,
+                             default_entry_start_local="01:00")
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTNYC",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    strategy._execute_stop_loss = AsyncMock()
+    strategy.cache.update_quote(ticker, 30, 35)
+    strategy.config.stop_loss_price = 50  # above ask=35 → triggers
+
+    # Inject a "blocked" UTC time (00:30 ET) — SL must still fire
+    blocked_utc = _dt.datetime(2025, 6, 26, 4, 30, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(_sm, "is_entry_allowed", _gate_at_utc(blocked_utc))
+
+    await strategy._evaluate_held_positions()
+
+    # SL must fire regardless of the gate
+    strategy._execute_stop_loss.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_settle_gate_phoenix_midnight_rule(monkeypatch):
+    """Phoenix uses 00:00 threshold; at 07:00 UTC (= 00:00 Phoenix) → allowed."""
+    import core.state_machine as _sm
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch,
+                             enable_local_settle_gate=True,
+                             default_entry_start_local="01:00",
+                             phoenix_entry_start_local="00:00")
+
+    ticker = "KXHIGHTPHX-26JUN25-T110"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXHIGHTPHX")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    # 07:00 UTC = 00:00 Phoenix (MST = UTC-7, no DST)
+    phx_midnight_utc = _dt.datetime(2025, 6, 26, 7, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(_sm, "is_entry_allowed", _gate_at_utc(phx_midnight_utc))
+
+    await strategy._evaluate_watchlist()
+
+    assert strategy._execute_entry.await_count == 1
+    gate_logs = [kw for event, kw in logged if event == "entry.blocked_local_settle_gate"]
+    assert gate_logs == []

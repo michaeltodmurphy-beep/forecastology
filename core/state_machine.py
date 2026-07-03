@@ -10,6 +10,7 @@ from core.types import (
     Phase, MarketBracket, OrderRequest, OrderSide, OrderBook, OrderBookLevel,
 )
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
+from core.local_time_gate import is_entry_allowed
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -657,6 +658,9 @@ class TemperatureStrategy:
                      mode=self.config.trading_mode,
                      low_trades=self.config.low_trades,
                      high_trades=self.config.high_trades,
+                     enable_local_settle_gate=self.config.enable_local_settle_gate,
+                     default_entry_start_local=self.config.default_entry_start_local,
+                     phoenix_entry_start_local=self.config.phoenix_entry_start_local,
                      restored_positions=len(self.active_positions))
 
         # Start DB cleanup task (runs hourly)
@@ -1136,6 +1140,13 @@ class TemperatureStrategy:
                 if is_low and not self.config.low_trades:
                     logger.info("phase.b.entry_blocked_by_config",
                                 ticker=ticker, reason="LOW_TRADES=no")
+                    continue
+                # -----------------------------------
+
+                # --- City-local-time settle gate ---
+                gate_ok, gate_ctx = is_entry_allowed(ticker, self.config)
+                if not gate_ok:
+                    logger.info("entry.blocked_local_settle_gate", **gate_ctx)
                     continue
                 # -----------------------------------
 
