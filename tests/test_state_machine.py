@@ -4271,3 +4271,142 @@ async def test_panic_flatten_zero_bid_no_trigger_when_ask_above_stop(monkeypatch
     # Must not trigger: ask > stop
     strategy._execute_stop_loss.assert_not_awaited()
     assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+
+
+# ---------------------------------------------------------------------------
+# Tests for LOW_TRADES / HIGH_TRADES entry-toggle flags
+# ---------------------------------------------------------------------------
+
+def _make_entry_bracket(ticker: str, series: str) -> MarketBracket:
+    return MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker=series,
+        bracket_label="test",
+        phase=Phase.MONITORING,
+    )
+
+
+@pytest.mark.asyncio
+async def test_trade_toggle_both_enabled_allows_low_and_high(monkeypatch):
+    """low_trades=True, high_trades=True -> both LOW and HIGH entries proceed."""
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, low_trades=True, high_trades=True)
+
+    low_ticker = "KXLOWTBOS-26JUN22-B52.5"
+    high_ticker = "KXHIGHLAX-26JUN22-B71.5"
+    strategy.brackets[low_ticker] = _make_entry_bracket(low_ticker, "KXLOWTBOS")
+    strategy.brackets[high_ticker] = _make_entry_bracket(high_ticker, "KXHIGHLAX")
+    strategy.cache.update_quote(low_ticker, 82, 82)   # spread=0 -> buys
+    strategy.cache.update_quote(high_ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert blocked == [], "No entries should be blocked when both toggles are yes"
+    assert strategy._execute_entry.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_trade_toggle_high_disabled_blocks_high_allows_low(monkeypatch):
+    """low_trades=True, high_trades=False -> HIGH entry blocked, LOW entry proceeds."""
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, low_trades=True, high_trades=False)
+
+    low_ticker = "KXLOWTBOS-26JUN22-B52.5"
+    high_ticker = "KXHIGHLAX-26JUN22-B71.5"
+    strategy.brackets[low_ticker] = _make_entry_bracket(low_ticker, "KXLOWTBOS")
+    strategy.brackets[high_ticker] = _make_entry_bracket(high_ticker, "KXHIGHLAX")
+    strategy.cache.update_quote(low_ticker, 82, 82)
+    strategy.cache.update_quote(high_ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert len(blocked) == 1
+    assert blocked[0]["ticker"] == high_ticker
+    assert "HIGH_TRADES" in blocked[0]["reason"]
+    assert strategy._execute_entry.await_count == 1
+    called_ticker = strategy._execute_entry.call_args[0][0].market_ticker
+    assert called_ticker == low_ticker
+
+
+@pytest.mark.asyncio
+async def test_trade_toggle_low_disabled_blocks_low_allows_high(monkeypatch):
+    """low_trades=False, high_trades=True -> LOW entry blocked, HIGH entry proceeds."""
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, low_trades=False, high_trades=True)
+
+    low_ticker = "KXLOWTBOS-26JUN22-B52.5"
+    high_ticker = "KXHIGHLAX-26JUN22-B71.5"
+    strategy.brackets[low_ticker] = _make_entry_bracket(low_ticker, "KXLOWTBOS")
+    strategy.brackets[high_ticker] = _make_entry_bracket(high_ticker, "KXHIGHLAX")
+    strategy.cache.update_quote(low_ticker, 82, 82)
+    strategy.cache.update_quote(high_ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert len(blocked) == 1
+    assert blocked[0]["ticker"] == low_ticker
+    assert "LOW_TRADES" in blocked[0]["reason"]
+    assert strategy._execute_entry.await_count == 1
+    called_ticker = strategy._execute_entry.call_args[0][0].market_ticker
+    assert called_ticker == high_ticker
+
+
+@pytest.mark.asyncio
+async def test_trade_toggle_both_disabled_blocks_all_entries(monkeypatch):
+    """low_trades=False, high_trades=False -> both entries blocked."""
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, low_trades=False, high_trades=False)
+
+    low_ticker = "KXLOWTBOS-26JUN22-B52.5"
+    high_ticker = "KXHIGHLAX-26JUN22-B71.5"
+    strategy.brackets[low_ticker] = _make_entry_bracket(low_ticker, "KXLOWTBOS")
+    strategy.brackets[high_ticker] = _make_entry_bracket(high_ticker, "KXHIGHLAX")
+    strategy.cache.update_quote(low_ticker, 82, 82)
+    strategy.cache.update_quote(high_ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert len(blocked) == 2
+    assert strategy._execute_entry.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_trade_toggle_does_not_affect_sl_exit_for_existing_positions(monkeypatch):
+    """HIGH_TRADES=no must NOT prevent stop-loss execution for existing HIGH positions."""
+    ticker = "KXHIGHLAX-26JUN22-B71.5"
+    executor = FakeExecutor()
+    executor.sell_success = True
+    strategy = make_strategy(monkeypatch, executor=executor, high_trades=False)
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHLAX",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=82,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+
+    # Mock _execute_stop_loss to track if it gets called
+    strategy._execute_stop_loss = AsyncMock()
+    # Cache a price at or below stop-loss to trigger SL evaluation
+    strategy.cache.update_quote(ticker, 40, 50)
+    strategy.config.stop_loss_price = 50
+
+    await strategy._evaluate_held_positions()
+
+    # SL should fire even though high_trades=False
+    strategy._execute_stop_loss.assert_awaited_once()
