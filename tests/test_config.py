@@ -1,10 +1,10 @@
-"""Tests for app/config.py — verifies .env loading works."""
+"""Tests for app/config.py - verifies .env loading works."""
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 os.environ['KALSHI_API_KEY'] = 'test_key'
 os.environ['KALSHI_PRIVATE_KEY_PATH'] = './test_key.pem'
-os.environ['MYSQL_DATABASE_URL'] = 'mysql+aiomysql://user:pass@localhost:3306/test'
+os.environ['MYSQL_DATABASE_URL'] = '******localhost:3306/test'
 os.environ['TRADING_MODE'] = 'PAPER'
 os.environ['BUY_TRIGGER_PRICE'] = '0.82'
 os.environ['HEDGE_TRIGGER_PRICE'] = '0.48'
@@ -52,3 +52,85 @@ class TestAppConfig:
             stop_loss_price=35,
         )
         assert cfg.enable_fast_sl_exit is True
+
+
+class TestTradeToggles:
+    """Tests for LOW_TRADES / HIGH_TRADES env-var config flags."""
+
+    def setup_method(self):
+        # Remove any leftover toggle env vars before each test
+        for key in ("LOW_TRADES", "HIGH_TRADES"):
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        for key in ("LOW_TRADES", "HIGH_TRADES"):
+            os.environ.pop(key, None)
+
+    def test_defaults_to_true_when_env_vars_missing(self):
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is True
+        assert cfg.high_trades is True
+
+    def test_yes_values_enable_both(self):
+        os.environ['LOW_TRADES'] = 'yes'
+        os.environ['HIGH_TRADES'] = 'yes'
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is True
+        assert cfg.high_trades is True
+
+    def test_no_disables_low(self):
+        os.environ['LOW_TRADES'] = 'no'
+        os.environ['HIGH_TRADES'] = 'yes'
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is False
+        assert cfg.high_trades is True
+
+    def test_no_disables_high(self):
+        os.environ['LOW_TRADES'] = 'yes'
+        os.environ['HIGH_TRADES'] = 'no'
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is True
+        assert cfg.high_trades is False
+
+    def test_no_disables_both(self):
+        os.environ['LOW_TRADES'] = 'no'
+        os.environ['HIGH_TRADES'] = 'no'
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is False
+        assert cfg.high_trades is False
+
+    def test_case_insensitive_YES(self):
+        os.environ['LOW_TRADES'] = 'YES'
+        os.environ['HIGH_TRADES'] = 'NO'
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is True
+        assert cfg.high_trades is False
+
+    def test_invalid_value_defaults_to_true(self):
+        """An unrecognized value must fail safe (default True) without raising."""
+        os.environ['LOW_TRADES'] = 'maybe'
+        os.environ['HIGH_TRADES'] = 'off'
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_trades is True
+        assert cfg.high_trades is True
+
+    def test_parse_yes_no_helper_directly(self):
+        from app.config import _parse_trade_toggle
+        assert _parse_trade_toggle("yes", "X") is True
+        assert _parse_trade_toggle("YES", "X") is True
+        assert _parse_trade_toggle("true", "X") is True
+        assert _parse_trade_toggle("1", "X") is True
+        assert _parse_trade_toggle("no", "X") is False
+        assert _parse_trade_toggle("NO", "X") is False
+        assert _parse_trade_toggle("false", "X") is False
+        assert _parse_trade_toggle("0", "X") is False
+        assert _parse_trade_toggle(None, "X") is True
+        assert _parse_trade_toggle("", "X") is True
+        assert _parse_trade_toggle("garbage", "X") is True  # fail safe

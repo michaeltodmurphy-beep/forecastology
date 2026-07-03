@@ -1,10 +1,38 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
 import os
+import structlog
 from dotenv import load_dotenv
 from pydantic import field_validator, model_validator
 
 load_dotenv()
+
+logger = structlog.get_logger(__name__)
+
+
+def _parse_trade_toggle(raw: str | None, name: str, default: bool = True) -> bool:
+    """Parse a yes/no trade-direction toggle from an env-var string.
+
+    Accepted truthy  : 'yes', 'true', '1'  (case-insensitive)
+    Accepted falsy   : 'no',  'false', '0' (case-insensitive)
+    Missing / empty  : returns *default* (True)
+    Anything else    : logs a warning and returns *default* (True – fail safe)
+    """
+    if not raw or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in ("yes", "true", "1"):
+        return True
+    if normalized in ("no", "false", "0"):
+        return False
+    logger.warning(
+        "config.trade_toggle_invalid",
+        name=name,
+        raw=raw,
+        fallback=default,
+        message=f"Unrecognized value for {name}='{raw}'; defaulting to {'yes' if default else 'no'}",
+    )
+    return default
 
 
 class AppConfig(BaseSettings):
@@ -38,6 +66,12 @@ class AppConfig(BaseSettings):
     hedge_trigger_price: int = 0
     hedge_buy: int = 0
     dry_run: bool = False
+    # Trade-direction toggles.  Set LOW_TRADES=no or HIGH_TRADES=no in .env
+    # to disable new entry placement for the respective city-temperature family.
+    # Existing open positions are always fully managed (SL/exit) regardless of
+    # these flags.  Parsed by from_env() via _parse_trade_toggle().
+    low_trades: bool = True
+    high_trades: bool = True
     held_position_price_refresh_seconds: int = 10
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
@@ -106,4 +140,6 @@ class AppConfig(BaseSettings):
         """
         dry_run_raw = os.getenv("DRY_RUN", "")
         dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
-        return cls(dry_run=dry_run)
+        low_trades = _parse_trade_toggle(os.getenv("LOW_TRADES"), "LOW_TRADES", default=True)
+        high_trades = _parse_trade_toggle(os.getenv("HIGH_TRADES"), "HIGH_TRADES", default=True)
+        return cls(dry_run=dry_run, low_trades=low_trades, high_trades=high_trades)

@@ -655,6 +655,8 @@ class TemperatureStrategy:
                      spread_monitor=self.config.spread_monitor_price,
                      stop_loss=self.config.stop_loss_price,
                      mode=self.config.trading_mode,
+                     low_trades=self.config.low_trades,
+                     high_trades=self.config.high_trades,
                      restored_positions=len(self.active_positions))
 
         # Start DB cleanup task (runs hourly)
@@ -1123,6 +1125,20 @@ class TemperatureStrategy:
                 continue
 
             if spread <= self.config.minimum_spread:
+                # --- Trade-direction toggle gate ---
+                ticker_upper = ticker.upper()
+                is_high = "KXHIGH" in ticker_upper
+                is_low = "KXLOW" in ticker_upper
+                if is_high and not self.config.high_trades:
+                    logger.info("phase.b.entry_blocked_by_config",
+                                ticker=ticker, reason="HIGH_TRADES=no")
+                    continue
+                if is_low and not self.config.low_trades:
+                    logger.info("phase.b.entry_blocked_by_config",
+                                ticker=ticker, reason="LOW_TRADES=no")
+                    continue
+                # -----------------------------------
+
                 bracket.crossed_buy = True
                 spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
                 logger.info("phase.b.buying", ticker=ticker,
