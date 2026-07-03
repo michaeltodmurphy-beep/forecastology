@@ -72,6 +72,19 @@ class AppConfig(BaseSettings):
     # these flags.  Parsed by from_env() via _parse_trade_toggle().
     low_trades: bool = True
     high_trades: bool = True
+    # ── City-local-time entry settle gate ───────────────────────────────────
+    # Prevents new buy orders from being placed before the city's local clock
+    # reaches the threshold.  Kalshi settles temperature markets overnight, so
+    # entries before rollover would be for the *prior* settlement day.
+    #
+    # ENABLE_LOCAL_SETTLE_GATE=true|false  (default: true)
+    # DEFAULT_ENTRY_START_LOCAL=HH:MM      (default: 01:00; all cities except PHX)
+    # PHOENIX_ENTRY_START_LOCAL=HH:MM      (default: 00:00; Phoenix MST no DST)
+    #
+    # Parsed by from_env().  Does NOT affect SL/exit/position management paths.
+    enable_local_settle_gate: bool = True
+    default_entry_start_local: str = "01:00"
+    phoenix_entry_start_local: str = "00:00"
     held_position_price_refresh_seconds: int = 10
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
@@ -142,4 +155,16 @@ class AppConfig(BaseSettings):
         dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
         low_trades = _parse_trade_toggle(os.getenv("LOW_TRADES"), "LOW_TRADES", default=True)
         high_trades = _parse_trade_toggle(os.getenv("HIGH_TRADES"), "HIGH_TRADES", default=True)
-        return cls(dry_run=dry_run, low_trades=low_trades, high_trades=high_trades)
+        enable_local_settle_gate = _parse_trade_toggle(
+            os.getenv("ENABLE_LOCAL_SETTLE_GATE"), "ENABLE_LOCAL_SETTLE_GATE", default=True
+        )
+        default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
+        phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
+        return cls(
+            dry_run=dry_run,
+            low_trades=low_trades,
+            high_trades=high_trades,
+            enable_local_settle_gate=enable_local_settle_gate,
+            default_entry_start_local=default_entry_start_local,
+            phoenix_entry_start_local=phoenix_entry_start_local,
+        )
