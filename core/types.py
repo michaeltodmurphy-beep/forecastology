@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+import uuid
 
 
 class Phase(Enum):
@@ -16,6 +17,17 @@ class Phase(Enum):
 class OrderSide(Enum):
     BUY_YES = "buy"
     SELL_YES = "sell"
+
+
+APP_CLIENT_ORDER_PREFIX = "APP_"
+
+
+def ensure_app_client_order_id(client_order_id: Optional[str] = None) -> str:
+    if not client_order_id:
+        return f"{APP_CLIENT_ORDER_PREFIX}{uuid.uuid4().hex}"
+    if client_order_id.startswith(APP_CLIENT_ORDER_PREFIX):
+        return client_order_id
+    return f"{APP_CLIENT_ORDER_PREFIX}{client_order_id}"
 
 
 @dataclass
@@ -85,9 +97,7 @@ class OrderRequest:
         # side: "bid" for buying YES, "ask" for selling YES
         # price: string dollars (e.g. "0.8900"), count: string (e.g. "1.00")
         kalshi_side = "bid" if self.side == OrderSide.BUY_YES else "ask"
-        if not self.client_order_id:
-            import uuid
-            self.client_order_id = str(uuid.uuid4())
+        self.client_order_id = ensure_app_client_order_id(self.client_order_id)
         
         # For buys: use max_price if given (allows crossing the spread to get filled)
         # For sells: use the actual price

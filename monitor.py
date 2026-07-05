@@ -30,6 +30,7 @@ from app.config import AppConfig
 from app.signing import load_private_key, build_auth_headers
 from app.database import DatabaseManager
 from app.models import Position as PositionModel, ExecutedTrade, TradeAction, TradeStatus
+from core.types import ensure_app_client_order_id
 from sqlalchemy import select, delete, update
 
 logger = structlog.get_logger(__name__)
@@ -137,7 +138,7 @@ async def _buy_hedge(
     """Buy a hedge bracket at the given price with max_price for fill guarantee."""
     private_key = load_private_key(config.kalshi_private_key_path)
     max_price = 90
-    order_id = str(uuid.uuid4())
+    order_id = ensure_app_client_order_id(str(uuid.uuid4()))
     price_str = f"{price_cents / 100:.4f}"
     max_price_str = f"{max_price / 100:.4f}"
     payload = {

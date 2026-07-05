@@ -699,7 +699,13 @@ async def test_entry_self_heal_from_fills_updates_avg_entry(monkeypatch):
             )
         ]
     )
-    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="LIVE")
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        trading_mode="LIVE",
+        manage_external_positions=True,
+    )
     bracket = MarketBracket(
         market_ticker=ticker,
         event_ticker="EVT1",
@@ -722,7 +728,7 @@ async def test_entry_self_heal_from_fills_updates_avg_entry(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_untracked_fill_is_adopted_to_holding(monkeypatch):
+async def test_untracked_fill_is_classified_external_by_default(monkeypatch):
     logged = capture_logs(monkeypatch)
     ticker = "KXLOWTOKC-26JUN26-B72.5"
     executor = FakeExecutor()
@@ -742,21 +748,27 @@ async def test_untracked_fill_is_adopted_to_holding(monkeypatch):
 
     await strategy._evaluate_held_positions()
 
-    assert bracket.phase == Phase.HOLDING
-    assert bracket.position_quantity == 5
-    assert bracket.avg_entry == 90
-    assert ticker in strategy.active_positions
-    assert db.store[PositionModel][0].quantity == 5
-    assert db.store[PositionModel][0].avg_entry_price == 90
-    assert any(event == "phase.b.untracked_fill_adopted" for event, _ in logged)
+    assert bracket.phase == Phase.MONITORING
+    assert ticker not in strategy.active_positions
+    assert db.store[PositionModel] == []
+    ownership_logs = [kwargs for event, kwargs in logged if event == "ownership.classified"]
+    assert ownership_logs
+    assert ownership_logs[-1]["ticker"] == ticker
+    assert ownership_logs[-1]["app_owned_qty"] == 0
+    assert ownership_logs[-1]["external_qty"] == 5
 
 
 @pytest.mark.asyncio
-async def test_adopted_fill_then_stop_loss_protects(monkeypatch):
+async def test_manage_external_positions_true_preserves_legacy_adoption(monkeypatch):
     ticker = "KXLOWTOKC-26JUN26-B72.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 90}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=50,
+        manage_external_positions=True,
+    )
     strategy._execute_stop_loss = AsyncMock(return_value=False)
     bracket = MarketBracket(
         market_ticker=ticker,
@@ -782,7 +794,13 @@ async def test_adoption_is_idempotent(monkeypatch):
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 90}}
     db = InMemoryDB()
-    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=0)
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        stop_loss_price=0,
+        manage_external_positions=True,
+    )
     strategy._execute_stop_loss = AsyncMock()
     bracket = MarketBracket(
         market_ticker=ticker,
@@ -824,7 +842,13 @@ async def test_restore_positions_uses_db_cost_basis_when_api_entry_missing(monke
             )
         ]
     )
-    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="LIVE")
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        trading_mode="LIVE",
+        manage_external_positions=True,
+    )
 
     await strategy._restore_positions()
 
@@ -877,6 +901,90 @@ async def test_stop_loss_sells_when_ask_at_threshold(monkeypatch):
     assert executor.orders[0][0].side.name == "SELL_YES"
     assert executor.orders[0][0].quantity == 2
     assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_mixed_position_exit_is_capped_to_app_owned_qty(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        executor.orders.append((order, None))
+        executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="sell-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = sell_yes
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=5,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._set_ownership(
+        ticker,
+        total_position_qty=5,
+        app_owned_qty=2,
+        source="test",
+        action="seed",
+    )
+
+    await strategy._execute_stop_loss(bracket)
+
+    assert executor.orders
+    assert executor.orders[0][0].quantity == 2
+    assert strategy._app_owned_qty[ticker] == 0
+    assert any(event == "exit.capped_to_app_owned" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_external_only_position_skip_exit_when_default_config(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    executor = FakeExecutor()
+    executor.sell_yes = AsyncMock()
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=4,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._set_ownership(
+        ticker,
+        total_position_qty=4,
+        app_owned_qty=0,
+        source="test",
+        action="seed",
+    )
+
+    await strategy._execute_stop_loss(bracket)
+
+    executor.sell_yes.assert_not_awaited()
+    assert any(event == "exit.skipped_no_app_qty" for event, _ in logged)
 
 
 @pytest.mark.asyncio
@@ -2429,7 +2537,13 @@ async def test_restore_live_positions_registers_with_sl_watcher(monkeypatch):
     executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 85}}
 
     db = InMemoryDB()
-    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="LIVE")
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        db=db,
+        trading_mode="LIVE",
+        manage_external_positions=True,
+    )
 
     from execution.sl_watcher import StopLossWatcher
     async def _noop_exit(ticker, side, qty, ask):

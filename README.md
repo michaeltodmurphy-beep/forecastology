@@ -294,9 +294,19 @@ Key variables:
 | `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for pre-submit revalidation (default `30000`). Set to `0` to disable. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
+| `MANAGE_EXTERNAL_POSITIONS` | Ownership safety switch. Default `false`: only APP-owned quantity is managed; manual/external quantity is never sold by stop-loss/exit logic. Set `true` only for legacy/emergency aggregate-position behavior. |
 | `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
+
+### Trade ownership model (APP vs manual)
+
+- Every app-submitted order uses a client order id with `APP_` prefix (`APP_<uuid>`).
+- Position ownership is partitioned per ticker:
+  - `app_owned`: quantity attributable to app-tracked holdings.
+  - `external_manual`: quantity not attributable to app-owned tracking.
+- Default (`MANAGE_EXTERNAL_POSITIONS=false`): stop-loss/exit logic only acts on `app_owned` quantity and never sells external/manual quantity.
+- Mixed positions are capped on exit to app-owned qty only; if app-owned qty is zero, exits are skipped (`exit.skipped_no_app_qty`).
 
 ## Running
 

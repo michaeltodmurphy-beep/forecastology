@@ -28,6 +28,7 @@ from app.signing import load_private_key, build_auth_headers
 from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
 from core.constants import SERIES_LIST, get_eastern_today_date_prefix
+from core.types import ensure_app_client_order_id
 from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
@@ -124,7 +125,7 @@ async def buy_market(
     private_key = load_private_key(config.kalshi_private_key_path)
     max_price = config.spread_monitor_price  # e.g. 90
 
-    order_id = str(uuid.uuid4())
+    order_id = ensure_app_client_order_id(str(uuid.uuid4()))
     price_str = f"{price_cents / 100:.4f}"
     max_price_str = f"{max_price / 100:.4f}"
 
