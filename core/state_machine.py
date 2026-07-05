@@ -112,6 +112,9 @@ class TemperatureStrategy:
         self._reconciliation_complete = False
         self._sl_exit_tasks: dict[str, asyncio.Task] = {}
         self._sl_cycles: dict[str, StopLossCycle] = {}
+        # Per-ticker app-owned quantity ledger used to prevent exits from touching
+        # external/manual holdings when MANAGE_EXTERNAL_POSITIONS=false.
+        self._app_owned_qty: dict[str, int] = {}
 
     @staticmethod
     def _first_non_none(*values):
@@ -149,6 +152,43 @@ class TemperatureStrategy:
     @staticmethod
     def _now_ms() -> int:
         return int(time.time() * 1000)
+
+    def _set_ownership(
+        self,
+        ticker: str,
+        *,
+        total_position_qty: int,
+        app_owned_qty: int,
+        source: str,
+        action: str,
+    ) -> tuple[int, int]:
+        total_qty = max(int(total_position_qty or 0), 0)
+        app_qty = max(min(int(app_owned_qty or 0), total_qty), 0)
+        external_qty = max(total_qty - app_qty, 0)
+        self._app_owned_qty[ticker] = app_qty
+        ownership = "app_owned" if app_qty > 0 else "external_manual"
+        logger.info(
+            "ownership.classified",
+            ticker=ticker,
+            ownership=ownership,
+            total_position_qty=total_qty,
+            app_owned_qty=app_qty,
+            external_qty=external_qty,
+            source=source,
+            action=action,
+        )
+        return app_qty, external_qty
+
+    def _managed_exit_quantity(self, ticker: str, total_position_qty: int) -> tuple[int, int, int]:
+        total_qty = max(int(total_position_qty or 0), 0)
+        app_qty = self._app_owned_qty.get(ticker)
+        if app_qty is None:
+            # Default to app-owned for in-memory positions created by app paths.
+            app_qty = total_qty
+        app_qty = max(min(int(app_qty or 0), total_qty), 0)
+        external_qty = max(total_qty - app_qty, 0)
+        managed_qty = total_qty if self.config.manage_external_positions else app_qty
+        return managed_qty, app_qty, external_qty
 
     def _compute_fast_sl_exit_price(self, reference_price: int, attempt: int) -> int:
         offset = max(int(self.config.sl_exit_aggressive_offset_ticks or 0), 0)
@@ -526,6 +566,7 @@ class TemperatureStrategy:
         bracket.phase = Phase.CLOSED
         self.active_positions.pop(ticker, None)
         self.brackets.pop(ticker, None)
+        self._app_owned_qty.pop(ticker, None)
         await self._unregister_stop_loss_watcher(ticker)
         async with await self.db.get_session() as session:
             await session.execute(
@@ -536,10 +577,25 @@ class TemperatureStrategy:
     async def _register_stop_loss_watcher(self, bracket: MarketBracket) -> None:
         if self.stop_loss_watcher is None or bracket.position_quantity <= 0:
             return
+        managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
+            bracket.market_ticker,
+            bracket.position_quantity,
+        )
+        if managed_qty <= 0:
+            logger.info(
+                "exit.skipped_no_app_qty",
+                ticker=bracket.market_ticker,
+                total_position_qty=bracket.position_quantity,
+                app_owned_qty=app_owned_qty,
+                external_qty=external_qty,
+                action="watcher_not_registered",
+            )
+            await self._unregister_stop_loss_watcher(bracket.market_ticker)
+            return
         await self.stop_loss_watcher.register_position(
             bracket.market_ticker,
             side="yes",
-            quantity=bracket.position_quantity,
+            quantity=managed_qty,
             sl_price=self.config.stop_loss_price,
         )
 
@@ -658,6 +714,7 @@ class TemperatureStrategy:
                      mode=self.config.trading_mode,
                      low_trades=self.config.low_trades,
                      high_trades=self.config.high_trades,
+                     manage_external_positions=self.config.manage_external_positions,
                      enable_local_settle_gate=self.config.enable_local_settle_gate,
                      default_entry_start_local=self.config.default_entry_start_local,
                      phoenix_entry_start_local=self.config.phoenix_entry_start_local,
@@ -706,6 +763,7 @@ class TemperatureStrategy:
         db_by_ticker = {pos.market_ticker: pos for pos in db_positions}
 
         today_utc = datetime.datetime.utcnow().date()
+        api_positions: dict[str, dict] = {}
 
         # In LIVE mode, also fetch positions directly from Kalshi API
         if self.config.trading_mode == "LIVE":
@@ -740,10 +798,19 @@ class TemperatureStrategy:
                     bracket.phase = Phase.HOLDING
                     bracket.crossed_buy = True
                     bracket.position_quantity = qty
+                    db_pos = db_by_ticker.get(ticker)
+                    db_qty = max(int((db_pos.quantity if db_pos else 0) or 0), 0)
+                    app_owned_qty = qty if self.config.manage_external_positions else min(db_qty, qty)
+                    app_owned_qty, external_qty = self._set_ownership(
+                        ticker,
+                        total_position_qty=qty,
+                        app_owned_qty=app_owned_qty,
+                        source="startup_live_positions",
+                        action="position_restored",
+                    )
                     entry = pos_data.get("average_fill_cost_cents", 0) or 0
                     entry_source = "api"
                     if entry <= 0:
-                        db_pos = db_by_ticker.get(ticker)
                         db_entry = (db_pos.avg_entry_price or 0) if db_pos else 0
                         if db_entry > 0:
                             entry = db_entry
@@ -758,7 +825,8 @@ class TemperatureStrategy:
                     self.active_positions[ticker] = bracket
                     await self._register_stop_loss_watcher(bracket)
                     logger.info("strategy.restored_live_position", ticker=ticker,
-                                qty=qty, entry=bracket.avg_entry, entry_source=entry_source)
+                                qty=qty, entry=bracket.avg_entry, entry_source=entry_source,
+                                app_owned_qty=app_owned_qty, external_qty=external_qty)
             except Exception as e:
                 logger.error("strategy.restore_positions_error", error=str(e))
 
@@ -788,17 +856,32 @@ class TemperatureStrategy:
 
             bracket.phase = Phase.HOLDING
             bracket.crossed_buy = True
-            bracket.position_quantity = pos.quantity
+            api_qty_raw = (api_positions.get(ticker) or {}).get("count", 0) if self.config.trading_mode == "LIVE" else 0
+            try:
+                api_qty = int(float(api_qty_raw or 0))
+            except (TypeError, ValueError):
+                api_qty = 0
+            total_qty = max(api_qty, int(pos.quantity or 0))
+            bracket.position_quantity = total_qty
             bracket.avg_entry = pos.avg_entry_price or 0
             bracket.last_price = pos.last_price
             bracket.hedge_market = pos.hedge_market_ticker
             bracket.hedge_quantity = pos.hedge_quantity
+            app_owned_qty = total_qty if self.config.manage_external_positions else min(int(pos.quantity or 0), total_qty)
+            app_owned_qty, external_qty = self._set_ownership(
+                ticker,
+                total_position_qty=total_qty,
+                app_owned_qty=app_owned_qty,
+                source="startup_db_positions",
+                action="position_restored",
+            )
 
             self.active_positions[ticker] = bracket
             await self._register_stop_loss_watcher(bracket)
             logger.info("strategy.restored_position", ticker=ticker,
-                        qty=pos.quantity, entry=bracket.avg_entry,
-                        hedge_market=bracket.hedge_market)
+                        qty=total_qty, entry=bracket.avg_entry,
+                        hedge_market=bracket.hedge_market,
+                        app_owned_qty=app_owned_qty, external_qty=external_qty)
 
     async def _ensure_bracket(self, market_ticker: str, event_ticker: str = "", series_ticker: str = "", bracket_label: str = ""):
         """Create a new MarketBracket if the ticker is a temperature market and unknown."""
@@ -1233,6 +1316,13 @@ class TemperatureStrategy:
             bracket.phase = Phase.HOLDING
             bracket.position_quantity = result.fill_quantity
             bracket.avg_entry = reconciled_fill_price
+            self._set_ownership(
+                bracket.market_ticker,
+                total_position_qty=bracket.position_quantity,
+                app_owned_qty=bracket.position_quantity,
+                source="entry_fill",
+                action="position_updated",
+            )
             self.active_positions[bracket.market_ticker] = bracket
             await self._register_stop_loss_watcher(bracket)
             logger.info("phase.b.entry_filled", ticker=bracket.market_ticker,
@@ -1404,6 +1494,18 @@ class TemperatureStrategy:
                                 qty=bracket.position_quantity, api_count=api_count)
                     await self._remove_active_position(ticker, bracket)
                     continue
+                try:
+                    bracket.position_quantity = int(float(api_count))
+                except (TypeError, ValueError):
+                    bracket.position_quantity = max(int(bracket.position_quantity or 0), 0)
+                app_known = self._app_owned_qty.get(ticker, bracket.position_quantity)
+                self._set_ownership(
+                    ticker,
+                    total_position_qty=bracket.position_quantity,
+                    app_owned_qty=app_known,
+                    source="periodic_reconciliation",
+                    action="position_reconciled",
+                )
 
             if not bracket.avg_entry or bracket.avg_entry <= 0:
                 heal_source: Optional[str] = None
@@ -1615,6 +1717,20 @@ class TemperatureStrategy:
                     self.brackets.pop(ticker, None)
                     logger.info("phase.c.stop_loss_zero_qty", ticker=ticker)
                     continue
+                managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
+                    ticker,
+                    bracket.position_quantity,
+                )
+                if managed_qty <= 0:
+                    logger.info(
+                        "exit.skipped_no_app_qty",
+                        ticker=ticker,
+                        total_position_qty=bracket.position_quantity,
+                        app_owned_qty=app_owned_qty,
+                        external_qty=external_qty,
+                        action="stop_loss_not_executed",
+                    )
+                    continue
                 if getattr(bracket, "_stop_loss_abandoned", False):
                     now_aband = asyncio.get_event_loop().time()
                     last_aband_log = getattr(bracket, "_last_abandoned_log", 0)
@@ -1701,6 +1817,15 @@ class TemperatureStrategy:
             qty = int(float(pos_data.get("count", 0) or 0))
             if qty <= 0:
                 continue
+            if not self.config.manage_external_positions:
+                self._set_ownership(
+                    ticker,
+                    total_position_qty=qty,
+                    app_owned_qty=0,
+                    source="untracked_exchange_position",
+                    action="ignored_external_manual",
+                )
+                continue
 
             prior_phase = bracket.phase.name
             entry = int(pos_data.get("average_fill_cost_cents", 0) or 0)
@@ -1712,6 +1837,13 @@ class TemperatureStrategy:
             bracket.phase = Phase.HOLDING
             bracket.crossed_buy = True
             bracket.position_quantity = qty
+            self._set_ownership(
+                ticker,
+                total_position_qty=qty,
+                app_owned_qty=qty,
+                source="untracked_exchange_position",
+                action="adopted_legacy_mode",
+            )
             if entry > 0:
                 bracket.avg_entry = entry
                 bracket.last_price = entry
@@ -1810,6 +1942,7 @@ class TemperatureStrategy:
             bracket.phase = Phase.CLOSED
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
+            self._app_owned_qty.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             return True
 
@@ -1872,12 +2005,44 @@ class TemperatureStrategy:
             await session.commit()
 
         price = override_price if override_price is not None else 1
+        managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
+            bracket.market_ticker,
+            bracket.position_quantity,
+        )
+        if managed_qty <= 0:
+            logger.info(
+                "exit.skipped_no_app_qty",
+                ticker=bracket.market_ticker,
+                total_position_qty=bracket.position_quantity,
+                app_owned_qty=app_owned_qty,
+                external_qty=external_qty,
+                action="stop_loss_not_submitted",
+            )
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    update(OrderAction)
+                    .where(OrderAction.action_key == action_key)
+                    .values(status=OrderActionStatus.PENDING, notes="skipped_no_app_qty")
+                )
+                await session.commit()
+            return False
+        if managed_qty < bracket.position_quantity and not self.config.manage_external_positions:
+            logger.info(
+                "exit.capped_to_app_owned",
+                ticker=bracket.market_ticker,
+                total_position_qty=bracket.position_quantity,
+                app_owned_qty=app_owned_qty,
+                external_qty=external_qty,
+                requested_qty=bracket.position_quantity,
+                capped_qty=managed_qty,
+                action="stop_loss_submit",
+            )
 
         order = OrderRequest(
             market_ticker=bracket.market_ticker,
             side=OrderSide.SELL_YES,
             price=price,
-            quantity=bracket.position_quantity,
+            quantity=managed_qty,
         )
 
         submit_start_ms = self._now_ms()
@@ -1941,6 +2106,7 @@ class TemperatureStrategy:
             bracket.phase = Phase.CLOSED
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
+            self._app_owned_qty.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             if trigger_ts_ms is not None:
                 logger.info(
@@ -1998,6 +2164,7 @@ class TemperatureStrategy:
             bracket.phase = Phase.CLOSED
             self.active_positions.pop(bracket.market_ticker, None)
             self.brackets.pop(bracket.market_ticker, None)
+            self._app_owned_qty.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         action_key=action_key,
@@ -2022,6 +2189,24 @@ class TemperatureStrategy:
                 await session.commit()
             prev_qty = bracket.position_quantity
             bracket.position_quantity = live_count
+            if self.config.manage_external_positions:
+                self._set_ownership(
+                    bracket.market_ticker,
+                    total_position_qty=live_count,
+                    app_owned_qty=live_count,
+                    source="stop_loss_result",
+                    action="position_reconciled",
+                )
+            else:
+                prior_app_qty = self._app_owned_qty.get(bracket.market_ticker, prev_qty)
+                new_app_qty = max(prior_app_qty - max(result.fill_quantity, 0), 0)
+                self._set_ownership(
+                    bracket.market_ticker,
+                    total_position_qty=live_count,
+                    app_owned_qty=min(new_app_qty, live_count),
+                    source="stop_loss_result",
+                    action="position_reconciled",
+                )
             if result.fill_quantity > 0 or live_count < prev_qty:
                 bracket._consecutive_unfilled_sl = 0
             else:
@@ -2084,6 +2269,14 @@ class TemperatureStrategy:
             return True
 
         bracket.position_quantity = quantity
+        app_known = self._app_owned_qty.get(ticker, quantity)
+        self._set_ownership(
+            ticker,
+            total_position_qty=quantity,
+            app_owned_qty=app_known,
+            source="watcher_trigger",
+            action="position_reconciled",
+        )
         logger.warning(
             "phase.c.stop_loss_triggered",
             ticker=ticker,

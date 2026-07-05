@@ -24,6 +24,7 @@ class TestOrderRequest:
         assert p["time_in_force"] == "good_till_canceled"
         assert p["post_only"] is False
         assert p["reduce_only"] is False
+        assert p["client_order_id"].startswith("APP_")
 
     def test_sell_yes_payload(self):
         r = OrderRequest(
@@ -40,6 +41,7 @@ class TestOrderRequest:
         assert p["time_in_force"] == "good_till_canceled"
         assert p["post_only"] is False
         assert p["reduce_only"] is False
+        assert p["client_order_id"].startswith("APP_")
 
     def test_stop_loss_sell_payload_uses_ioc_and_reduce_only(self):
         r = OrderRequest(
@@ -69,3 +71,14 @@ class TestOrderRequest:
         from core import types
         source = inspect.getsource(types.OrderRequest.to_kalshi_payload)
         assert "side_str" not in source, "side_str variable should not exist"
+
+    def test_client_order_id_prefixed_when_user_supplies_id(self):
+        r = OrderRequest(
+            market_ticker="KXLOWTAUS-26JUN16-B70.5",
+            side=OrderSide.BUY_YES,
+            price=85,
+            quantity=1,
+            client_order_id="manual-id",
+        )
+        p = r.to_kalshi_payload()
+        assert p["client_order_id"] == "APP_manual-id"

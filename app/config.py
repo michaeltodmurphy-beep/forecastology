@@ -72,6 +72,7 @@ class AppConfig(BaseSettings):
     # these flags.  Parsed by from_env() via _parse_trade_toggle().
     low_trades: bool = True
     high_trades: bool = True
+    manage_external_positions: bool = False
     # ── City-local-time entry settle gate ───────────────────────────────────
     # Prevents new buy orders from being placed before the city's local clock
     # reaches the threshold.  Kalshi settles temperature markets overnight, so
@@ -155,6 +156,9 @@ class AppConfig(BaseSettings):
         dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
         low_trades = _parse_trade_toggle(os.getenv("LOW_TRADES"), "LOW_TRADES", default=True)
         high_trades = _parse_trade_toggle(os.getenv("HIGH_TRADES"), "HIGH_TRADES", default=True)
+        manage_external_positions = _parse_trade_toggle(
+            os.getenv("MANAGE_EXTERNAL_POSITIONS"), "MANAGE_EXTERNAL_POSITIONS", default=False
+        )
         enable_local_settle_gate = _parse_trade_toggle(
             os.getenv("ENABLE_LOCAL_SETTLE_GATE"), "ENABLE_LOCAL_SETTLE_GATE", default=True
         )
@@ -164,6 +168,7 @@ class AppConfig(BaseSettings):
             dry_run=dry_run,
             low_trades=low_trades,
             high_trades=high_trades,
+            manage_external_positions=manage_external_positions,
             enable_local_settle_gate=enable_local_settle_gate,
             default_entry_start_local=default_entry_start_local,
             phoenix_entry_start_local=phoenix_entry_start_local,

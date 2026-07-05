@@ -134,3 +134,16 @@ class TestTradeToggles:
         assert _parse_trade_toggle(None, "X") is True
         assert _parse_trade_toggle("", "X") is True
         assert _parse_trade_toggle("garbage", "X") is True  # fail safe
+
+    def test_manage_external_positions_defaults_false(self):
+        os.environ.pop("MANAGE_EXTERNAL_POSITIONS", None)
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.manage_external_positions is False
+
+    def test_manage_external_positions_true_override(self):
+        os.environ["MANAGE_EXTERNAL_POSITIONS"] = "true"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.manage_external_positions is True
+        os.environ.pop("MANAGE_EXTERNAL_POSITIONS", None)
