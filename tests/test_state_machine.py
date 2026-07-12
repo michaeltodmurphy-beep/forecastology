@@ -242,7 +242,7 @@ def make_config(**overrides):
         monitor_start_price=80,
         buy_trigger_price=82,
         spread_monitor_price=90,
-        minimum_spread=4,
+        minimum_spread=0,
         stop_loss_price=50,
         hedge_max_factor=3.0,
         dry_run=False,
