@@ -57,6 +57,34 @@ def _parse_date_prefix(date_prefix: str) -> Optional[datetime.date]:
         return None
 
 
+def hedge_policy(
+    initial_qty: int,
+    hedge_max_factor: int,
+    stop_loss_count: int,
+) -> tuple[int, bool, int]:
+    """
+    Compute hedge entry policy for a given stop_loss_count.
+
+    ``hedge_max_factor`` is the **total number of allowed buy levels** (counting
+    from 0).  Buying is allowed while ``stop_loss_count < hedge_max_factor``.
+
+    - count=0              → initial_qty                  (initial buy)
+    - count=1              → initial_qty * 2              (first recovery)
+    - count=factor-1       → initial_qty * 2^(factor-1)  (last allowed buy)
+    - count >= factor      → not allowed
+
+    Example: initial=3, factor=3 → allowed counts 0,1,2 → sizes 3,6,12; max=12.
+
+    Returns:
+        (next_qty, is_allowed, max_allowed_qty)
+    """
+    factor = max(int(hedge_max_factor), 1)
+    max_allowed_qty = initial_qty * (2 ** (factor - 1))
+    is_allowed = stop_loss_count < factor
+    next_qty = initial_qty * (2 ** stop_loss_count) if is_allowed else 0
+    return next_qty, is_allowed, max_allowed_qty
+
+
 @dataclass
 class StopLossCycle:
     action_key: str
@@ -115,6 +143,10 @@ class TemperatureStrategy:
         # Per-ticker app-owned quantity ledger used to prevent exits from touching
         # external/manual holdings when MANAGE_EXTERNAL_POSITIONS=false.
         self._app_owned_qty: dict[str, int] = {}
+        # Per-cycle duplicate-entry guard: tracks (series_ticker, date_prefix, count)
+        # tuples already entered in the current _evaluate_watchlist cycle.  Prevents
+        # multiple brackets in the same series/day from all entering at the same count.
+        self._entry_step_seen: set[tuple[str, str, int]] = set()
 
     @staticmethod
     def _first_non_none(*values):
@@ -1129,6 +1161,8 @@ class TemperatureStrategy:
         Falls back to REST for brackets that have no cached quote data.
         Max 5 REST calls per cycle to avoid rate limits.
         """
+        # Reset per-cycle duplicate-entry guard each time we start a new sweep.
+        self._entry_step_seen = set()
         rest_calls_this_cycle = 0
         max_rest_per_cycle = 5
 
@@ -1239,22 +1273,65 @@ class TemperatureStrategy:
                             label=bracket.bracket_label, price=price, spread=spread,
                             spread_note=spread_note)
                 count = await self._get_stop_loss_count_for_market(ticker)
-                max_doublings = int(self.config.hedge_max_factor)
-                if count > max_doublings:
+                hedge_max = int(self.config.hedge_max_factor)
+                next_qty, is_allowed, max_allowed_qty = hedge_policy(
+                    self.config.initial_contract_count, hedge_max, count
+                )
+
+                if not is_allowed:
+                    logger.info(
+                        "hedge.cap_blocked",
+                        ticker=ticker,
+                        series_ticker=bracket.series_ticker,
+                        hedge_step=count,
+                        hedge_factor=hedge_max,
+                        initial_qty=self.config.initial_contract_count,
+                        max_allowed_qty=max_allowed_qty,
+                        action="entry_blocked_at_cap",
+                    )
                     logger.info("phase.b.recovery_cap_reached",
                                 series_ticker=bracket.series_ticker,
                                 count=count,
-                                max_doublings=max_doublings)
+                                max_doublings=hedge_max)
                     continue
 
-                quantity = self.config.initial_contract_count * (2 ** count)
+                # Duplicate-entry guard: at most one entry per (series, date, count) per cycle.
+                parsed_key = parse_series_and_date(ticker)
+                if parsed_key is not None:
+                    step_key = (*parsed_key, count)
+                    if step_key in self._entry_step_seen:
+                        logger.warning(
+                            "hedge.duplicate_blocked",
+                            ticker=ticker,
+                            series_ticker=bracket.series_ticker,
+                            hedge_step=count,
+                            hedge_factor=hedge_max,
+                            initial_qty=self.config.initial_contract_count,
+                            proposed_qty=next_qty,
+                            max_allowed_qty=max_allowed_qty,
+                            action="duplicate_entry_suppressed",
+                        )
+                        continue
+                    self._entry_step_seen.add(step_key)
+
                 if count > 0:
+                    logger.info(
+                        "hedge.step_advanced",
+                        ticker=ticker,
+                        series_ticker=bracket.series_ticker,
+                        hedge_step=count,
+                        hedge_factor=hedge_max,
+                        initial_qty=self.config.initial_contract_count,
+                        proposed_qty=next_qty,
+                        max_allowed_qty=max_allowed_qty,
+                        action="recovery_entry",
+                    )
                     logger.info("phase.b.recovery_sized_entry",
                                 series_ticker=bracket.series_ticker,
                                 count=count,
                                 multiplier=2 ** count,
-                                quantity=quantity)
-                    await self._execute_entry(bracket, quantity=quantity)
+                                quantity=next_qty)
+                    await self._execute_entry(bracket, quantity=next_qty)
                 else:
                     await self._execute_entry(bracket)
             else:
@@ -1273,12 +1350,34 @@ class TemperatureStrategy:
         if ob and ob.yes_asks:
             price = ob.yes_asks[0].price
 
+        proposed_qty = quantity or self.config.initial_contract_count
+
+        # Hard pre-submit cap guard — last line of defence in case upstream logic
+        # ever regresses.  Compute the absolute maximum permitted quantity and
+        # refuse to place an order that would exceed it.
+        hedge_max = int(self.config.hedge_max_factor)
+        _, _, max_allowed_qty = hedge_policy(
+            self.config.initial_contract_count, hedge_max, 0
+        )
+        if proposed_qty > max_allowed_qty:
+            logger.critical(
+                "hedge.cap_blocked",
+                ticker=bracket.market_ticker,
+                initial_qty=self.config.initial_contract_count,
+                proposed_qty=proposed_qty,
+                max_allowed_qty=max_allowed_qty,
+                hedge_factor=hedge_max,
+                action="hard_cap_guard_blocked_submission",
+            )
+            bracket.phase = Phase.MONITORING
+            return
+
         import uuid
         order = OrderRequest(
             market_ticker=bracket.market_ticker,
             side=OrderSide.BUY_YES,
             price=price,
-            quantity=quantity or self.config.initial_contract_count,
+            quantity=proposed_qty,
         )
 
         # Use spread_monitor_price as max price to ensure quick fill

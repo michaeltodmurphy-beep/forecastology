@@ -51,12 +51,12 @@ class AppConfig(BaseSettings):
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
-    # hedge_max_factor is REPURPOSED as the maximum number of stop-loss "doublings"
-    # allowed per (series, day) for martingale recovery sizing.
-    # Buy size at BUY_TRIGGER = initial_contract_count * 2**stop_loss_count.
-    # Buy is allowed while stop_loss_count <= hedge_max_factor; once it exceeds
-    # hedge_max_factor we stop buying that series for the rest of the day.
-    # With initial_contract_count=2 and hedge_max_factor=3 -> sizes 2,4,8,16.
+    # hedge_max_factor controls martingale recovery sizing.
+    # It is the TOTAL NUMBER OF ALLOWED BUY LEVELS (counting from 0).
+    # Buying is allowed while stop_loss_count < hedge_max_factor.
+    # Buy size = initial_contract_count * 2**stop_loss_count.
+    # Example: initial=3, factor=3 → counts 0,1,2 allowed → sizes 3,6,12;
+    #          max_allowed_qty = 3 * 2^(3-1) = 12.  count >= 3 is blocked.
     hedge_max_factor: float = 3.0
     eval_price_floor: int = 5
     # DEPRECATED / UNUSED by trading logic. Kept only so existing .env files that

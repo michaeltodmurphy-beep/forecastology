@@ -269,7 +269,7 @@ def capture_logs(monkeypatch):
     import core.state_machine as state_machine
 
     logged = []
-    for method in ("debug", "info", "warning", "error"):
+    for method in ("debug", "info", "warning", "error", "critical"):
         monkeypatch.setattr(
             state_machine.logger,
             method,
@@ -1211,7 +1211,7 @@ async def test_stop_loss_increments_ledger_then_recovery_doubles(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count, expected_qty", [(0, 2), (1, 4), (2, 8), (3, 16)])
+@pytest.mark.parametrize("count, expected_qty", [(0, 2), (1, 4), (2, 8)])
 async def test_recovery_sizing_doubles(monkeypatch, count, expected_qty):
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     items = []
@@ -1235,13 +1235,14 @@ async def test_recovery_sizing_doubles(monkeypatch, count, expected_qty):
 
 @pytest.mark.asyncio
 async def test_recovery_cap_blocks_after_factor(monkeypatch):
+    # With hedge_max_factor=3 (default), counts 0,1,2 are allowed; count >= 3 is blocked.
     logged = capture_logs(monkeypatch)
     blocked_ticker = "KXLOWTBOS-26JUN23-B65.5"
     boundary_ticker = "KXLOWTBOS-26JUN24-B65.5"
     db = InMemoryDB(
         [
-            StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN23", stop_loss_count=4),
-            StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN24", stop_loss_count=3),
+            StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN23", stop_loss_count=3),
+            StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN24", stop_loss_count=2),
         ]
     )
     strategy = make_strategy(monkeypatch, db=db)
@@ -1257,9 +1258,10 @@ async def test_recovery_cap_blocks_after_factor(monkeypatch):
 
     await strategy._evaluate_watchlist()
 
+    # Only the boundary ticker (count=2) should have placed an order; count=3 is blocked.
     assert len(strategy.executor.orders) == 1
     assert strategy.executor.orders[0][0].market_ticker == boundary_ticker
-    assert strategy.executor.orders[0][0].quantity == 16
+    assert strategy.executor.orders[0][0].quantity == 8  # initial=2, count=2 → 2*4=8
     assert strategy.brackets[blocked_ticker].crossed_buy is True
     assert any(event == "phase.b.recovery_cap_reached" for event, _ in logged)
 
@@ -1347,6 +1349,183 @@ def test_config_loads_without_hedge_trigger_price(monkeypatch):
     assert cfg.hedge_buy == 0
     assert cfg.stop_loss_price == 35
     assert cfg.hedge_max_factor == 3.0
+
+
+# ---------------------------------------------------------------------------
+# hedge_policy() unit tests
+# ---------------------------------------------------------------------------
+
+from core.state_machine import hedge_policy
+
+
+@pytest.mark.parametrize("initial,factor,count,exp_qty,exp_allowed,exp_max", [
+    # initial=3, factor=3: progression 3→6→12, stop at 12
+    (3, 3, 0, 3,  True,  12),
+    (3, 3, 1, 6,  True,  12),
+    (3, 3, 2, 12, True,  12),
+    (3, 3, 3, 0,  False, 12),  # must be blocked — was 24 in buggy code
+    (3, 3, 4, 0,  False, 12),
+    # initial=2, factor=3: progression 2→4→8, stop at 8
+    (2, 3, 0, 2,  True,  8),
+    (2, 3, 1, 4,  True,  8),
+    (2, 3, 2, 8,  True,  8),
+    (2, 3, 3, 0,  False, 8),
+    # initial=2, factor=4: progression 2→4→8→16, stop at 16
+    (2, 4, 0, 2,  True,  16),
+    (2, 4, 1, 4,  True,  16),
+    (2, 4, 2, 8,  True,  16),
+    (2, 4, 3, 16, True,  16),
+    (2, 4, 4, 0,  False, 16),
+    # factor=1: only the initial buy is allowed
+    (5, 1, 0, 5,  True,  5),
+    (5, 1, 1, 0,  False, 5),
+])
+def test_hedge_policy(initial, factor, count, exp_qty, exp_allowed, exp_max):
+    qty, allowed, max_qty = hedge_policy(initial, factor, count)
+    assert qty == exp_qty
+    assert allowed is exp_allowed
+    assert max_qty == exp_max
+
+
+# ---------------------------------------------------------------------------
+# Integration: initial=3 / factor=3  →  max qty is 12, never 24
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count, expected_qty", [(0, 3), (1, 6), (2, 12)])
+async def test_initial3_factor3_progression_allowed(monkeypatch, count, expected_qty):
+    """With initial=3 and factor=3, counts 0/1/2 are allowed and sizes double."""
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    items = []
+    if count:
+        items.append(StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN23", stop_loss_count=count))
+    strategy = make_strategy(monkeypatch, db=InMemoryDB(items), initial_contract_count=3)
+    strategy.brackets[ticker] = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 1
+    assert strategy.executor.orders[0][0].quantity == expected_qty
+
+
+@pytest.mark.asyncio
+async def test_initial3_factor3_count3_blocked(monkeypatch):
+    """With initial=3 and factor=3, count=3 must be blocked (was placing 24 in the bug)."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    db = InMemoryDB([StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN23", stop_loss_count=3)])
+    strategy = make_strategy(monkeypatch, db=db, initial_contract_count=3)
+    strategy.brackets[ticker] = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 0, "count=3 with factor=3 must not place any order"
+    assert any(event == "hedge.cap_blocked" for event, _ in logged)
+    assert any(event == "phase.b.recovery_cap_reached" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_hard_cap_guard_blocks_oversized_submission(monkeypatch):
+    """Even if upstream logic passes an oversized qty, _execute_entry rejects it."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    strategy = make_strategy(monkeypatch, initial_contract_count=3, hedge_max_factor=3.0)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    # Force oversized qty directly — simulates a regression in upstream logic.
+    await strategy._execute_entry(bracket, quantity=24)
+
+    assert len(strategy.executor.orders) == 0, "hard cap guard must block qty=24 (max is 12)"
+    assert any(event == "hedge.cap_blocked" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_bracket_same_series_step_blocked(monkeypatch):
+    """Two brackets in the same (series, date, count) slot produce at most one order per cycle."""
+    logged = capture_logs(monkeypatch)
+    ticker_a = "KXLOWTBOS-26JUN23-B65.5"
+    ticker_b = "KXLOWTBOS-26JUN23-T68"
+    db = InMemoryDB([StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN23", stop_loss_count=2)])
+    strategy = make_strategy(monkeypatch, db=db)
+    for t in (ticker_a, ticker_b):
+        strategy.brackets[t] = MarketBracket(
+            market_ticker=t,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTBOS",
+            bracket_label="buy",
+            phase=Phase.MONITORING,
+        )
+        strategy.cache.update_quote(t, 80, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 1, \
+        "only one order per (series, date, count) per cycle; second must be duplicate-blocked"
+    assert any(event == "hedge.duplicate_blocked" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_reenter_at_capped_count(monkeypatch):
+    """After restart, if count >= factor, entry must remain blocked (no regression)."""
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    db = InMemoryDB([StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN23", stop_loss_count=3)])
+
+    # Simulate a fresh strategy (post-restart) with the same DB that has count=3
+    strategy = make_strategy(monkeypatch, db=db)
+    strategy.brackets[ticker] = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 0, "post-restart must not re-enter at count >= factor"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial,factor,allowed_counts,blocked_count,expected_max", [
+    (2, 3, [0, 1, 2], 3, 8),    # default: 2→4→8, stop at 8
+    (3, 3, [0, 1, 2], 3, 12),   # reported bug: 3→6→12, stop at 12
+    (2, 4, [0, 1, 2, 3], 4, 16), # 2→4→8→16
+    (5, 2, [0, 1], 2, 10),       # 5→10
+    (1, 1, [0], 1, 1),           # only initial, single level
+])
+async def test_regression_various_factor_values(monkeypatch, initial, factor, allowed_counts, blocked_count, expected_max):
+    """Regression: for each (initial, factor) pair, max qty equals initial * 2^(factor-1)."""
+    _, is_blocked, max_qty = hedge_policy(initial, factor, blocked_count)
+    assert not is_blocked, f"count={blocked_count} must be blocked for factor={factor}"
+    assert max_qty == expected_max
+
+    for c in allowed_counts:
+        qty, ok, _ = hedge_policy(initial, factor, c)
+        assert ok, f"count={c} must be allowed for factor={factor}"
+        assert qty == initial * (2 ** c)
 
 
 @pytest.mark.asyncio
