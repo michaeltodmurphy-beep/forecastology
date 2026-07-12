@@ -147,3 +147,28 @@ class TestTradeToggles:
         cfg = AppConfig.from_env()
         assert cfg.manage_external_positions is True
         os.environ.pop("MANAGE_EXTERNAL_POSITIONS", None)
+
+
+class TestNoTradeTickers:
+    def setup_method(self):
+        os.environ.pop("NO_TRADE_TICKERS", None)
+
+    def teardown_method(self):
+        os.environ.pop("NO_TRADE_TICKERS", None)
+
+    def test_no_trade_tickers_defaults_empty_when_missing(self):
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.no_trade_tickers == set()
+
+    def test_no_trade_tickers_parses_csv_uppercase(self):
+        os.environ["NO_TRADE_TICKERS"] = "kxlowtsea,kxhightsfo"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.no_trade_tickers == {"KXLOWTSEA", "KXHIGHTSFO"}
+
+    def test_no_trade_tickers_strips_spaces_and_normalizes_case(self):
+        os.environ["NO_TRADE_TICKERS"] = " kxlowtsea , KXHIGHTSFO "
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.no_trade_tickers == {"KXLOWTSEA", "KXHIGHTSFO"}
