@@ -1,5 +1,5 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Literal
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
+from typing import Literal, Annotated
 import os
 import structlog
 from dotenv import load_dotenv
@@ -72,6 +72,7 @@ class AppConfig(BaseSettings):
     # these flags.  Parsed by from_env() via _parse_trade_toggle().
     low_trades: bool = True
     high_trades: bool = True
+    no_trade_tickers: Annotated[set[str], NoDecode] = set()
     manage_external_positions: bool = False
     # ── City-local-time entry settle gate ───────────────────────────────────
     # Prevents new buy orders from being placed before the city's local clock
@@ -138,6 +139,15 @@ class AppConfig(BaseSettings):
         # Already an int or float — it's already in cents
         return int(v)
 
+    @field_validator('no_trade_tickers', mode='before')
+    @classmethod
+    def parse_no_trade_tickers(cls, v):
+        if not v:
+            return set()
+        if isinstance(v, (set, list)):
+            return {str(t).strip().upper() for t in v if str(t).strip()}
+        return {t.strip().upper() for t in str(v).split(',') if t.strip()}
+
     @model_validator(mode='after')
     def normalize_trading_mode(self):
         if self.trading_mode:
@@ -162,12 +172,14 @@ class AppConfig(BaseSettings):
         enable_local_settle_gate = _parse_trade_toggle(
             os.getenv("ENABLE_LOCAL_SETTLE_GATE"), "ENABLE_LOCAL_SETTLE_GATE", default=True
         )
+        no_trade_tickers_raw = os.getenv("NO_TRADE_TICKERS", "")
         default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
             high_trades=high_trades,
+            no_trade_tickers=no_trade_tickers_raw,
             manage_external_positions=manage_external_positions,
             enable_local_settle_gate=enable_local_settle_gate,
             default_entry_start_local=default_entry_start_local,
