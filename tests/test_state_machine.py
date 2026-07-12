@@ -4609,6 +4609,42 @@ async def test_trade_toggle_both_enabled_allows_low_and_high(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_no_trade_tickers_blocks_matching_series(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, no_trade_tickers={"KXHIGHTOKC"})
+
+    ticker = "KXHIGHTOKC-26JUL25-T89"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXHIGHTOKC")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert len(blocked) == 1
+    assert blocked[0]["ticker"] == ticker
+    assert blocked[0]["reason"] == "NO_TRADE_TICKERS"
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_trade_tickers_does_not_block_non_matching(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, no_trade_tickers={"KXHIGHTOKC"})
+
+    ticker = "KXHIGHTLAX-26JUL25-T89"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXHIGHTLAX")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert blocked == []
+    strategy._execute_entry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_trade_toggle_high_disabled_blocks_high_allows_low(monkeypatch):
     """low_trades=True, high_trades=False -> HIGH entry blocked, LOW entry proceeds."""
     logged = capture_logs(monkeypatch)

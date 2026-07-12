@@ -1246,6 +1246,16 @@ class TemperatureStrategy:
                 continue
 
             if spread <= self.config.minimum_spread:
+                # --- No-trade ticker gate ---
+                if self.config.no_trade_tickers:
+                    ticker_upper = ticker.upper()
+                    if any(ticker_upper == nt or ticker_upper.startswith(nt + "-")
+                           for nt in self.config.no_trade_tickers):
+                        logger.info("phase.b.entry_blocked_by_config",
+                                    ticker=ticker, reason="NO_TRADE_TICKERS")
+                        continue
+                # ----------------------------
+
                 # --- Trade-direction toggle gate ---
                 ticker_upper = ticker.upper()
                 is_high = "KXHIGH" in ticker_upper
