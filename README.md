@@ -112,7 +112,7 @@ Key variables:
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for PANIC_FLATTEN pre-submit revalidation (default `30000`). Set to `0` to disable the freshness check. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `FORECASTOLOGY_LOCKFILE` | Path to the run.py process lockfile (default `/tmp/forecastology.lock`) |
-| `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
+| `HEDGE_MAX_FACTOR` | Total number of allowed buy levels per `(series_ticker, date_prefix)` (counting from 0). Buying is allowed while `stop_loss_count < HEDGE_MAX_FACTOR`; default `3` gives sizes `2/4/8` when `INITIAL_CONTRACT_COUNT=2`. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` the max is `12` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `LOW_TRADES` | `yes` (default) / `no` — set to `no` to disable new **Low** ticker entries (existing positions still managed) |
@@ -185,18 +185,25 @@ Before each buy, the bot looks up `StopLossLedger(series_ticker, date_prefix)` u
 - `count = 0` → buy `INITIAL_CONTRACT_COUNT`
 - `count = 1` → buy `INITIAL_CONTRACT_COUNT * 2`
 - `count = 2` → buy `INITIAL_CONTRACT_COUNT * 4`
-- `count = 3` → buy `INITIAL_CONTRACT_COUNT * 8`
 - in general: `quantity = INITIAL_CONTRACT_COUNT * 2**count`
 
-`HEDGE_MAX_FACTOR` is now the **maximum number of doublings**. Buying is allowed while `count <= HEDGE_MAX_FACTOR`; once `count > HEDGE_MAX_FACTOR`, the series is done for that day and the bot logs `phase.b.recovery_cap_reached`.
+`HEDGE_MAX_FACTOR` is the **total number of allowed buy levels** (counting from 0).  Buying is allowed while `count < HEDGE_MAX_FACTOR`; once `count >= HEDGE_MAX_FACTOR`, the series is done for that day and the bot logs `hedge.cap_blocked` + `phase.b.recovery_cap_reached`.
 
 With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the exact cap boundary is:
 
 - `count=0` → buy `2`
 - `count=1` → buy `4`
 - `count=2` → buy `8`
-- `count=3` → buy `16`
-- `count>=4` → no more buys for that `(series, day)`
+- `count>=3` → no more buys for that `(series, day)` — max allowed qty = `2 * 2^(3-1) = 8`
+
+With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` (the production config that triggered this hotfix):
+
+- `count=0` → buy `3`
+- `count=1` → buy `6`
+- `count=2` → buy `12`
+- `count>=3` → no more buys — max allowed qty = `3 * 2^(3-1) = 12`
+
+The general formula: `max_allowed_qty = INITIAL_CONTRACT_COUNT * 2 ** (HEDGE_MAX_FACTOR - 1)`.
 
 High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
 
@@ -221,7 +228,7 @@ The `_evaluate_held_positions` loop in the strategy (runs ~every 1s) provides a 
 This means any bracket in the same series on the same day inherits the same recovery size. For example, a stop-loss on `KXLOWTBOS-26JUN23-B65.5` makes `KXLOWTBOS-26JUN23-T68` rebuy at the doubled size.
 
 ### Worst-Case Per-Series Daily Spend
-This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is four buys at `2 + 4 + 8 + 16 = 30` contracts total before the strategy stops buying that series for the day.
+This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is **three** buys at `2 + 4 + 8 = 14` contracts total before the strategy stops buying that series for the day. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3`, the sequence is `3 + 6 + 12 = 21` contracts (max single order = **12**).
 
 ### Watchlist Evaluation Floor (`EVAL_PRICE_FLOOR`)
 Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below `BUY_TRIGGER_PRICE` still emit `phase.b.below_trigger`.
@@ -295,7 +302,7 @@ Key variables:
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for pre-submit revalidation (default `30000`). Set to `0` to disable. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `MANAGE_EXTERNAL_POSITIONS` | Ownership safety switch. Default `false`: only APP-owned quantity is managed; manual/external quantity is never sold by stop-loss/exit logic. Set `true` only for legacy/emergency aggregate-position behavior. |
-| `HEDGE_MAX_FACTOR` | Repurposed as the maximum number of martingale doublings allowed per `(series_ticker, date_prefix)`; default `3` gives sizes `2/4/8/16` when `INITIAL_CONTRACT_COUNT=2` |
+| `HEDGE_MAX_FACTOR` | Total number of allowed buy levels per `(series_ticker, date_prefix)` (counting from 0). Buying is allowed while `stop_loss_count < HEDGE_MAX_FACTOR`; default `3` gives sizes `2/4/8` when `INITIAL_CONTRACT_COUNT=2`. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` the max is `12` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 
@@ -349,18 +356,25 @@ Before each buy, the bot looks up `StopLossLedger(series_ticker, date_prefix)` u
 - `count = 0` → buy `INITIAL_CONTRACT_COUNT`
 - `count = 1` → buy `INITIAL_CONTRACT_COUNT * 2`
 - `count = 2` → buy `INITIAL_CONTRACT_COUNT * 4`
-- `count = 3` → buy `INITIAL_CONTRACT_COUNT * 8`
 - in general: `quantity = INITIAL_CONTRACT_COUNT * 2**count`
 
-`HEDGE_MAX_FACTOR` is now the **maximum number of doublings**. Buying is allowed while `count <= HEDGE_MAX_FACTOR`; once `count > HEDGE_MAX_FACTOR`, the series is done for that day and the bot logs `phase.b.recovery_cap_reached`.
+`HEDGE_MAX_FACTOR` is the **total number of allowed buy levels** (counting from 0).  Buying is allowed while `count < HEDGE_MAX_FACTOR`; once `count >= HEDGE_MAX_FACTOR`, the series is done for that day and the bot logs `hedge.cap_blocked` + `phase.b.recovery_cap_reached`.
 
 With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the exact cap boundary is:
 
 - `count=0` → buy `2`
 - `count=1` → buy `4`
 - `count=2` → buy `8`
-- `count=3` → buy `16`
-- `count>=4` → no more buys for that `(series, day)`
+- `count>=3` → no more buys for that `(series, day)` — max allowed qty = `2 * 2^(3-1) = 8`
+
+With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` (the production config that triggered the hotfix):
+
+- `count=0` → buy `3`
+- `count=1` → buy `6`
+- `count=2` → buy `12`
+- `count>=3` → no more buys — max allowed qty = `3 * 2^(3-1) = 12`
+
+The general formula: `max_allowed_qty = INITIAL_CONTRACT_COUNT * 2 ** (HEDGE_MAX_FACTOR - 1)`.
 
 High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
 
@@ -417,7 +431,7 @@ Recommended LIVE defaults (`AGGRESSIVE_LIMIT`, backward-compatible):
 This means any bracket in the same series on the same day inherits the same recovery size. For example, a stop-loss on `KXLOWTBOS-26JUN23-B65.5` makes `KXLOWTBOS-26JUN23-T68` rebuy at the doubled size.
 
 ### Worst-Case Per-Series Daily Spend
-This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is four buys at `2 + 4 + 8 + 16 = 30` contracts total before the strategy stops buying that series for the day.
+This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is **three** buys at `2 + 4 + 8 = 14` contracts total before the strategy stops buying that series for the day. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3`, the sequence is `3 + 6 + 12 = 21` contracts (max single order = **12**).
 
 ### Watchlist Evaluation Floor (`EVAL_PRICE_FLOOR`)
 Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below `BUY_TRIGGER_PRICE` still emit `phase.b.below_trigger`.
