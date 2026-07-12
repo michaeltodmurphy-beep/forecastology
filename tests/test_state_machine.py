@@ -246,6 +246,13 @@ def make_config(**overrides):
         stop_loss_price=50,
         hedge_max_factor=3.0,
         dry_run=False,
+        sl_exit_mode="AGGRESSIVE_LIMIT",
+        enable_fast_sl_exit=False,
+        sl_panic_sell_price=1,
+        sl_panic_retry_ms=0,
+        sl_panic_max_retries=3,
+        sl_panic_max_quote_age_ms=30000,
+        no_trade_tickers=set(),
     )
     for key, value in overrides.items():
         setattr(config, key, value)

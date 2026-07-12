@@ -50,6 +50,7 @@ class TestAppConfig:
             spread_monitor_price=90,
             minimum_spread=4,
             stop_loss_price=35,
+            no_trade_tickers=set(),
         )
         assert cfg.enable_fast_sl_exit is True
 
