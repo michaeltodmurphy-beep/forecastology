@@ -1245,7 +1245,7 @@ class TemperatureStrategy:
                 logger.info("phase.b.falling_knife_blocked", ticker=ticker, price=price)
                 continue
 
-            if spread >= self.config.minimum_spread:
+            if spread <= self.config.minimum_spread:
                 # --- Trade-direction toggle gate ---
                 ticker_upper = ticker.upper()
                 is_high = "KXHIGH" in ticker_upper
@@ -1335,7 +1335,7 @@ class TemperatureStrategy:
                 else:
                     await self._execute_entry(bracket)
             else:
-                logger.info("phase.b.spread_too_tight", ticker=ticker,
+                logger.info("phase.b.spread_too_wide", ticker=ticker,
                             price=price, spread=spread)
 
     async def _execute_entry(self, bracket: MarketBracket, ob: Optional[OrderBook] = None, quantity: Optional[int] = None):
