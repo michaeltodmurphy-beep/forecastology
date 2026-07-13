@@ -1865,18 +1865,39 @@ class TemperatureStrategy:
                     sl_spread = None
                     spread_wide = False
                 if spread_wide:
-                    bracket._sl_held_for_spread = True
                     now_spread = asyncio.get_event_loop().time()
-                    last_sl_held_log = getattr(bracket, "_last_sl_held_log", 0)
-                    if now_spread - last_sl_held_log >= 60:
-                        bracket._last_sl_held_log = now_spread
-                        logger.info("phase.c.sl_held_for_spread", ticker=ticker,
-                                    yes_bid=current_price, yes_ask=yes_ask,
-                                    spread=sl_spread, max_spread=self.config.max_sl_spread)
-                    continue
+                    hold_since = getattr(bracket, "_sl_held_for_spread_since", 0)
+                    if not hold_since:
+                        hold_since = now_spread
+                        bracket._sl_held_for_spread_since = hold_since
+                    seconds_held = now_spread - hold_since
+                    hold_max_seconds = max(0, int(getattr(self.config, "sl_spread_hold_max_seconds", 120)))
+                    if hold_max_seconds == 0 or seconds_held >= hold_max_seconds:
+                        bracket._sl_held_for_spread = False
+                        bracket._last_sl_held_log = 0
+                        bracket._sl_held_for_spread_since = 0
+                        logger.warning(
+                            "phase.c.sl_spread_hold_escalated",
+                            ticker=ticker,
+                            yes_bid=current_price,
+                            yes_ask=yes_ask,
+                            spread=sl_spread,
+                            max_spread=self.config.max_sl_spread,
+                            seconds_held=seconds_held,
+                        )
+                    else:
+                        bracket._sl_held_for_spread = True
+                        last_sl_held_log = getattr(bracket, "_last_sl_held_log", 0)
+                        if now_spread - last_sl_held_log >= 60:
+                            bracket._last_sl_held_log = now_spread
+                            logger.info("phase.c.sl_held_for_spread", ticker=ticker,
+                                        yes_bid=current_price, yes_ask=yes_ask,
+                                        spread=sl_spread, max_spread=self.config.max_sl_spread)
+                        continue
                 # Spread is tight — reset guard state and fire the stop-loss.
                 bracket._sl_held_for_spread = False
                 bracket._last_sl_held_log = 0
+                bracket._sl_held_for_spread_since = 0
                 # For PANIC_FLATTEN, log with ask-centric details for auditability.
                 if is_panic_flatten:
                     logger.warning(
@@ -1917,6 +1938,7 @@ class TemperatureStrategy:
                 if getattr(bracket, "_sl_held_for_spread", False):
                     bracket._sl_held_for_spread = False
                     bracket._last_sl_held_log = 0
+                    bracket._sl_held_for_spread_since = 0
 
     async def _adopt_untracked_exchange_fills(self, api_positions: dict[str, dict]) -> None:
         for ticker, bracket in list(self.brackets.items()):
