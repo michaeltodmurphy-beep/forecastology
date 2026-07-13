@@ -2298,6 +2298,100 @@ async def test_stop_loss_held_when_spread_too_wide(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_held_for_wide_spread_within_hold_window(monkeypatch):
+    """AGGRESSIVE_LIMIT holds briefly on wide spread before escalation window expires."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=50,
+        sl_exit_mode="AGGRESSIVE_LIMIT",
+        sl_spread_hold_max_seconds=120,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+
+    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 45, 75)  # spread=30 > max 20
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert any(event == "phase.c.sl_held_for_spread" for event, _ in logged)
+    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    assert getattr(bracket, "_sl_held_for_spread", False)
+    assert getattr(bracket, "_sl_held_for_spread_since", 0) > 0
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_escalates_after_spread_hold_window(monkeypatch):
+    """AGGRESSIVE_LIMIT escalates and fires after spread hold max seconds."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=50,
+        sl_exit_mode="AGGRESSIVE_LIMIT",
+        sl_spread_hold_max_seconds=120,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+
+    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
+    bracket._sl_held_for_spread = True
+    bracket._sl_held_for_spread_since = asyncio.get_event_loop().time() - 121
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 45, 75)  # spread still wide
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_awaited_once()
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    escalations = [payload for event, payload in logged if event == "phase.c.sl_spread_hold_escalated"]
+    assert len(escalations) == 1
+    assert escalations[0]["seconds_held"] >= 120
+    assert not getattr(bracket, "_sl_held_for_spread", False)
+    assert getattr(bracket, "_sl_held_for_spread_since", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_immediate_fire_when_spread_hold_window_zero(monkeypatch):
+    """SL_SPREAD_HOLD_MAX_SECONDS=0 bypasses hold and fires immediately on wide spread."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=50,
+        sl_exit_mode="AGGRESSIVE_LIMIT",
+        sl_spread_hold_max_seconds=0,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+
+    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 45, 75)  # spread=30 > max 20
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_awaited_once()
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    assert any(event == "phase.c.sl_spread_hold_escalated" for event, _ in logged)
+    assert not any(event == "phase.c.sl_held_for_spread" for event, _ in logged)
+    assert not getattr(bracket, "_sl_held_for_spread", False)
+
+
+@pytest.mark.asyncio
 async def test_sl_held_for_spread_then_fires_when_spread_narrows(monkeypatch):
     """With PANIC_FLATTEN, no hold on wide spread; trigger fires once ask <= stop."""
     logged = capture_logs(monkeypatch)
@@ -2428,6 +2522,7 @@ async def test_max_sl_spread_config_from_env(monkeypatch):
         "MONITOR_START_PRICE": "0.80",
         "SPREAD_MONITOR_PRICE": "0.90",
         "MAX_SL_SPREAD": "0.15",
+        "SL_SPREAD_HOLD_MAX_SECONDS": "90",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -2436,6 +2531,7 @@ async def test_max_sl_spread_config_from_env(monkeypatch):
 
     cfg = AppConfig.from_env()
     assert cfg.max_sl_spread == 15
+    assert cfg.sl_spread_hold_max_seconds == 90
 
 
 # ---------------------------------------------------------------------------

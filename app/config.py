@@ -101,6 +101,9 @@ class AppConfig(BaseSettings):
     # a wide, indecisive book. Set via `max_sl_spread` in dollar format
     # (e.g. `max_sl_spread=0.15` -> 15¢); default 20 is fallback when env is absent.
     max_sl_spread: int = 20
+    # Maximum seconds to hold a stop-loss trigger for wide/one-sided spread before
+    # escalating and forcing exit anyway. 0 means no hold window (fire immediately).
+    sl_spread_hold_max_seconds: int = 120
     # Stop-loss exit mode.
     # AGGRESSIVE_LIMIT (default): repricing ladder capped by SL_EXIT_MAX_SLIPPAGE.
     # PANIC_FLATTEN: immediately submit at SL_PANIC_SELL_PRICE (1¢ floor) to
