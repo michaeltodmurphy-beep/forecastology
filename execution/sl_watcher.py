@@ -70,6 +70,10 @@ class StopLossWatcher:
                 if existing.state == "TERMINAL":
                     existing.state = "IDLE"
                     existing.exit_in_progress = False
+                if not existing.exit_in_progress and existing.last_best_ask is not None:
+                    if existing.last_best_ask <= existing.sl_price:
+                        existing.state = "TRIGGERED"
+                        existing.trigger_price = existing.last_best_ask
         logger.info(
             "sl.position_registered",
             ticker=ticker,
@@ -77,6 +81,29 @@ class StopLossWatcher:
             quantity=quantity,
             sl_price=sl_price,
         )
+
+    async def rearm_position(self, ticker: str, *, trigger_price: Optional[int] = None) -> bool:
+        async with self._lock:
+            position = self._positions.get(ticker)
+            if position is None:
+                return False
+            if position.exit_in_progress:
+                return False
+            position.state = "TRIGGERED"
+            if trigger_price is not None:
+                position.trigger_price = trigger_price
+                position.last_best_ask = trigger_price
+            elif position.last_best_ask is not None:
+                position.trigger_price = position.last_best_ask
+            else:
+                position.trigger_price = position.sl_price
+        logger.info(
+            "sl.position_rearmed",
+            ticker=ticker,
+            action_key=self._action_key(ticker),
+            trigger_price=trigger_price,
+        )
+        return True
 
     async def unregister_position(self, ticker: str) -> None:
         async with self._lock:

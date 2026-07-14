@@ -98,3 +98,23 @@ async def test_worker_runs_independently_of_main_loop():
         await worker_task
 
     assert calls == [("TICKER", "yes", 1, 34)]
+
+
+@pytest.mark.asyncio
+async def test_rearm_position_resets_retrying_state():
+    calls = []
+
+    async def exit_handler(ticker, side, quantity, best_ask):
+        calls.append((ticker, side, quantity, best_ask))
+        return True
+
+    watcher = StopLossWatcher(exit_handler)
+    await watcher.register_position("TICKER", side="yes", quantity=1, sl_price=35)
+    watcher._positions["TICKER"].state = "RETRYING"
+    watcher._positions["TICKER"].exit_in_progress = False
+
+    assert await watcher.rearm_position("TICKER", trigger_price=34) is True
+    await watcher._run_cycle_once()
+    await watcher._worker_tasks["TICKER"]
+
+    assert calls == [("TICKER", "yes", 1, 34)]
