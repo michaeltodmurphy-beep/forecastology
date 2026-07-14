@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import os
 import sys
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -958,7 +959,8 @@ async def test_mixed_position_exit_is_capped_to_app_owned_qty(monkeypatch):
 
     assert executor.orders
     assert executor.orders[0][0].quantity == 2
-    assert strategy._app_owned_qty[ticker] == 0
+    assert ticker not in strategy.active_positions
+    assert ticker not in strategy._app_owned_qty
     assert any(event == "exit.capped_to_app_owned" for event, _ in logged)
 
 
@@ -1648,7 +1650,7 @@ async def test_stop_loss_closes_only_after_positions_confirm_zero(monkeypatch):
 async def test_stop_loss_success_but_still_held_keeps_position(monkeypatch):
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 2}}
+    executor.positions = {ticker: {"count": 1}}
 
     async def sell_yes(order):
         executor.orders.append((order, None))
@@ -1659,8 +1661,8 @@ async def test_stop_loss_success_but_still_held_keeps_position(monkeypatch):
             price=order.price,
             quantity=order.quantity,
             fill_price=order.price,
-            fill_quantity=order.quantity,
-            total_cost_cents=-(order.price * order.quantity),
+            fill_quantity=1,
+            total_cost_cents=-order.price,
             order_id="sell-id",
             notes="filled-but-still-held",
         )
@@ -1680,7 +1682,7 @@ async def test_stop_loss_success_but_still_held_keeps_position(monkeypatch):
 
     await strategy._execute_stop_loss(bracket)
 
-    assert strategy.active_positions[ticker].position_quantity == 2
+    assert strategy.active_positions[ticker].position_quantity == 1
 
 
 @pytest.mark.asyncio
@@ -1803,7 +1805,7 @@ async def test_zero_bid_does_not_trigger_stop_loss_when_ask_above_stop(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_zero_bid_then_unfillable_abandons_via_pr29(monkeypatch):
+async def test_zero_bid_then_unfillable_logs_exhaustion_and_stays_protected(monkeypatch):
     logged = capture_logs(monkeypatch)
     ticker = "KXHIGHDEN-26JUN24-B87.5"
     executor = FakeExecutor()
@@ -1823,6 +1825,7 @@ async def test_zero_bid_then_unfillable_abandons_via_pr29(monkeypatch):
         )
     )
     strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy.stop_loss_watcher = StopLossWatcher(lambda *_args: asyncio.sleep(0, result=True))
     strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
 
     bracket = _make_held_bracket(ticker, "KXHIGHDEN")
@@ -1835,8 +1838,9 @@ async def test_zero_bid_then_unfillable_abandons_via_pr29(monkeypatch):
         bracket._last_stop_loss_attempt = 0
         await strategy._evaluate_held_positions()
 
-    assert getattr(bracket, "_stop_loss_abandoned", False) is True
-    assert any(event == "phase.c.stop_loss_abandoned_no_liquidity" for event, _ in logged)
+    assert not getattr(bracket, "_stop_loss_abandoned", False)
+    assert any(event == "sl.exit_exhausted_unprotected" for event, _ in logged)
+    assert ticker in strategy.stop_loss_watcher._positions
 
 
 @pytest.mark.asyncio
@@ -2109,8 +2113,8 @@ async def test_held_position_price_refreshes_within_configured_interval(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_abandoned_after_max_unfilled_attempts(monkeypatch):
-    """After stop_loss_max_unfilled_attempts consecutive zero fills, position is abandoned."""
+async def test_stop_loss_exhaustion_logs_and_rearms_watcher(monkeypatch):
+    """After repeated zero fills, protection stays armed and exhaustion is escalated."""
     logged = capture_logs(monkeypatch)
     ticker = "KXLOWTLV-26JUN24-T84"
     executor = FakeExecutor()
@@ -2118,6 +2122,7 @@ async def test_stop_loss_abandoned_after_max_unfilled_attempts(monkeypatch):
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 60}}
     strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
     max_attempts = strategy.config.stop_loss_max_unfilled_attempts  # default 3
+    strategy.stop_loss_watcher = StopLossWatcher(lambda *_args: asyncio.sleep(0, result=True))
 
     # sell_yes always returns zero fill
     executor.sell_yes = AsyncMock(
@@ -2153,18 +2158,10 @@ async def test_stop_loss_abandoned_after_max_unfilled_attempts(monkeypatch):
         bracket._last_stop_loss_attempt = 0  # reset throttle so it fires each time
         await strategy._execute_stop_loss(bracket)
 
-    assert bracket._stop_loss_abandoned is True
-    assert any(event == "phase.c.stop_loss_abandoned_no_liquidity" for event, _ in logged)
-
-    # Now ensure _evaluate_held_positions does NOT emit stop_loss_triggered for this bracket
-    logged.clear()
-    strategy._fetch_market_data_via_rest = AsyncMock(
-        return_value={"yes_ask": 2, "yes_bid": 1, "spread": 1}
-    )
-    bracket._last_rest_price_fetch = 0
-    await strategy._evaluate_held_positions()
-
-    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
+    assert not getattr(bracket, "_stop_loss_abandoned", False)
+    assert any(event == "sl.exit_exhausted_unprotected" for event, _ in logged)
+    assert ticker in strategy.stop_loss_watcher._positions
+    assert strategy.stop_loss_watcher._positions[ticker].state == "TRIGGERED"
 
 
 @pytest.mark.asyncio
@@ -2952,6 +2949,103 @@ async def test_stop_loss_creates_action_record_and_succeeds(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_stays_retryable_until_get_positions_confirms_flat(monkeypatch):
+    """A successful submit is not terminal while exchange positions still show app-owned qty."""
+    ticker = "KXLOWTCHI-26JUN25-B63.5"
+    action_key = f"{ticker}:STOP_LOSS"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    executor.sell_yes = AsyncMock(
+        return_value=ExecutionResult(
+            success=True,
+            market_ticker=ticker,
+            side="yes",
+            price=1,
+            quantity=2,
+            fill_price=1,
+            fill_quantity=1,
+            total_cost_cents=-1,
+            order_id="partial-stop-loss",
+            notes="partial",
+        )
+    )
+
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy.stop_loss_watcher = StopLossWatcher(lambda *_args: asyncio.sleep(0, result=True))
+    strategy._reconciliation_complete = True
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTCHI",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=2,
+        avg_entry=80,
+    )
+    bracket.last_price = 40
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    market_gone = await strategy._execute_stop_loss(bracket)
+
+    assert market_gone is False
+    assert ticker in strategy.active_positions
+    assert bracket.phase == Phase.HOLDING
+    actions = strategy.db.store[OrderAction]
+    assert len(actions) == 1
+    assert actions[0].action_key == action_key
+    assert actions[0].status == OrderActionStatus.PENDING
+    assert strategy.stop_loss_watcher._positions[ticker].quantity == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_no_fill_keeps_position_protected(monkeypatch):
+    """IOC NO_FILL responses must remain retryable and re-armed."""
+    ticker = "KXLOWTCHI-26JUN25-B64.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    executor.sell_yes = AsyncMock(
+        return_value=ExecutionResult(
+            success=False,
+            market_ticker=ticker,
+            side="yes",
+            price=1,
+            quantity=1,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            order_id=None,
+            status="NO_FILL",
+            notes="no fill",
+        )
+    )
+
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy.stop_loss_watcher = StopLossWatcher(lambda *_args: asyncio.sleep(0, result=True))
+    strategy._reconciliation_complete = True
+
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTCHI",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    bracket.last_price = 40
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    await strategy._execute_stop_loss(bracket)
+
+    assert ticker in strategy.active_positions
+    assert bracket.phase == Phase.HOLDING
+    assert strategy.stop_loss_watcher._positions[ticker].state == "TRIGGERED"
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_in_flight_skip(monkeypatch):
     """A SUBMITTED action (in-flight from another attempt) blocks a new submission."""
     ticker = "KXLOWTCHI-26JUN25-B62.5"
@@ -3589,6 +3683,49 @@ async def test_phase_c_with_watcher_fires_via_rest_fallback_when_ws_missing(monk
 
 
 @pytest.mark.asyncio
+async def test_phase_c_with_stale_ws_quote_uses_rest_fallback(monkeypatch):
+    """A stale shared-WS quote must not suppress the REST fallback stop-loss path."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTDAL-26JUL01-B80.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=50,
+        held_position_price_refresh_seconds=5,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 42, "yes_bid": 40, "spread": 2}
+    )
+
+    bracket = _make_held_bracket(ticker, "KXLOWTDAL")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 75, 78)
+    strategy.cache.quote_timestamps[ticker] = time.time() - 30
+
+    async def no_op_exit(t, s, q, p):
+        return True
+
+    watcher = StopLossWatcher(no_op_exit)
+    await watcher.register_position(ticker, side="yes", quantity=1, sl_price=50)
+    strategy.stop_loss_watcher = watcher
+
+    await strategy._evaluate_held_positions()
+
+    strategy._fetch_market_data_via_rest.assert_awaited_once_with(ticker)
+    strategy._execute_stop_loss.assert_awaited_once()
+    price_check = next(
+        (kw for event, kw in logged if event == "phase.c.price_check"), None
+    )
+    assert price_check is not None
+    assert price_check["price_source"] == "fallback_quote"
+
+
+@pytest.mark.asyncio
 async def test_phase_c_with_watcher_logs_skip_when_both_sources_missing(monkeypatch):
     """When stop_loss_watcher is active and BOTH WebSocket and REST price
     are unavailable, Phase C must log phase.c.no_live_price and not crash."""
@@ -3621,6 +3758,37 @@ async def test_phase_c_with_watcher_logs_skip_when_both_sources_missing(monkeypa
     no_price_log = next(kw for event, kw in logged if event == "phase.c.no_live_price")
     assert no_price_log["price_source"] == "none"
     assert no_price_log["reason"] == "no_websocket_or_rest_price"
+
+
+@pytest.mark.asyncio
+async def test_phase_c_rest_fallback_not_blocked_by_watcher_retry_state(monkeypatch):
+    """A reconnect/stall must not leave the watcher guard stuck in RETRYING."""
+    ticker = "KXLOWTDAL-26JUL01-B81.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 42, "yes_bid": 40, "spread": 2}
+    )
+
+    bracket = _make_held_bracket(ticker, "KXLOWTDAL")
+    bracket.position_quantity = 1
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    async def no_op_exit(t, s, q, p):
+        return True
+
+    watcher = StopLossWatcher(no_op_exit)
+    await watcher.register_position(ticker, side="yes", quantity=1, sl_price=50)
+    watcher._positions[ticker].state = "RETRYING"
+    watcher._positions[ticker].exit_in_progress = False
+    strategy.stop_loss_watcher = watcher
+
+    await strategy._evaluate_held_positions()
+
+    strategy._execute_stop_loss.assert_awaited_once()
 
 
 @pytest.mark.asyncio

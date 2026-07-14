@@ -222,6 +222,105 @@ class TemperatureStrategy:
         managed_qty = total_qty if self.config.manage_external_positions else app_qty
         return managed_qty, app_qty, external_qty
 
+    async def _confirmed_remaining_stop_loss_qty(
+        self,
+        bracket: MarketBracket,
+        *,
+        filled_qty: int = 0,
+        action_key: Optional[str] = None,
+    ) -> dict[str, int | bool]:
+        ticker = bracket.market_ticker
+        prior_total_qty = max(int(bracket.position_quantity or 0), 0)
+        prior_app_qty = self._app_owned_qty.get(ticker, prior_total_qty)
+        try:
+            positions = await self.executor.get_positions()
+        except Exception as e:
+            logger.warning(
+                "phase.c.stop_loss_verify_failed",
+                ticker=ticker,
+                action_key=action_key,
+                error=str(e),
+            )
+            managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
+                ticker,
+                prior_total_qty,
+            )
+            return {
+                "confirmed": False,
+                "total_qty": prior_total_qty,
+                "managed_qty": managed_qty,
+                "app_owned_qty": app_owned_qty,
+                "external_qty": external_qty,
+            }
+
+        live_position = positions.get(ticker)
+        live_total_qty = 0
+        if live_position is not None:
+            try:
+                live_total_qty = max(int(float(live_position.get("count", 0) or 0)), 0)
+            except (TypeError, ValueError):
+                live_total_qty = 0
+
+        if self.config.manage_external_positions:
+            live_app_owned_qty = live_total_qty
+        else:
+            live_app_owned_qty = max(int(prior_app_qty or 0) - max(int(filled_qty or 0), 0), 0)
+            live_app_owned_qty = min(live_app_owned_qty, live_total_qty)
+
+        live_external_qty = max(live_total_qty - live_app_owned_qty, 0)
+        live_managed_qty = live_total_qty if self.config.manage_external_positions else live_app_owned_qty
+        return {
+            "confirmed": True,
+            "total_qty": live_total_qty,
+            "managed_qty": live_managed_qty,
+            "app_owned_qty": live_app_owned_qty,
+            "external_qty": live_external_qty,
+        }
+
+    async def _handle_stop_loss_exhaustion(
+        self,
+        bracket: MarketBracket,
+        *,
+        action_key: str,
+        trigger_source: str,
+        trigger_ts_ms: int,
+        attempts: int,
+        last_price: Optional[int],
+    ) -> dict[str, int | bool]:
+        remaining = await self._confirmed_remaining_stop_loss_qty(
+            bracket,
+            action_key=action_key,
+        )
+        bracket.position_quantity = int(remaining["total_qty"])
+        self._set_ownership(
+            bracket.market_ticker,
+            total_position_qty=bracket.position_quantity,
+            app_owned_qty=int(remaining["app_owned_qty"]),
+            source="stop_loss_exhausted",
+            action="position_reconciled",
+        )
+        if int(remaining["managed_qty"]) > 0:
+            logger.critical(
+                "sl.exit_exhausted_unprotected",
+                ticker=bracket.market_ticker,
+                action_key=action_key,
+                qty=int(remaining["managed_qty"]),
+                last_price=last_price,
+                stop_loss_price=self.config.stop_loss_price,
+                attempts=attempts,
+                trigger_source=trigger_source,
+                elapsed_ms=self._now_ms() - trigger_ts_ms,
+                position_confirmed=bool(remaining["confirmed"]),
+            )
+            await self._register_stop_loss_watcher(bracket)
+            if self.stop_loss_watcher is not None:
+                await self.stop_loss_watcher.rearm_position(
+                    bracket.market_ticker,
+                    trigger_price=last_price,
+                )
+            self._set_sl_cycle_state(bracket.market_ticker, "RETRYING")
+        return remaining
+
     def _compute_fast_sl_exit_price(self, reference_price: int, attempt: int) -> int:
         offset = max(int(self.config.sl_exit_aggressive_offset_ticks or 0), 0)
         max_slippage = max(int(self.config.sl_exit_max_slippage or 0), 0)
@@ -270,7 +369,7 @@ class TemperatureStrategy:
             trigger_source=trigger_source,
             trigger_ts_ms=trigger_ts_ms,
         )
-        sl_exit_mode = (self.config.sl_exit_mode or "AGGRESSIVE_LIMIT").upper()
+        sl_exit_mode = (self.config.sl_exit_mode or "PANIC_FLATTEN").upper()
         if sl_exit_mode == "PANIC_FLATTEN":
             coro = self._run_panic_flatten_exit(
                 bracket=bracket,
@@ -311,16 +410,30 @@ class TemperatureStrategy:
         for attempt in range(1, max_attempts + 1):
             current = self.active_positions.get(ticker)
             if current is None or current.position_quantity <= 0:
-                self._set_sl_cycle_state(ticker, "TERMINAL")
-                logger.info(
-                    "sl.position_gone",
-                    ticker=ticker,
+                remaining = await self._confirmed_remaining_stop_loss_qty(
+                    bracket,
                     action_key=action_key,
-                    attempt=attempt,
-                    elapsed_ms=self._now_ms() - trigger_ts_ms,
-                    reason="position_missing",
                 )
-                return
+                if int(remaining["managed_qty"]) <= 0:
+                    self._set_sl_cycle_state(ticker, "TERMINAL")
+                    logger.info(
+                        "sl.position_gone",
+                        ticker=ticker,
+                        action_key=action_key,
+                        attempt=attempt,
+                        elapsed_ms=self._now_ms() - trigger_ts_ms,
+                        reason="position_missing",
+                    )
+                    return
+                bracket.position_quantity = int(remaining["total_qty"])
+                self._set_ownership(
+                    ticker,
+                    total_position_qty=bracket.position_quantity,
+                    app_owned_qty=int(remaining["app_owned_qty"]),
+                    source="stop_loss_missing_reconciled",
+                    action="position_reconciled",
+                )
+                current = bracket
             self._set_sl_cycle_state(ticker, "SUBMITTING")
             reference_price = current.last_price if current.last_price is not None else trigger_price
             price = self._compute_fast_sl_exit_price(reference_price, attempt)
@@ -351,7 +464,29 @@ class TemperatureStrategy:
                 self._set_sl_cycle_state(ticker, "RETRYING")
             if attempt < max_attempts and retry_sleep_s > 0:
                 await asyncio.sleep(retry_sleep_s)
-        self._set_sl_cycle_state(ticker, "TERMINAL")
+        remaining = await self._handle_stop_loss_exhaustion(
+            bracket,
+            action_key=action_key,
+            trigger_source=trigger_source,
+            trigger_ts_ms=trigger_ts_ms,
+            attempts=max_attempts,
+            last_price=bracket.last_price if bracket.last_price is not None else trigger_price,
+        )
+        if int(remaining["managed_qty"]) <= 0:
+            self._set_sl_cycle_state(ticker, "TERMINAL")
+            await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
+            bracket._stop_loss_counted = False
+            if int(remaining["total_qty"]) > 0:
+                await self._remove_active_position(ticker, bracket)
+            logger.info(
+                "sl.position_gone",
+                ticker=ticker,
+                action_key=action_key,
+                attempt=max_attempts,
+                elapsed_ms=self._now_ms() - trigger_ts_ms,
+                reason="position_cleared_after_retry_exhaustion",
+            )
+            return
         logger.warning(
             "sl.exit_retry_exhausted",
             ticker=ticker,
@@ -408,16 +543,30 @@ class TemperatureStrategy:
         for attempt in range(1, max_retries + 1):
             current = self.active_positions.get(ticker)
             if current is None or current.position_quantity <= 0:
-                self._set_sl_cycle_state(ticker, "TERMINAL")
-                logger.info(
-                    "sl.position_gone",
-                    ticker=ticker,
+                remaining = await self._confirmed_remaining_stop_loss_qty(
+                    bracket,
                     action_key=action_key,
-                    attempt=attempt,
-                    elapsed_ms=self._now_ms() - trigger_ts_ms,
-                    reason="position_missing",
                 )
-                return
+                if int(remaining["managed_qty"]) <= 0:
+                    self._set_sl_cycle_state(ticker, "TERMINAL")
+                    logger.info(
+                        "sl.position_gone",
+                        ticker=ticker,
+                        action_key=action_key,
+                        attempt=attempt,
+                        elapsed_ms=self._now_ms() - trigger_ts_ms,
+                        reason="position_missing",
+                    )
+                    return
+                bracket.position_quantity = int(remaining["total_qty"])
+                self._set_ownership(
+                    ticker,
+                    total_position_qty=bracket.position_quantity,
+                    app_owned_qty=int(remaining["app_owned_qty"]),
+                    source="panic_stop_loss_missing_reconciled",
+                    action="position_reconciled",
+                )
+                current = bracket
 
             # ------------------------------------------------------------------
             # Pre-submit revalidation: re-check ASK condition against the latest
@@ -582,7 +731,29 @@ class TemperatureStrategy:
             if attempt < max_retries and retry_sleep_s > 0:
                 await asyncio.sleep(retry_sleep_s)
 
-        self._set_sl_cycle_state(ticker, "TERMINAL")
+        remaining = await self._handle_stop_loss_exhaustion(
+            bracket,
+            action_key=action_key,
+            trigger_source=trigger_source,
+            trigger_ts_ms=trigger_ts_ms,
+            attempts=max_retries,
+            last_price=bracket.last_price if bracket.last_price is not None else trigger_price,
+        )
+        if int(remaining["managed_qty"]) <= 0:
+            self._set_sl_cycle_state(ticker, "TERMINAL")
+            await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
+            bracket._stop_loss_counted = False
+            if int(remaining["total_qty"]) > 0:
+                await self._remove_active_position(ticker, bracket)
+            logger.info(
+                "sl.position_gone",
+                ticker=ticker,
+                action_key=action_key,
+                attempt=max_retries,
+                elapsed_ms=self._now_ms() - trigger_ts_ms,
+                reason="position_cleared_after_retry_exhaustion",
+            )
+            return
         logger.warning(
             "sl.exit_retry_exhausted",
             ticker=ticker,
@@ -1664,7 +1835,14 @@ class TemperatureStrategy:
             if last_known_price is None:
                 last_known_price = bracket.last_price
             quote = self.cache.get_quote(ticker)
-            if quote is not None:
+            quote_ts = self.cache.get_quote_ts(ticker)
+            quote_is_fresh = False
+            if quote is not None and quote_ts is not None:
+                quote_is_fresh = (
+                    time.time() - quote_ts
+                    < max(int(self.config.held_position_price_refresh_seconds or 0), 1)
+                )
+            if quote is not None and quote_is_fresh:
                 yes_bid, yes_ask = quote
                 if yes_bid > 0:
                     current_price = yes_bid
@@ -1765,7 +1943,7 @@ class TemperatureStrategy:
             bracket.last_price = current_price
 
             # Determine stop-loss exit mode for this evaluation cycle.
-            sl_exit_mode_upper = (self.config.sl_exit_mode or "AGGRESSIVE_LIMIT").upper()
+            sl_exit_mode_upper = (self.config.sl_exit_mode or "PANIC_FLATTEN").upper()
             is_panic_flatten = sl_exit_mode_upper == "PANIC_FLATTEN"
 
             # --- Apply zero_bid_collapse side-effects (both modes) ----------
@@ -1839,14 +2017,6 @@ class TemperatureStrategy:
                         external_qty=external_qty,
                         action="stop_loss_not_executed",
                     )
-                    continue
-                if getattr(bracket, "_stop_loss_abandoned", False):
-                    now_aband = asyncio.get_event_loop().time()
-                    last_aband_log = getattr(bracket, "_last_abandoned_log", 0)
-                    if now_aband - last_aband_log >= 60:
-                        bracket._last_abandoned_log = now_aband
-                        logger.info("phase.c.stop_loss_abandoned_holding", ticker=ticker,
-                                    remaining_qty=bracket.position_quantity, last_price=current_price)
                     continue
                 # Spread guard: only allow the stop-loss to fire when the YES
                 # bid-ask spread is tight, meaning the market agrees the position
@@ -2267,20 +2437,15 @@ class TemperatureStrategy:
             session.add(et)
             await session.commit()
 
-        live_count = bracket.position_quantity
-        try:
-            positions = await self.executor.get_positions()
-            live_position = positions.get(bracket.market_ticker)
-            if not live_position:
-                live_count = 0
-            else:
-                live_count = max(int(live_position.get("count", 0) or 0), 0)
-        except Exception as e:
-            logger.warning("phase.c.stop_loss_verify_failed", ticker=bracket.market_ticker,
-                           action_key=action_key, error=str(e))
-            live_count = max(bracket.position_quantity - result.fill_quantity, 0)
+        remaining = await self._confirmed_remaining_stop_loss_qty(
+            bracket,
+            filled_qty=result.fill_quantity,
+            action_key=action_key,
+        )
+        live_count = int(remaining["total_qty"])
+        remaining_managed_qty = int(remaining["managed_qty"])
 
-        if live_count == 0:
+        if bool(remaining["confirmed"]) and remaining_managed_qty == 0:
             # Remove from positions table and mark action SUCCEEDED.
             async with await self.db.get_session() as session:
                 await session.execute(
@@ -2299,7 +2464,9 @@ class TemperatureStrategy:
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         action_key=action_key,
-                        price=result.fill_price, proceeds=-result.total_cost_cents)
+                        price=result.fill_price, proceeds=-result.total_cost_cents,
+                        remaining_total_qty=live_count,
+                        remaining_app_owned_qty=remaining_managed_qty)
             if trigger_ts_ms is not None:
                 logger.info(
                     "sl.exit_fill_observed",
@@ -2320,24 +2487,13 @@ class TemperatureStrategy:
                 await session.commit()
             prev_qty = bracket.position_quantity
             bracket.position_quantity = live_count
-            if self.config.manage_external_positions:
-                self._set_ownership(
-                    bracket.market_ticker,
-                    total_position_qty=live_count,
-                    app_owned_qty=live_count,
-                    source="stop_loss_result",
-                    action="position_reconciled",
-                )
-            else:
-                prior_app_qty = self._app_owned_qty.get(bracket.market_ticker, prev_qty)
-                new_app_qty = max(prior_app_qty - max(result.fill_quantity, 0), 0)
-                self._set_ownership(
-                    bracket.market_ticker,
-                    total_position_qty=live_count,
-                    app_owned_qty=min(new_app_qty, live_count),
-                    source="stop_loss_result",
-                    action="position_reconciled",
-                )
+            self._set_ownership(
+                bracket.market_ticker,
+                total_position_qty=live_count,
+                app_owned_qty=int(remaining["app_owned_qty"]),
+                source="stop_loss_result",
+                action="position_reconciled",
+            )
             if result.fill_quantity > 0 or live_count < prev_qty:
                 bracket._consecutive_unfilled_sl = 0
             else:
@@ -2349,19 +2505,28 @@ class TemperatureStrategy:
                 attempted_qty=order.quantity,
                 filled_qty=result.fill_quantity,
                 remaining_count=live_count,
+                remaining_app_owned_qty=remaining_managed_qty,
                 notes=result.notes,
                 last_price=bracket.last_price,
             )
             if bracket._consecutive_unfilled_sl >= self.config.stop_loss_max_unfilled_attempts:
-                bracket._stop_loss_abandoned = True
-                logger.warning(
-                    "phase.c.stop_loss_abandoned_no_liquidity",
+                logger.critical(
+                    "sl.exit_exhausted_unprotected",
                     ticker=bracket.market_ticker,
-                    attempts=bracket._consecutive_unfilled_sl,
+                    action_key=action_key,
+                    qty=remaining_managed_qty,
                     last_price=bracket.last_price,
-                    remaining_qty=bracket.position_quantity,
+                    stop_loss_price=self.config.stop_loss_price,
+                    attempts=bracket._consecutive_unfilled_sl,
+                    elapsed_ms=self._now_ms() - trigger_ts_ms if trigger_ts_ms is not None else None,
+                    reason="unfilled_or_partial",
                 )
             await self._register_stop_loss_watcher(bracket)
+            if self.stop_loss_watcher is not None and remaining_managed_qty > 0:
+                await self.stop_loss_watcher.rearm_position(
+                    bracket.market_ticker,
+                    trigger_price=bracket.last_price,
+                )
             if trigger_ts_ms is not None:
                 logger.warning(
                     "sl.exit_failed",

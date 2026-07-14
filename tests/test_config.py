@@ -54,6 +54,25 @@ class TestAppConfig:
         )
         assert cfg.enable_fast_sl_exit is True
 
+    def test_sl_exit_mode_defaults_to_panic_flatten(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        from app.config import AppConfig
+        cfg = AppConfig(
+            kalshi_api_key='k',
+            kalshi_private_key_path='k.pem',
+            mysql_database_url='******localhost:3306/test',
+            trading_mode='PAPER',
+            initial_contract_count=1,
+            monitor_start_price=80,
+            buy_trigger_price=82,
+            spread_monitor_price=90,
+            minimum_spread=4,
+            stop_loss_price=35,
+            no_trade_tickers=set(),
+        )
+        assert cfg.sl_exit_mode == 'PANIC_FLATTEN'
+
 
 class TestTradeToggles:
     """Tests for LOW_TRADES / HIGH_TRADES env-var config flags."""

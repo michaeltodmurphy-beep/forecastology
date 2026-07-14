@@ -102,7 +102,7 @@ Key variables:
 | `WS_URL` | Kalshi WebSocket URL |
 | `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
 | `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
-| `SL_EXIT_MODE` | Stop-loss exit strategy: `AGGRESSIVE_LIMIT` (default, repricing ladder) or `PANIC_FLATTEN` (immediate 1¢ floor sell) |
+| `SL_EXIT_MODE` | Stop-loss exit strategy: `PANIC_FLATTEN` (default, immediate 1¢ floor sell so Kalshi matches at the best available bid) or `AGGRESSIVE_LIMIT` (opt-in repricing ladder) |
 | `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
 | `SL_EXIT_MAX_ATTEMPTS` | Max fast stop-loss attempts per trigger (default `3`) |
 | `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Initial sell-price offset (in ticks/cents) from trigger reference for marketable exits (default `2`) |
@@ -216,7 +216,7 @@ Stop-loss is driven by the **WebSocket `StopLossWatcher`** inside `run.py`:
 - On failure, the guard is reset so the next tick can retry.
 - Startup reconciliation (`_restore_positions`) registers all open positions with the watcher so coverage begins from the first WebSocket message.
 
-The `_evaluate_held_positions` loop in the strategy (runs ~every 1s) provides a secondary safety net for cases where the WebSocket price feed is unavailable for extended periods.
+The `_evaluate_held_positions` loop in the strategy (runs ~every 1s) provides a secondary safety net for cases where the shared WebSocket price feed goes stale, reconnects, or is unavailable for extended periods by falling back to REST quotes for held positions.
 
 ### StopLossLedger
 `stop_loss_ledger` stores the persistent per-day martingale counter:
@@ -292,12 +292,12 @@ Key variables:
 | `WS_URL` | Kalshi WebSocket URL |
 | `STOP_LOSS_PRICE` | WebSocket best ask at or below this (cents) triggers the stop-loss sell (default `0.35`) |
 | `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
-| `SL_EXIT_MODE` | Stop-loss exit strategy: `AGGRESSIVE_LIMIT` (default, repricing ladder) or `PANIC_FLATTEN` (immediate 1¢ floor sell) |
+| `SL_EXIT_MODE` | Stop-loss exit strategy: `PANIC_FLATTEN` (default, immediate 1¢ floor sell so Kalshi matches at the best available bid) or `AGGRESSIVE_LIMIT` (opt-in repricing ladder) |
 | `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
 | `SL_EXIT_MAX_ATTEMPTS` | Max fast stop-loss attempts per trigger (default `3`) |
 | `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Initial sell-price offset (in ticks/cents) from trigger reference for marketable exits (default `2`) |
 | `SL_EXIT_MAX_SLIPPAGE` | Max total slippage (dollar format accepted) allowed for fast stop-loss repricing (default `0.20`) |
-| `SL_SPREAD_HOLD_MAX_SECONDS` | Max seconds to hold a stop-loss trigger when spread is wide/one-sided before forcing exit anyway (default `120`; set `0` to fire immediately even on wide spread) |
+| `SL_SPREAD_HOLD_MAX_SECONDS` | Max seconds to hold an `AGGRESSIVE_LIMIT` stop-loss trigger when spread is wide/one-sided before forcing exit anyway (default `120`; set `0` to fire immediately even on wide spread) |
 | `SL_PANIC_SELL_PRICE` | Panic-flatten floor price in cents (default `1`). Sell placed at this price so Kalshi matches at best bid. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
@@ -384,28 +384,29 @@ When stop-loss trigger conditions are met, the strategy dispatches an immediate 
 
 #### Stop-loss exit modes (`SL_EXIT_MODE`)
 
-**`AGGRESSIVE_LIMIT` (default)** — repricing ladder:
+**`PANIC_FLATTEN` (default)** — immediate floor sell:
+
+- **Trigger condition (strict ASK-only):** `trigger_met = (best_ask_yes is not None) AND (best_ask_yes <= STOP_LOSS_PRICE)`. Bid price, last-trade price, midpoint, and zero-bid-collapse paths are **not** used to trigger PANIC_FLATTEN.
+- On trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that is immediately marketable, so Kalshi matches it at the **best available bid**
+- no slow repricing ladder before the first submit: fill speed is prioritised over exit price and avoids chasing the book down
+- **Pre-submit revalidation:** immediately before placing each panic order, the latest cached YES ask is re-checked against `STOP_LOSS_PRICE`. If the ask has risen back above the stop, the submit is **canceled** and the reason is logged as `sl.panic_revalidation_aborted` (`reason="ask_above_stop"`). If the quote is missing or stale (older than `SL_PANIC_MAX_QUOTE_AGE_MS`), the submit proceeds in **degraded mode** (`sl.panic_revalidation_degraded`) — failing to exit is worse than a marginal false positive.
+- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price (with revalidation before each attempt); transient submit errors are also retried with per-attempt logging (`sl.panic_submit_error`)
+- stop-loss completion is only treated as terminal after `get_positions()` confirms the remaining app-owned quantity is `0`; exhausted attempts emit `sl.exit_exhausted_unprotected` and re-arm protection instead of silently giving up
+- per-ticker task idempotency: repeated triggers while an exit is in-flight are silently suppressed
+- structured logs: `sl.panic_triggered`, `sl.panic_revalidation`, `sl.panic_revalidation_degraded`, `sl.panic_revalidation_aborted`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_submit_error`, `sl.panic_filled` / `sl.panic_failed`
+- trade-off: fill speed is prioritised over exit price — you may receive less than 1¢; the intent is to get flat immediately
+- units: `STOP_LOSS_PRICE` and the cached YES ask are both stored in **cents** (integer); dollar-format `.env` values (e.g. `STOP_LOSS_PRICE=0.48`) are automatically converted to 48¢ by AppConfig.
+
+**`AGGRESSIVE_LIMIT`** — opt-in repricing ladder:
 
 - aggressive marketable sell relative to trigger price using `SL_EXIT_AGGRESSIVE_OFFSET_TICKS`
 - bounded repricing capped by `SL_EXIT_MAX_SLIPPAGE`
 - rapid per-ticker retries at `SL_EXIT_RETRY_INTERVAL_MS` up to `SL_EXIT_MAX_ATTEMPTS`
 - structured logs: `sl.trigger_detected`, `sl.exit_submit_start`, `sl.exit_submitted`, `sl.exit_fill_observed` / `sl.exit_failed`
 
-**`PANIC_FLATTEN`** — immediate floor sell (recommended for LIVE):
-
-- **Trigger condition (strict ASK-only):** `trigger_met = (best_ask_yes is not None) AND (best_ask_yes <= STOP_LOSS_PRICE)`. Bid price, last-trade price, midpoint, and zero-bid-collapse paths are **not** used to trigger PANIC_FLATTEN.
-- On trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that Kalshi fills at the best available bid
-- no slow repricing ladder before the first submit: fill speed is prioritised over exit price
-- **Pre-submit revalidation:** immediately before placing each panic order, the latest cached YES ask is re-checked against `STOP_LOSS_PRICE`. If the ask has risen back above the stop, the submit is **canceled** and the reason is logged as `sl.panic_revalidation_aborted` (`reason="ask_above_stop"`). If the quote is missing or stale (older than `SL_PANIC_MAX_QUOTE_AGE_MS`), the submit proceeds in **degraded mode** (`sl.panic_revalidation_degraded`) — failing to exit is worse than a marginal false positive.
-- if unfilled or partially filled, retries every `SL_PANIC_RETRY_MS` up to `SL_PANIC_MAX_RETRIES` attempts, each at the same floor price (with revalidation before each attempt); transient submit errors are also retried with per-attempt logging (`sl.panic_submit_error`)
-- per-ticker task idempotency: repeated triggers while an exit is in-flight are silently suppressed
-- structured logs: `sl.panic_triggered`, `sl.panic_revalidation`, `sl.panic_revalidation_degraded`, `sl.panic_revalidation_aborted`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_submit_error`, `sl.panic_filled` / `sl.panic_failed`
-- trade-off: fill speed is prioritised over exit price — you may receive less than 1¢; the intent is to get flat immediately
-- units: `STOP_LOSS_PRICE` and the cached YES ask are both stored in **cents** (integer); dollar-format `.env` values (e.g. `STOP_LOSS_PRICE=0.48`) are automatically converted to 48¢ by AppConfig.
-
 Conservative mode remains available by setting `ENABLE_FAST_SL_EXIT=false` (default for PAPER).
 
-Recommended LIVE defaults (`PANIC_FLATTEN`):
+Recommended LIVE defaults (`PANIC_FLATTEN`, repository default):
 
 - `ENABLE_FAST_SL_EXIT=true`
 - `SL_EXIT_MODE=PANIC_FLATTEN`

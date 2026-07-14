@@ -105,10 +105,10 @@ class AppConfig(BaseSettings):
     # escalating and forcing exit anyway. 0 means no hold window (fire immediately).
     sl_spread_hold_max_seconds: int = 120
     # Stop-loss exit mode.
-    # AGGRESSIVE_LIMIT (default): repricing ladder capped by SL_EXIT_MAX_SLIPPAGE.
-    # PANIC_FLATTEN: immediately submit at SL_PANIC_SELL_PRICE (1¢ floor) to
-    #   guarantee fill speed over exit price, then retry rapidly if unfilled.
-    sl_exit_mode: str = "AGGRESSIVE_LIMIT"
+    # PANIC_FLATTEN (default): immediately submit at SL_PANIC_SELL_PRICE (1¢ floor)
+    #   so Kalshi matches at the best available bid without a repricing ladder.
+    # AGGRESSIVE_LIMIT: repricing ladder capped by SL_EXIT_MAX_SLIPPAGE.
+    sl_exit_mode: str = "PANIC_FLATTEN"
     # Panic-flatten sell price floor in cents (default 1¢). A sell at 1¢ becomes
     # immediately marketable — Kalshi fills it at the best available bid.
     sl_panic_sell_price: int = 1
