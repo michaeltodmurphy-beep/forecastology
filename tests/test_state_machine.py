@@ -245,7 +245,7 @@ def make_config(**overrides):
         spread_monitor_price=90,
         minimum_spread=4,
         stop_loss_price=50,
-        hedge_max_factor=3.0,
+        hedge_max_factor=3,
         dry_run=False,
         sl_exit_mode="AGGRESSIVE_LIMIT",
         enable_fast_sl_exit=False,
@@ -1357,7 +1357,7 @@ def test_config_loads_without_hedge_trigger_price(monkeypatch):
     assert cfg.hedge_trigger_price == 0
     assert cfg.hedge_buy == 0
     assert cfg.stop_loss_price == 35
-    assert cfg.hedge_max_factor == 3.0
+    assert cfg.hedge_max_factor == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1452,7 +1452,7 @@ async def test_hard_cap_guard_blocks_oversized_submission(monkeypatch):
     """Even if upstream logic passes an oversized qty, _execute_entry rejects it."""
     logged = capture_logs(monkeypatch)
     ticker = "KXLOWTBOS-26JUN23-B65.5"
-    strategy = make_strategy(monkeypatch, initial_contract_count=3, hedge_max_factor=3.0)
+    strategy = make_strategy(monkeypatch, initial_contract_count=3, hedge_max_factor=3)
     bracket = MarketBracket(
         market_ticker=ticker,
         event_ticker="EVT1",
@@ -1537,8 +1537,381 @@ async def test_regression_various_factor_values(monkeypatch, initial, factor, al
         assert qty == initial * (2 ** c)
 
 
+# ---------------------------------------------------------------------------
+# New tests: initial=1, factor=3 boundary cases (HEDGE_MAX_FACTOR=3 behaviour)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("count,exp_qty,exp_allowed,exp_max", [
+    (0, 1, True,  4),  # initial buy
+    (1, 2, True,  4),  # first recovery
+    (2, 4, True,  4),  # second recovery (last allowed)
+    (3, 0, False, 4),  # cap reached — no more buys
+    (4, 0, False, 4),  # still blocked
+])
+def test_hedge_policy_initial1_factor3(count, exp_qty, exp_allowed, exp_max):
+    """With INITIAL_CONTRACT_COUNT=1 and HEDGE_MAX_FACTOR=3: 1→2→4 then blocked."""
+    qty, allowed, max_qty = hedge_policy(1, 3, count)
+    assert qty == exp_qty
+    assert allowed is exp_allowed
+    assert max_qty == exp_max
+
+
+# ---------------------------------------------------------------------------
+# Config loading: HEDGE_MAX_FACTOR is parsed as int and enforced
+# ---------------------------------------------------------------------------
+
+def test_hedge_max_factor_loaded_as_int_from_env(monkeypatch):
+    """HEDGE_MAX_FACTOR=3 in env must produce int hedge_max_factor == 3 (not 3.0)."""
+    env = {
+        "KALSHI_API_KEY": "test-key",
+        "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
+        "MYSQL_DATABASE_URL": "******localhost:3306/test",
+        "TRADING_MODE": "PAPER",
+        "BUY_TRIGGER_PRICE": "0.82",
+        "STOP_LOSS_PRICE": "0.35",
+        "INITIAL_CONTRACT_COUNT": "1",
+        "MINIMUM_SPREAD": "0.04",
+        "MONITOR_START_PRICE": "0.80",
+        "SPREAD_MONITOR_PRICE": "0.90",
+        "HEDGE_MAX_FACTOR": "3",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("HEDGE_TRIGGER_PRICE", raising=False)
+    monkeypatch.delenv("HEDGE_BUY", raising=False)
+
+    cfg = AppConfig.from_env()
+
+    assert cfg.hedge_max_factor == 3
+    assert isinstance(cfg.hedge_max_factor, int)
+    # Verify the hedge_policy math uses the correct integer
+    qty, allowed, max_qty = hedge_policy(cfg.initial_contract_count, cfg.hedge_max_factor, 0)
+    assert allowed is True
+    assert qty == 1
+    assert max_qty == 4  # initial=1, factor=3 → max = 1 * 2^(3-1) = 4
+
+
+def test_hedge_max_factor_non_integer_string_truncates(monkeypatch):
+    """A float string like '3.7' must be truncated to int 3 (never silently exceed cap)."""
+    from app.config import _parse_hedge_max_factor
+    assert _parse_hedge_max_factor("3.7") == 3
+    assert _parse_hedge_max_factor("3.0") == 3
+    assert _parse_hedge_max_factor("2.9") == 2
+
+
+def test_hedge_max_factor_below_minimum_clamped(monkeypatch):
+    """Values below 1 must clamp to 1, never allowing zero or negative levels."""
+    from app.config import _parse_hedge_max_factor
+    assert _parse_hedge_max_factor("0") == 1
+    assert _parse_hedge_max_factor("-1") == 1
+
+
+def test_hedge_max_factor_missing_defaults_to_three(monkeypatch):
+    """Missing / empty HEDGE_MAX_FACTOR must default to 3 deterministically."""
+    from app.config import _parse_hedge_max_factor
+    assert _parse_hedge_max_factor(None) == 3
+    assert _parse_hedge_max_factor("") == 3
+    assert _parse_hedge_max_factor("   ") == 3
+
+
+def test_hedge_max_factor_invalid_string_defaults(monkeypatch):
+    """Garbage string must default safely to 3, not raise."""
+    from app.config import _parse_hedge_max_factor
+    assert _parse_hedge_max_factor("abc") == 3
+    assert _parse_hedge_max_factor("?!") == 3
+
+
+# ---------------------------------------------------------------------------
+# Startup log: strategy.hedge_cap_active is emitted with correct values
+# ---------------------------------------------------------------------------
+
 @pytest.mark.asyncio
-async def test_stop_loss_no_fill_keeps_position_and_retries(monkeypatch):
+async def test_strategy_start_logs_hedge_cap(monkeypatch):
+    """start() must log strategy.hedge_cap_active with the effective hedge settings."""
+    logged = capture_logs(monkeypatch)
+
+    def fake_create_task(coro):
+        coro.close()
+        return object()
+
+    import core.state_machine as state_machine
+    monkeypatch.setattr(state_machine.asyncio, "create_task", fake_create_task)
+
+    strategy = make_strategy(monkeypatch, initial_contract_count=1, hedge_max_factor=3)
+    monkeypatch.setattr(strategy, "_restore_positions", AsyncMock())
+    monkeypatch.setattr(strategy, "_strategy_loop", AsyncMock())
+    monkeypatch.setattr(strategy, "_db_cleanup_loop", AsyncMock())
+
+    await strategy.start()
+
+    cap_log = next(
+        (kwargs for event, kwargs in logged if event == "strategy.hedge_cap_active"),
+        None,
+    )
+    assert cap_log is not None, "strategy.hedge_cap_active must be logged at startup"
+    assert cap_log["hedge_max_factor"] == 3
+    assert cap_log["initial_contract_count"] == 1
+    assert cap_log["max_allowed_qty"] == 4  # initial=1, factor=3 → 1 * 2^2 = 4
+
+
+# ---------------------------------------------------------------------------
+# Integration: successive stop-losses advance the counter and double sizes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_successive_stop_losses_advance_counter_and_double_size(monkeypatch):
+    """
+    Simulate successive stop-losses on the same (series, date) — each on a different
+    bracket ticker (realistic: recovery buys create new positions on different brackets)
+    and assert:
+      - counter advances 0→1→2→3 across successive SLs
+      - recovery entry sizes follow initial*2**count: 2 then 4
+        (first SL count 0→1 → recovery=2; second SL count 1→2 → recovery=4)
+      - after the third SL count=3 → no more recovery buy (cap reached)
+      - stop_loss_count is incremented exactly once per stop-loss
+    """
+    series_ticker = "KXLOWTBOS"
+    date_prefix = "26JUN25"
+    # Each SL uses a distinct bracket ticker to avoid stale STOP_LOSS OrderAction conflicts
+    # (the same-ticker re-entry case is covered by test_new_entry_clears_stale_stop_loss_action)
+    ticker_sl_1 = f"{series_ticker}-{date_prefix}-B65.5"
+    ticker_sl_2 = f"{series_ticker}-{date_prefix}-B68"
+    ticker_sl_3 = f"{series_ticker}-{date_prefix}-B70"
+    ticker_buy = f"{series_ticker}-{date_prefix}-T68"
+
+    db = InMemoryDB()
+    executor = FakeExecutor()
+
+    async def fake_sell_yes(order):
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=-(order.price * order.quantity),
+            order_id="sell-id",
+            notes="filled",
+        )
+
+    executor.sell_yes = fake_sell_yes
+    strategy = make_strategy(
+        monkeypatch,
+        db=db,
+        executor=executor,
+        initial_contract_count=1,
+        hedge_max_factor=3,
+        stop_loss_price=50,
+    )
+
+    buy_orders = []
+
+    async def fake_buy_yes(order, max_price=None):
+        buy_orders.append(order.quantity)
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=order.price,
+            fill_quantity=order.quantity,
+            total_cost_cents=order.price * order.quantity,
+            order_id=f"buy-{len(buy_orders)}",
+            notes="filled",
+        )
+
+    executor.buy_yes = fake_buy_yes
+
+    # Each tuple: (sl_ticker, sl_qty, expected_recovery_qty, expected_count_after)
+    # With initial=1, factor=3:
+    #   SL at count=0 → count becomes 1 → recovery = 1 * 2**1 = 2
+    #   SL at count=1 → count becomes 2 → recovery = 1 * 2**2 = 4
+    scenarios = [
+        (ticker_sl_1, 1, 2, 1),
+        (ticker_sl_2, 2, 4, 2),
+    ]
+
+    for sl_ticker, sl_qty, expected_recovery_qty, expected_count in scenarios:
+        bracket = MarketBracket(
+            market_ticker=sl_ticker,
+            event_ticker="EVT1",
+            series_ticker=series_ticker,
+            bracket_label="held",
+            phase=Phase.HOLDING,
+            position_quantity=sl_qty,
+            avg_entry=80,
+        )
+        strategy.active_positions[sl_ticker] = bracket
+        strategy.brackets[sl_ticker] = bracket
+        bracket._stop_loss_counted = False
+        executor.positions = {sl_ticker: {"count": sl_qty}}
+        strategy.cache.update_quote(sl_ticker, 10, 12)
+
+        await strategy._evaluate_held_positions()
+
+        actual_count = await strategy._get_stop_loss_count_for_market(sl_ticker)
+        assert actual_count == expected_count, (
+            f"Counter must be {expected_count} after SL on {sl_ticker}, got {actual_count}"
+        )
+
+        strategy.brackets[ticker_buy] = MarketBracket(
+            market_ticker=ticker_buy,
+            event_ticker="EVT1",
+            series_ticker=series_ticker,
+            bracket_label="buy",
+            phase=Phase.MONITORING,
+        )
+        strategy.cache.update_quote(ticker_buy, 80, 82)
+
+        prev_buy_count = len(buy_orders)
+        await strategy._evaluate_watchlist()
+
+        assert len(buy_orders) > prev_buy_count, "A recovery buy must be placed"
+        assert buy_orders[-1] == expected_recovery_qty, (
+            f"Expected recovery buy qty={expected_recovery_qty}, got {buy_orders[-1]}. "
+            f"Counter was {expected_count}."
+        )
+
+        strategy.brackets.pop(ticker_buy, None)
+        strategy.active_positions.pop(ticker_buy, None)
+
+    # Third SL on a fresh ticker: count 2→3 → blocked
+    bracket = MarketBracket(
+        market_ticker=ticker_sl_3,
+        event_ticker="EVT1",
+        series_ticker=series_ticker,
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=4,
+        avg_entry=80,
+    )
+    strategy.active_positions[ticker_sl_3] = bracket
+    strategy.brackets[ticker_sl_3] = bracket
+    bracket._stop_loss_counted = False
+    executor.positions = {ticker_sl_3: {"count": 4}}
+    strategy.cache.update_quote(ticker_sl_3, 10, 12)
+    await strategy._evaluate_held_positions()
+
+    assert await strategy._get_stop_loss_count_for_market(ticker_sl_3) == 3
+
+    logged = capture_logs(monkeypatch)
+    strategy.brackets[ticker_buy] = MarketBracket(
+        market_ticker=ticker_buy,
+        event_ticker="EVT1",
+        series_ticker=series_ticker,
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.cache.update_quote(ticker_buy, 80, 82)
+    count_before = len(buy_orders)
+    await strategy._evaluate_watchlist()
+    assert len(buy_orders) == count_before, "No buy must be placed when cap is reached (count >= factor)"
+    assert any(event in ("hedge.cap_blocked", "phase.b.recovery_cap_reached") for event, _ in logged)
+
+
+# ---------------------------------------------------------------------------
+# Regression: counter at N → next recovery uses initial * 2**N, not base size
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("counter_n, expected_qty", [(1, 2), (2, 4)])
+async def test_recovery_uses_counter_not_base_size(monkeypatch, counter_n, expected_qty):
+    """
+    Regression: if stop_loss_count == N, the next recovery buy must be
+    initial_contract_count * 2**N, NOT the base size.  This proves the
+    endless-base-size-rebuy cannot recur.
+    """
+    series_ticker = "KXLOWTBOS"
+    date_prefix = "26JUN25"
+    ticker = f"{series_ticker}-{date_prefix}-B65.5"
+    db = InMemoryDB([
+        StopLossLedger(
+            series_ticker=series_ticker,
+            date_prefix=date_prefix,
+            stop_loss_count=counter_n,
+        )
+    ])
+    strategy = make_strategy(
+        monkeypatch,
+        db=db,
+        initial_contract_count=1,
+        hedge_max_factor=3,
+    )
+    strategy.brackets[ticker] = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker=series_ticker,
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 1
+    actual_qty = strategy.executor.orders[0][0].quantity
+    assert actual_qty == expected_qty, (
+        f"counter={counter_n} must yield qty={expected_qty} (initial*2**N), got {actual_qty}. "
+        "Endless base-size rebuy regression."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Counter fix: stale SUCCEEDED OrderAction is cleared on new entry
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_new_entry_clears_stale_stop_loss_action(monkeypatch):
+    """
+    When a new position is opened on a ticker that previously had a SUCCEEDED
+    STOP_LOSS action, _execute_entry must delete it so the next SL is processed
+    correctly and the counter is not spuriously decremented.
+    """
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    # Seed DB with a stale SUCCEEDED STOP_LOSS action (simulates a previous SL cycle)
+    stale_action = OrderAction(
+        action_key=f"{ticker}:STOP_LOSS",
+        action_type="STOP_LOSS",
+        market_ticker=ticker,
+        status=OrderActionStatus.SUCCEEDED,
+    )
+    db = InMemoryDB([stale_action])
+    executor = FakeExecutor()
+    executor.buy_success = True
+    strategy = make_strategy(
+        monkeypatch,
+        db=db,
+        executor=executor,
+        initial_contract_count=1,
+        hedge_max_factor=3,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._execute_entry(bracket, quantity=1)
+
+    # The stale STOP_LOSS action must be gone from the DB
+    remaining_actions = [
+        a for a in db.store.get(OrderAction, [])
+        if a.action_key == f"{ticker}:STOP_LOSS"
+    ]
+    assert remaining_actions == [], (
+        "Stale STOP_LOSS OrderAction must be cleared on new entry to prevent "
+        "spurious market_gone=True returns and counter decrements."
+    )
+
+
+
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 2}}
@@ -3581,7 +3954,7 @@ async def test_monitor_run_cycle_does_not_submit_stop_loss(monkeypatch):
         spread_monitor_price=90,
         minimum_spread=4,
         stop_loss_price=50,
-        hedge_max_factor=3.0,
+        hedge_max_factor=3,
         dry_run=False,
     )
     db = _FakeDB()

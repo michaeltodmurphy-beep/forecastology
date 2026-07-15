@@ -10,6 +10,46 @@ load_dotenv()
 logger = structlog.get_logger(__name__)
 
 
+def _parse_hedge_max_factor(raw: str | None) -> int:
+    """Parse HEDGE_MAX_FACTOR from an env-var string.
+
+    Accepts positive integer strings ("1", "3", "5").
+    Float strings ("3.0", "2.5") are truncated to int with a warning.
+    Missing / empty → returns default of 3.
+    Values below 1 are clamped to 1 with a warning.
+    """
+    if not raw or not raw.strip():
+        return 3
+    stripped = raw.strip()
+    try:
+        parsed_float = float(stripped)
+        parsed_int = int(parsed_float)
+        if parsed_float != parsed_int:
+            logger.warning(
+                "config.hedge_max_factor_non_integer",
+                raw=raw,
+                truncated_to=parsed_int,
+                message=f"HEDGE_MAX_FACTOR='{raw}' is not an integer; truncating to {parsed_int}",
+            )
+        if parsed_int < 1:
+            logger.warning(
+                "config.hedge_max_factor_below_minimum",
+                raw=raw,
+                clamped_to=1,
+                message=f"HEDGE_MAX_FACTOR='{raw}' is below 1; clamping to 1",
+            )
+            return 1
+        return parsed_int
+    except (ValueError, TypeError):
+        logger.warning(
+            "config.hedge_max_factor_invalid",
+            raw=raw,
+            fallback=3,
+            message=f"Unrecognized value for HEDGE_MAX_FACTOR='{raw}'; defaulting to 3",
+        )
+        return 3
+
+
 def _parse_trade_toggle(raw: str | None, name: str, default: bool = True) -> bool:
     """Parse a yes/no trade-direction toggle from an env-var string.
 
@@ -57,7 +97,7 @@ class AppConfig(BaseSettings):
     # Buy size = initial_contract_count * 2**stop_loss_count.
     # Example: initial=3, factor=3 → counts 0,1,2 allowed → sizes 3,6,12;
     #          max_allowed_qty = 3 * 2^(3-1) = 12.  count >= 3 is blocked.
-    hedge_max_factor: float = 3.0
+    hedge_max_factor: int = 3
     eval_price_floor: int = 5
     # DEPRECATED / UNUSED by trading logic. Kept only so existing .env files that
     # still define HEDGE_TRIGGER_PRICE / HEDGE_BUY continue to load, and so .env
@@ -178,6 +218,7 @@ class AppConfig(BaseSettings):
         no_trade_tickers_raw = os.getenv("NO_TRADE_TICKERS", "")
         default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
+        hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -187,4 +228,5 @@ class AppConfig(BaseSettings):
             enable_local_settle_gate=enable_local_settle_gate,
             default_entry_start_local=default_entry_start_local,
             phoenix_entry_start_local=phoenix_entry_start_local,
+            hedge_max_factor=hedge_max_factor,
         )
