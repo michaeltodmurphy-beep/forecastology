@@ -923,6 +923,20 @@ class TemperatureStrategy:
                      phoenix_entry_start_local=self.config.phoenix_entry_start_local,
                      restored_positions=len(self.active_positions))
 
+        hedge_max = int(self.config.hedge_max_factor)
+        initial_qty = self.config.initial_contract_count
+        _, _, max_allowed_qty = hedge_policy(initial_qty, hedge_max, 0)
+        logger.info(
+            "strategy.hedge_cap_active",
+            hedge_max_factor=hedge_max,
+            initial_contract_count=initial_qty,
+            max_allowed_qty=max_allowed_qty,
+            message=(
+                f"Martingale cap: initial={initial_qty}, factor={hedge_max}, "
+                f"max_qty={max_allowed_qty}; buying blocked when stop_loss_count >= {hedge_max}"
+            ),
+        )
+
         # Start DB cleanup task (runs hourly)
         asyncio.create_task(self._db_cleanup_loop())
 
@@ -1634,7 +1648,20 @@ class TemperatureStrategy:
                         last_price=reconciled_fill_price,
                     )
                     session.add(pos)
-                
+
+                # Clear any stale STOP_LOSS OrderAction from a previous position
+                # cycle on this ticker.  If a SUCCEEDED action is left in the DB
+                # from an earlier SL and the bot re-enters the same market, the
+                # idempotency guard in _execute_stop_loss would find it, treat the
+                # new SL as "already done" (market_gone=True), and then decrement
+                # the stop_loss_count — keeping the counter stuck at 0 and causing
+                # endless base-size re-buys.  Deleting it here ensures each new
+                # position starts with a fresh STOP_LOSS action record.
+                sl_action_key = f"{bracket.market_ticker}:STOP_LOSS"
+                await session.execute(
+                    delete(OrderAction).where(OrderAction.action_key == sl_action_key)
+                )
+
                 try:
                     await session.commit()
                 except Exception as e:

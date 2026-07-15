@@ -35,7 +35,32 @@ class TestAppConfig:
         assert cfg.dry_run is True
         assert cfg.enable_fast_sl_exit is False
 
-    def test_enable_fast_sl_exit_defaults_true_for_live(self):
+    def test_hedge_max_factor_loaded_as_int(self):
+        """HEDGE_MAX_FACTOR=5 in env must produce int hedge_max_factor == 5 via from_env()."""
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ['HEDGE_MAX_FACTOR'] = '5'
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.hedge_max_factor == 5
+            assert isinstance(cfg.hedge_max_factor, int)
+        finally:
+            os.environ.pop('HEDGE_MAX_FACTOR', None)
+
+    def test_hedge_max_factor_default_is_three(self):
+        """Missing HEDGE_MAX_FACTOR must default to 3."""
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ.pop('HEDGE_MAX_FACTOR', None)
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.hedge_max_factor == 3
+        assert isinstance(cfg.hedge_max_factor, int)
+
+
         import pytest
         pytest.importorskip("pydantic_settings")
         from app.config import AppConfig
