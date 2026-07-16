@@ -75,6 +75,11 @@ def _upsert_forecast(
 def run_forecast_update_job() -> None:
     """Fetch NWS hourly forecasts for all stations and persist to the DB.
 
+    Each station's high/low is derived from its LOCAL calendar day, so
+    UTC day boundaries never skew the selection.  The ``forecast_date_utc``
+    row key is UTC midnight of the station's local today (which may differ
+    by one day from the UTC date when the updater runs near midnight UTC).
+
     Errors for individual stations are logged but do not abort the batch;
     a DB transaction failure rolls back the entire batch.
     """
@@ -88,17 +93,14 @@ def run_forecast_update_job() -> None:
         return
 
     client = NWSClient(user_agent=NWS_USER_AGENT)
-    today_utc = datetime.now(timezone.utc)
-    forecast_date_utc = datetime(
-        today_utc.year, today_utc.month, today_utc.day, tzinfo=timezone.utc
-    )
+    now_utc = datetime.now(timezone.utc)
 
     try:
         with get_session() as session:
             for city, station_code in STATIONS.items():
                 try:
-                    high_time, low_time = client.fetch_high_low_for_date(
-                        station_code, today_utc
+                    high_time, low_time, forecast_date_utc = (
+                        client.fetch_high_low_for_date(station_code, now_utc)
                     )
                     _upsert_forecast(
                         session,
@@ -108,9 +110,10 @@ def run_forecast_update_job() -> None:
                         low_time,
                     )
                     logger.info(
-                        "nws.updated city=%s station=%s high=%s low=%s",
+                        "nws.updated city=%s station=%s local_date=%s high=%s low=%s",
                         city,
                         station_code,
+                        forecast_date_utc.date(),
                         high_time,
                         low_time,
                     )
