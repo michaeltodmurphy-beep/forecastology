@@ -28,6 +28,10 @@ except ImportError:
 if TYPE_CHECKING:
     from app.config import AppConfig
 
+# Imported lazily to keep this module free of NWS/DB import-time side-effects.
+# nws.stations is a pure data module so this import is safe.
+from nws.stations import STATIONS
+
 # ---------------------------------------------------------------------------
 # Series-prefix → IANA timezone
 # ---------------------------------------------------------------------------
@@ -119,6 +123,28 @@ def get_series_prefix(ticker: str) -> str:
 def get_series_timezone(ticker: str) -> Optional[str]:
     """Return the IANA timezone name for a market ticker, or None if unknown."""
     return SERIES_TIMEZONE.get(get_series_prefix(ticker))
+
+
+def get_series_station_code(ticker: str) -> Optional[str]:
+    """Return the NWS ICAO station code for a market ticker, or None if unknown.
+
+    Composes two existing mappings:
+        series_prefix → SERIES_CITY[prefix] → STATIONS[city] → ICAO code
+
+    Examples::
+
+        get_series_station_code("KXHIGHTATL-26JUL16-B95")  # → "KATL"
+        get_series_station_code("KXLOWTSATX-26JUL16-B55.5")  # → "KSAT"
+        get_series_station_code("KXHIGHTSFO-26JUL16-B70")   # → "KSFO"
+        get_series_station_code("KXLOWTPHX-26JUL16-B90")   # → "KPHX"
+
+    Returns None for any ticker whose series prefix is not in SERIES_CITY.
+    """
+    prefix = get_series_prefix(ticker)
+    city = SERIES_CITY.get(prefix)
+    if city is None:
+        return None
+    return STATIONS.get(city)
 
 
 def _parse_hhmm(value: str) -> datetime.time:

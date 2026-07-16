@@ -45,6 +45,25 @@ def _latest_forecast(session, station_code: str) -> Optional[StationForecast]:
     )
 
 
+def has_forecast(station_code: str) -> bool:
+    """Return ``True`` if at least one forecast row exists for *station_code*.
+
+    Used by the entry gate to distinguish "gate closed because outside window"
+    from "gate closed because no data" — allowing fail-open behavior in the
+    latter case without changing :func:`is_trading_gate_open`'s semantics.
+
+    Returns ``False`` on any DB error (treating it the same as no data).
+    """
+    try:
+        with get_session() as session:
+            return _latest_forecast(session, station_code) is not None
+    except SQLAlchemyError:
+        logger.exception(
+            "gate.db_error station=%s — has_forecast returning False", station_code
+        )
+        return False
+
+
 def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
     """Return ``True`` if trading is currently allowed for *station_code*.
 
