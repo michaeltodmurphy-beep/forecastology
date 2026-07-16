@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import nws.client as nws_client_module
 from nws.client import NWSClient, get_trading_day_window
 
 
@@ -353,3 +354,28 @@ class TestDeriveDailyHighLowTimesLocal:
         )
         assert high == to_utc(2025, 7, 5, 15, 0)
         assert low == to_utc(2025, 7, 5, 0, 0)
+
+
+class TestStationMetadata:
+    def test_points_lookup_uses_4_decimal_coordinates(self, monkeypatch):
+        nws_client_module._station_cache.clear()
+        client = NWSClient(user_agent="test/1.0")
+        urls = []
+
+        def fake_get_json(url: str) -> dict:
+            urls.append(url)
+            if url.endswith("/stations/KATL"):
+                return {"geometry": {"coordinates": [-84.4277005, 33.6407289]}}
+            if "/points/" in url:
+                return {
+                    "properties": {
+                        "forecastHourly": "https://example.test/hourly",
+                        "timeZone": "America/New_York",
+                    }
+                }
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        monkeypatch.setattr(client, "_get_json", fake_get_json)
+        client._get_station_metadata("KATL")
+
+        assert urls[1].endswith("/points/33.6407,-84.4277")

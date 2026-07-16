@@ -166,12 +166,16 @@ class NWSClient:
         lon, lat = coords[0], coords[1]
 
         # Step 2: coordinates → forecastHourly URL + station timezone
-        points_data = self._get_json(f"{NWS_BASE}/points/{lat},{lon}")
+        rounded_lat = round(float(lat), 4)
+        rounded_lon = round(float(lon), 4)
+        points_data = self._get_json(
+            f"{NWS_BASE}/points/{rounded_lat:.4f},{rounded_lon:.4f}"
+        )
         props = points_data.get("properties", {})
         hourly_url: Optional[str] = props.get("forecastHourly")
         if not hourly_url:
             raise ValueError(
-                f"No forecastHourly URL from /points/{lat},{lon}"
+                f"No forecastHourly URL from /points/{rounded_lat:.4f},{rounded_lon:.4f}"
             )
         tz_name: str = props.get("timeZone") or "UTC"
 
