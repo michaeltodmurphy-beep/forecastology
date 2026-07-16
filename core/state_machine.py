@@ -10,7 +10,7 @@ from core.types import (
     Phase, MarketBracket, OrderRequest, OrderSide, OrderBook, OrderBookLevel,
 )
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
-from core.local_time_gate import is_entry_allowed
+from core.local_time_gate import is_entry_allowed, get_series_station_code
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -1460,6 +1460,36 @@ class TemperatureStrategy:
                 if not gate_ok:
                     logger.info("entry.blocked_local_settle_gate", **gate_ctx)
                     continue
+                # -----------------------------------
+
+                # --- NWS temperature-window gate ---
+                try:
+                    from nws.gate import has_forecast, is_trading_gate_open
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    _station = get_series_station_code(ticker)
+                    if _station is not None:
+                        if not has_forecast(_station):
+                            logger.info(
+                                "entry.nws_temp_gate_no_data_fail_open",
+                                ticker=ticker,
+                                station=_station,
+                            )
+                        else:
+                            _gate_open = is_trading_gate_open(_station, now_utc)
+                            if not _gate_open:
+                                logger.info(
+                                    "entry.blocked_nws_temp_gate",
+                                    ticker=ticker,
+                                    station=_station,
+                                    now_utc=now_utc.isoformat(),
+                                )
+                                continue
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "entry.nws_temp_gate_error_fail_open",
+                        ticker=ticker,
+                        exc_info=True,
+                    )
                 # -----------------------------------
 
                 bracket.crossed_buy = True
