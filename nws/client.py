@@ -5,8 +5,8 @@ Flow per station:
   1. GET /stations/{station_code}       → lat/lon coordinates
   2. GET /points/{lat},{lon}            → forecastHourly URL + station timezone
   3. GET {forecastHourly_url}           → hourly temperature periods
-  4. Derive daily high/low times from the hourly periods, filtered by the
-     station's LOCAL calendar day (not UTC day)
+  4. Derive daily high/low times from hourly periods filtered by station-local
+     Kalshi trading-day windows (with ``KPHX`` midnight exception)
 
 Grid-point metadata (lat/lon, forecastHourly URL, and IANA timezone name) is
 cached in memory per station to avoid redundant round-trips on every scheduled
@@ -17,7 +17,8 @@ All datetimes returned are timezone-aware UTC ``datetime`` objects.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -33,6 +34,63 @@ NWS_BASE = "https://api.weather.gov"
 
 # In-memory cache: station_code → (lat, lon, forecastHourly_url, tz_name)
 _station_cache: Dict[str, Tuple[float, float, str, str]] = {}
+
+
+@dataclass(frozen=True)
+class TradingDayWindow:
+    """Station-local trading-day boundaries with UTC conversions."""
+
+    station_code: str
+    tz_name: str
+    mode: str
+    trading_date_local: date
+    local_start: datetime
+    local_end_exclusive: datetime
+    utc_start: datetime
+    utc_end_exclusive: datetime
+
+
+def get_trading_day_window(
+    station_code: str,
+    station_tz: ZoneInfo,
+    now_utc: datetime,
+) -> TradingDayWindow:
+    """Return the active Kalshi trading-day window for ``station_code``.
+
+    Rules by station-local time:
+      - All stations except ``KPHX``: 01:00:00 → next local day 01:00:00.
+      - ``KPHX`` only: 00:00:00 → next local day 00:00:00.
+    """
+    now_utc = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    now_local = now_utc.astimezone(station_tz)
+
+    if station_code == "KPHX":
+        mode = "midnight_to_midnight"
+        trading_date_local = now_local.date()
+        local_start = datetime.combine(
+            trading_date_local, time(0, 0), tzinfo=station_tz
+        )
+    else:
+        mode = "0100_to_005959"
+        trading_date_local = now_local.date()
+        if now_local.time() < time(1, 0):
+            trading_date_local -= timedelta(days=1)
+        local_start = datetime.combine(
+            trading_date_local, time(1, 0), tzinfo=station_tz
+        )
+
+    local_end_exclusive = local_start + timedelta(days=1)
+    return TradingDayWindow(
+        station_code=station_code,
+        tz_name=getattr(station_tz, "key", str(station_tz)),
+        mode=mode,
+        trading_date_local=trading_date_local,
+        local_start=local_start,
+        local_end_exclusive=local_end_exclusive,
+        utc_start=local_start.astimezone(timezone.utc),
+        utc_end_exclusive=local_end_exclusive.astimezone(timezone.utc),
+    )
 
 
 class NWSClient:
@@ -198,27 +256,28 @@ class NWSClient:
         periods: List[dict],
         station_tz: ZoneInfo,
         now_utc: datetime,
+        station_code: str = "",
     ) -> Tuple[Optional[datetime], Optional[datetime]]:
-        """Find the UTC times of the daily high and low using the station's LOCAL date.
+        """Find UTC high/low times using station-local Kalshi trading-day windows.
 
         Converts each period's start time to the station's local timezone and
-        filters by the local calendar day that corresponds to *now_utc*.  This
-        prevents UTC day boundaries from splitting a station's effective trading
-        day (e.g. a US/Pacific station at 01:00 UTC is still on the previous
-        local calendar day).
+        filters by the active trading-day window:
+          - non-``KPHX``: 01:00 local to next-day 00:59:59 local
+          - ``KPHX``: 00:00 local to 23:59:59 local
 
         On temperature tie, the earliest occurrence is chosen.
 
         Args:
             periods: List of NWS hourly forecast period dicts.
             station_tz: IANA timezone for the station (from /points response).
-            now_utc: The UTC instant that defines "today" in station-local time.
+            now_utc: UTC instant used to resolve the current trading-day window.
+            station_code: Station code; only ``KPHX`` uses midnight-to-midnight.
 
         Returns:
             Tuple of (high_time_utc, low_time_utc); either may be None if
-            no hourly data exists for the station's local day.
+            no hourly data exists for the station's trading-day window.
         """
-        target_local_date = now_utc.astimezone(station_tz).date()
+        window = get_trading_day_window(station_code, station_tz, now_utc)
 
         day_periods: List[Tuple[datetime, float]] = []
         for p in periods:
@@ -227,7 +286,8 @@ class NWSClient:
             if start_str is None or temp is None:
                 continue
             t_utc = self._parse_iso_dt(start_str)
-            if t_utc.astimezone(station_tz).date() == target_local_date:
+            t_local = t_utc.astimezone(station_tz)
+            if window.local_start <= t_local < window.local_end_exclusive:
                 day_periods.append((t_utc, float(temp)))
 
         if not day_periods:
@@ -247,9 +307,8 @@ class NWSClient:
     ) -> Tuple[Optional[datetime], Optional[datetime], datetime]:
         """Fetch the daily high/low temperature times for a station.
 
-        Periods are filtered by the station's LOCAL calendar day that
-        corresponds to *target_date_utc*, so that UTC day boundaries never
-        split the station's effective trading day.
+        Periods are filtered by the station's active local-time trading-day
+        window (Kalshi rule), then persisted with UTC timestamps.
 
         Args:
             station_code: NWS ICAO code (e.g. ``"KATL"``).
@@ -258,24 +317,35 @@ class NWSClient:
 
         Returns:
             ``(high_time_utc, low_time_utc, local_forecast_date_utc)`` where
-            the first two are timezone-aware UTC datetimes of the local-day
+            the first two are timezone-aware UTC datetimes of the trading-window
             high/low (or ``None`` when no data exists), and the third is UTC
-            midnight of the station's local today (used as the DB row key).
+            midnight of the station-local trading-day start date (DB row key).
         """
         _lat, _lon, hourly_url, tz_name = self._get_station_metadata(station_code)
         station_tz = ZoneInfo(tz_name)
-        local_date = target_date_utc.astimezone(station_tz).date()
+        window = get_trading_day_window(station_code, station_tz, target_date_utc)
         local_forecast_date_utc = datetime(
-            local_date.year, local_date.month, local_date.day, tzinfo=timezone.utc
+            window.trading_date_local.year,
+            window.trading_date_local.month,
+            window.trading_date_local.day,
+            tzinfo=timezone.utc,
         )
-        logger.debug(
-            "nws.local_tz station=%s tz=%s local_date=%s",
+        logger.info(
+            "nws.trading_day_window station=%s tz=%s mode=%s now_utc=%s "
+            "local_start=%s local_end_exclusive=%s utc_start=%s "
+            "utc_end_exclusive=%s trading_date_local=%s",
             station_code,
             tz_name,
-            local_date,
+            window.mode,
+            target_date_utc,
+            window.local_start.isoformat(),
+            window.local_end_exclusive.isoformat(),
+            window.utc_start.isoformat(),
+            window.utc_end_exclusive.isoformat(),
+            window.trading_date_local.isoformat(),
         )
         periods = self._get_hourly_periods(hourly_url)
         high_time, low_time = self.derive_daily_high_low_times_local(
-            periods, station_tz, target_date_utc
+            periods, station_tz, target_date_utc, station_code=station_code
         )
         return high_time, low_time, local_forecast_date_utc

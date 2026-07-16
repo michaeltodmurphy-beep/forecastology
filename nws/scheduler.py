@@ -110,10 +110,10 @@ def run_forecast_update_job() -> None:
                         low_time,
                     )
                     logger.info(
-                        "nws.updated city=%s station=%s local_date=%s high=%s low=%s",
+                        "nws.updated city=%s station=%s trading_date_utc=%s high_utc=%s low_utc=%s",
                         city,
                         station_code,
-                        forecast_date_utc.date(),
+                        forecast_date_utc.isoformat(),
                         high_time,
                         low_time,
                     )
