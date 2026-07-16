@@ -10,6 +10,8 @@ from data.websocket_manager import WebSocketManager
 from execution.factory import create_executor
 from execution.sl_watcher import StopLossWatcher
 from core.state_machine import TemperatureStrategy
+from nws.scheduler import bootstrap as nws_bootstrap
+from nws.scheduler import shutdown as shutdown_nws_scheduler
 
 logger = structlog.get_logger(__name__)
 
@@ -24,6 +26,24 @@ def _acquire_lock():
         lock_handle.close()
         sys.exit(1)
     return lock_handle
+
+
+async def _start_nws_backend() -> None:
+    try:
+        await asyncio.to_thread(nws_bootstrap)
+        logger.info("nws.bootstrap.started")
+    except Exception:
+        logger.exception(
+            "nws.bootstrap_failed",
+            message="NWS backend failed to start; continuing trading loop without NWS forecasts",
+        )
+
+
+def _shutdown_nws_backend() -> None:
+    try:
+        shutdown_nws_scheduler()
+    except Exception:
+        logger.exception("nws.shutdown_failed")
 
 
 async def main():
@@ -47,6 +67,7 @@ async def main():
             logger.warning("app.dry_run", message="DRY RUN — no live orders will be placed")
         db = DatabaseManager(config.mysql_database_url)
         await db.initialize()
+        await _start_nws_backend()
         cache = TickerCache()
         ws_manager = WebSocketManager(ws_url=config.ws_url, api_key=config.kalshi_api_key, private_key_path=config.kalshi_private_key_path)
         executor = create_executor(
@@ -73,6 +94,7 @@ async def main():
         except asyncio.CancelledError:
             pass
     finally:
+        _shutdown_nws_backend()
         if stop_loss_watcher is not None:
             await stop_loss_watcher.stop()
         if stop_loss_task is not None:

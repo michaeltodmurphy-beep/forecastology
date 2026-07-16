@@ -1,6 +1,7 @@
 # nws/config.py
 """NWS forecast backend configuration loaded from environment variables."""
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -21,5 +22,18 @@ GATE_HIGH_AFTER: int = int(os.getenv("GATE_HIGH_AFTER", "30"))
 # Database URL for the sync SQLAlchemy engine used by the NWS scheduler.
 # Uses MYSQL_URL if set; falls back to MYSQL_DATABASE_URL (async URL) after
 # converting the driver to the sync pymysql variant.
+def _to_sync_mysql_url(raw_url: str) -> str:
+    raw_url = raw_url.strip()
+    if not raw_url:
+        return ""
+
+    if "://" not in raw_url:
+        return re.sub(r"aiomysql", "pymysql", raw_url, count=1, flags=re.IGNORECASE)
+
+    scheme, rest = raw_url.split("://", 1)
+    scheme = re.sub(r"aiomysql", "pymysql", scheme, count=1, flags=re.IGNORECASE)
+    return f"{scheme}://{rest}"
+
+
 _raw_url: str = (os.getenv("MYSQL_URL") or os.getenv("MYSQL_DATABASE_URL", "")).strip()
-MYSQL_URL: str = _raw_url.replace("mysql+aiomysql://", "mysql+pymysql://")
+MYSQL_URL: str = _to_sync_mysql_url(_raw_url)

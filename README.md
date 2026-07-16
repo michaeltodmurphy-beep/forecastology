@@ -487,11 +487,14 @@ nws/
 
 **Bootstrap at application startup** (call once, non-blocking):
 
+`run.py` now starts this backend automatically in-process (it runs
+`bootstrap()` via `asyncio.to_thread(...)` so the async trading loop is not blocked).
+
 ```python
 from nws.scheduler import bootstrap, shutdown
 
 # In your main entry point, before the trading loop:
-bootstrap()   # initialises DB + immediate update + starts background scheduler
+await asyncio.to_thread(bootstrap)  # initialises DB + immediate update + scheduler
 
 # On clean exit:
 shutdown()
