@@ -246,6 +246,7 @@ See `db/init_schema.sql` for the full schema. Key tables:
 - `positions` — open positions
 - `executed_trades` — trade history
 - `stop_loss_ledger` — per-(series, day) martingale stop-loss counters
+- `station_forecasts` — NWS daily high/low temperature forecast times per station
 
 ## Prerequisites
 
@@ -451,3 +452,85 @@ See `db/init_schema.sql` for the full schema. Key tables:
 - `positions` — open positions
 - `executed_trades` — trade history
 - `stop_loss_ledger` — per-(series, day) martingale stop-loss counters
+- `station_forecasts` — NWS daily high/low temperature forecast times per station
+
+## NWS Forecast Backend
+
+The `nws/` package provides a production-ready temperature forecast integration with the National Weather Service API. It runs as a background service alongside the main trading loop, keeping the daily high/low forecast times up to date in the database.
+
+### Architecture
+
+```
+nws/
+├── __init__.py       # Package
+├── config.py         # Environment variable loading
+├── stations.py       # ICAO station codes for 20 monitored cities
+├── client.py         # NWS API client (station → grid → hourly forecast)
+├── db.py             # Synchronous SQLAlchemy engine + session context manager
+├── gate.py           # is_trading_gate_open() trading gate function
+└── scheduler.py      # APScheduler background updater + bootstrap()
+```
+
+### NWS Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NWS_USER_AGENT` | _(required)_ | Custom User-Agent for the NWS API (required by their ToS). Example: `forecastology/1.0 (you@yourdomain.com)` |
+| `MYSQL_URL` | _(falls back to `MYSQL_DATABASE_URL`)_ | Sync `pymysql` database URL for the NWS scheduler. If unset, `MYSQL_DATABASE_URL` is used with the driver converted to `pymysql`. |
+| `HIGH_LOW_UPDATE` | `60` | How often (minutes) to refresh NWS forecast data in the background |
+| `GATE_LOW_BEFORE` | `120` | Minutes before the forecasted low to open the trading gate |
+| `GATE_LOW_AFTER` | `45` | Minutes after the forecasted low to close the trading gate |
+| `GATE_HIGH_BEFORE` | `60` | Minutes before the forecasted high to open the trading gate |
+| `GATE_HIGH_AFTER` | `30` | Minutes after the forecasted high to close the trading gate |
+
+### NWS Usage
+
+**Bootstrap at application startup** (call once, non-blocking):
+
+```python
+from nws.scheduler import bootstrap, shutdown
+
+# In your main entry point, before the trading loop:
+bootstrap()   # initialises DB + immediate update + starts background scheduler
+
+# On clean exit:
+shutdown()
+```
+
+**Check if the trading gate is open:**
+
+```python
+from datetime import datetime, timezone
+from nws.gate import is_trading_gate_open
+
+allowed = is_trading_gate_open("KATL", datetime.now(timezone.utc))
+```
+
+**Standalone updater run** (for manual refresh or cron):
+
+```python
+from nws.scheduler import run_forecast_update_job
+
+run_forecast_update_job()
+```
+
+### NWS API Flow
+
+1. `GET /stations/{ICAO}` → lat/lon coordinates (cached per process)
+2. `GET /points/{lat},{lon}` → `forecastHourly` URL (cached per process)
+3. `GET {forecastHourly}` → hourly temperature periods
+4. Parse periods to find the UTC hour of the daily high and low
+
+### station_forecasts Table
+
+One row per `(station_code, forecast_date_utc)`:
+
+| Column | Type | Description |
+|---|---|---|
+| `station_code` | VARCHAR(8) | NWS ICAO code, e.g. `KATL` |
+| `forecast_date_utc` | DATETIME | UTC midnight of the forecast day |
+| `high_time_utc` | DATETIME | UTC time of daily high temperature |
+| `low_time_utc` | DATETIME | UTC time of daily low temperature |
+| `updated_at` | DATETIME | Last refresh timestamp |
+
+Unique index on `(station_code, forecast_date_utc)` with upsert semantics.

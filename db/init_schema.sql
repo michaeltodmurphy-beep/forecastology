@@ -110,3 +110,21 @@ CREATE TABLE IF NOT EXISTS order_actions (
     UNIQUE KEY uq_order_action_key (action_key),
     INDEX idx_order_actions_market (market_ticker)
 ) ENGINE=InnoDB;
+
+-- NWS forecast backend: stores daily high/low temperature forecast times per station.
+-- Updated by the background APScheduler job every HIGH_LOW_UPDATE minutes.
+CREATE TABLE IF NOT EXISTS station_forecasts (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    -- NWS ICAO airport code, e.g. 'KATL'
+    station_code VARCHAR(8) NOT NULL,
+    -- UTC calendar day this forecast covers (midnight UTC)
+    forecast_date_utc DATETIME NOT NULL,
+    -- UTC time when the daily high temperature is forecast to occur
+    high_time_utc DATETIME DEFAULT NULL,
+    -- UTC time when the daily low temperature is forecast to occur
+    low_time_utc DATETIME DEFAULT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_station_forecast_date (station_code, forecast_date_utc),
+    INDEX idx_sf_station_code (station_code)
+) ENGINE=InnoDB;
+
