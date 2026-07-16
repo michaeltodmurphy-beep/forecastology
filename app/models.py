@@ -1,7 +1,7 @@
 # app/models.py
 from sqlalchemy import (
     Column, String, Integer, Float, DateTime, Enum, BigInteger, Text, JSON,
-    UniqueConstraint,
+    UniqueConstraint, Index,
 )
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
@@ -194,3 +194,37 @@ class OrderAction(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StationForecast(Base):
+    """Stores the forecasted time of daily high and low temperatures per station.
+
+    Updated periodically by the NWS background scheduler.  All datetimes are
+    stored in UTC; ``DateTime(timezone=True)`` instructs SQLAlchemy to keep
+    timezone information on the Python side even though MySQL DATETIME columns
+    do not themselves carry timezone data.
+    """
+
+    __tablename__ = "station_forecasts"
+    __table_args__ = (
+        UniqueConstraint(
+            "station_code", "forecast_date_utc", name="uq_station_forecast_date"
+        ),
+        Index("idx_sf_station_code", "station_code"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # ICAO airport code, e.g. "KATL"
+    station_code = Column(String(8), nullable=False)
+    # The UTC calendar day this forecast covers (time component is midnight UTC)
+    forecast_date_utc = Column(DateTime(timezone=True), nullable=False)
+    # UTC hour at which the daily high temperature is forecast to occur
+    high_time_utc = Column(DateTime(timezone=True), nullable=True)
+    # UTC hour at which the daily low temperature is forecast to occur
+    low_time_utc = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
