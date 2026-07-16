@@ -216,7 +216,8 @@ class StationForecast(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     # ICAO airport code, e.g. "KATL"
     station_code = Column(String(8), nullable=False)
-    # The UTC calendar day this forecast covers (time component is midnight UTC)
+    # UTC midnight of the station-local trading-day start date
+    # (Kalshi: non-KPHX 01:00→00:59:59, KPHX 00:00→23:59:59).
     forecast_date_utc = Column(DateTime(timezone=True), nullable=False)
     # UTC hour at which the daily high temperature is forecast to occur
     high_time_utc = Column(DateTime(timezone=True), nullable=True)

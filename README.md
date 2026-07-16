@@ -519,12 +519,13 @@ run_forecast_update_job()
 1. `GET /stations/{ICAO}` → lat/lon coordinates (cached per process)
 2. `GET /points/{lat},{lon}` → `forecastHourly` URL **and `timeZone`** (IANA name, cached per process)
 3. `GET {forecastHourly}` → hourly temperature periods
-4. Parse periods to find the **station-local-day** high and low: each period's
-   `startTime` is converted to the station's IANA timezone and filtered by the
-   station's local calendar date. This ensures UTC day boundaries never split a
-   station's effective trading day (e.g. a US/Pacific station at 01:00 UTC is
-   still on the previous local calendar day). The resulting high/low times are
-   stored as UTC.
+4. Parse periods to find the forecast high/low inside the station's **Kalshi
+   trading-day window** (local-time rule, stored in UTC):
+   - All stations except `KPHX`: `01:00:00` local → next-day `00:59:59` local
+     (`[01:00, next 01:00)` in code).
+   - `KPHX` only: `00:00:00` local → `23:59:59` local (`[00:00, next 00:00)`).
+   Each period `startTime` is converted to station-local time for filtering,
+   while persisted timestamps remain UTC.
 
 ### station_forecasts Table
 
@@ -533,11 +534,12 @@ One row per `(station_code, forecast_date_utc)`:
 | Column | Type | Description |
 |---|---|---|
 | `station_code` | VARCHAR(8) | NWS ICAO code, e.g. `KATL` |
-| `forecast_date_utc` | DATETIME | UTC midnight of the station's **local** forecast day |
-| `high_time_utc` | DATETIME | UTC time of the local-day daily high temperature |
-| `low_time_utc` | DATETIME | UTC time of the local-day daily low temperature |
+| `forecast_date_utc` | DATETIME | UTC midnight of the station-local **trading-day start date** |
+| `high_time_utc` | DATETIME | UTC time of the trading-window daily high temperature |
+| `low_time_utc` | DATETIME | UTC time of the trading-window daily low temperature |
 | `updated_at` | DATETIME | Last refresh timestamp |
 
 Unique index on `(station_code, forecast_date_utc)` with upsert semantics.
-`forecast_date_utc` is UTC midnight of the station's local calendar today, so
-it may differ from the UTC calendar date when the updater runs near midnight UTC.
+`forecast_date_utc` is UTC midnight of the station-local trading-day start date
+(for non-`KPHX`, local `00:00`–`00:59:59` still maps to the prior trading day),
+so it may differ from the UTC calendar date when the updater runs near rollovers.

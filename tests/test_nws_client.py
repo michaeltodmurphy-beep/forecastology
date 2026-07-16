@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from nws.client import NWSClient
+from nws.client import NWSClient, get_trading_day_window
 
 
 def _utc(year: int, month: int, day: int, hour: int) -> datetime:
@@ -190,45 +190,44 @@ class TestDeriveDailyHighLowTimesLocal:
         assert low == _utc(2025, 7, 4, 10)
 
     def test_western_station_utc_boundary_exclusion(self):
-        """Periods from UTC 00:00-04:59 belong to the *previous* local day for
-        a US/Pacific station (UTC-7 in summer) and must NOT appear in the
-        local-day result when now_utc is early on 2025-07-05 UTC."""
+        """Non-KPHX uses a 01:00→next 00:59:59 local trading-day window."""
         client = self._client()
         tz = ZoneInfo("America/Los_Angeles")  # UTC-7 in summer (PDT)
-        # 2025-07-05T02:00Z → 2025-07-04T19:00 PDT → local date = 2025-07-04
+        # 2025-07-05T02:00Z → 2025-07-04T19:00 PDT
+        # Active trading window: 2025-07-04 01:00 → 2025-07-05 01:00 local
         now_utc = datetime(2025, 7, 5, 2, 0, tzinfo=timezone.utc)
         periods = [
-            # 2025-07-04 local (should be included)
+            # Included in Jul 4 trading window
             _period(datetime(2025, 7, 4, 15, 0, tzinfo=timezone.utc), 60.0),  # 08:00 PDT
             _period(datetime(2025, 7, 4, 22, 0, tzinfo=timezone.utc), 95.0),  # 15:00 PDT — high
             # 2025-07-05T00:00Z = 2025-07-04T17:00 PDT → still local July 4
             _period(datetime(2025, 7, 5, 0, 0, tzinfo=timezone.utc), 85.0),
-            # 2025-07-05T07:00Z = 2025-07-05T00:00 PDT → local July 5, excluded
+            # 2025-07-05T07:00Z = 2025-07-05T00:00 PDT → still in Jul 4 trading window
             _period(datetime(2025, 7, 5, 7, 0, tzinfo=timezone.utc), 55.0),
         ]
         high, low = client.derive_daily_high_low_times_local(periods, tz, now_utc)
-        # Only the three periods on local 2025-07-04 should be used
+        # All four periods are inside the trading-day window
         assert high == datetime(2025, 7, 4, 22, 0, tzinfo=timezone.utc)
-        assert low == datetime(2025, 7, 4, 15, 0, tzinfo=timezone.utc)
+        assert low == datetime(2025, 7, 5, 7, 0, tzinfo=timezone.utc)
 
     def test_eastern_station_utc_boundary_inclusion(self):
-        """For a US/Eastern station, UTC 00:00-03:59 is still the prior local
-        day, so a period at 00:30 UTC on July 5 falls on local July 4."""
+        """Late-night local hours remain in the prior non-KPHX trading day."""
         client = self._client()
         tz = ZoneInfo("America/New_York")  # UTC-4 in summer (EDT)
-        # 2025-07-04T22:00Z → 2025-07-04T18:00 EDT → local date = 2025-07-04
+        # 2025-07-04T22:00Z → 2025-07-04T18:00 EDT
+        # Active trading window: 2025-07-04 01:00 → 2025-07-05 01:00 local
         now_utc = datetime(2025, 7, 4, 22, 0, tzinfo=timezone.utc)
         periods = [
             _period(_utc(2025, 7, 4, 12), 65.0),   # 08:00 EDT — low
             _period(_utc(2025, 7, 4, 18), 90.0),   # 14:00 EDT — high
             # 2025-07-05T00:30Z = 2025-07-04T20:30 EDT → still local July 4
             _period(datetime(2025, 7, 5, 0, 30, tzinfo=timezone.utc), 78.0),
-            # 2025-07-05T04:00Z = 2025-07-05T00:00 EDT → local July 5, excluded
+            # 2025-07-05T04:00Z = 2025-07-05T00:00 EDT → still in Jul 4 trading window
             _period(datetime(2025, 7, 5, 4, 0, tzinfo=timezone.utc), 55.0),
         ]
         high, low = client.derive_daily_high_low_times_local(periods, tz, now_utc)
         assert high == _utc(2025, 7, 4, 18)
-        assert low == _utc(2025, 7, 4, 12)
+        assert low == _utc(2025, 7, 5, 4)
 
     def test_returns_none_none_for_empty_periods(self):
         client = self._client()
@@ -279,3 +278,78 @@ class TestDeriveDailyHighLowTimesLocal:
         high, low = client.derive_daily_high_low_times_local(periods, tz, now_utc)
         assert high == _utc(2025, 7, 4, 15)
         assert low == _utc(2025, 7, 4, 15)
+
+    def test_non_kphx_boundary_005959_uses_previous_trading_day(self):
+        tz = ZoneInfo("America/Chicago")
+        now_utc = datetime(2025, 7, 5, 5, 59, 59, tzinfo=timezone.utc)  # 00:59:59 local
+        window = get_trading_day_window("KATL", tz, now_utc)
+        assert window.trading_date_local.isoformat() == "2025-07-04"
+        assert window.local_start.isoformat() == "2025-07-04T01:00:00-05:00"
+        assert window.local_end_exclusive.isoformat() == "2025-07-05T01:00:00-05:00"
+        assert window.utc_start.isoformat() == "2025-07-04T06:00:00+00:00"
+        assert window.utc_end_exclusive.isoformat() == "2025-07-05T06:00:00+00:00"
+
+    def test_non_kphx_boundary_010000_starts_new_trading_day(self):
+        tz = ZoneInfo("America/Chicago")
+        now_utc = datetime(2025, 7, 5, 6, 0, 0, tzinfo=timezone.utc)  # 01:00:00 local
+        window = get_trading_day_window("KATL", tz, now_utc)
+        assert window.trading_date_local.isoformat() == "2025-07-05"
+        assert window.local_start.isoformat() == "2025-07-05T01:00:00-05:00"
+        assert window.utc_start.isoformat() == "2025-07-05T06:00:00+00:00"
+
+    def test_non_kphx_boundary_just_after_010000_stays_new_trading_day(self):
+        tz = ZoneInfo("America/Chicago")
+        now_utc = datetime(2025, 7, 5, 6, 0, 1, tzinfo=timezone.utc)  # 01:00:01 local
+        window = get_trading_day_window("KATL", tz, now_utc)
+        assert window.trading_date_local.isoformat() == "2025-07-05"
+        assert window.local_start.isoformat() == "2025-07-05T01:00:00-05:00"
+
+    def test_kphx_window_is_midnight_to_midnight(self):
+        tz = ZoneInfo("America/Phoenix")
+        now_utc = datetime(2025, 7, 5, 19, 0, 0, tzinfo=timezone.utc)  # 12:00 local
+        window = get_trading_day_window("KPHX", tz, now_utc)
+        assert window.trading_date_local.isoformat() == "2025-07-05"
+        assert window.local_start.isoformat() == "2025-07-05T00:00:00-07:00"
+        assert window.local_end_exclusive.isoformat() == "2025-07-06T00:00:00-07:00"
+        assert window.utc_start.isoformat() == "2025-07-05T07:00:00+00:00"
+        assert window.utc_end_exclusive.isoformat() == "2025-07-06T07:00:00+00:00"
+
+    def test_non_kphx_filtering_uses_trading_window_not_calendar_day(self):
+        client = self._client()
+        tz = ZoneInfo("America/New_York")
+        now_utc = datetime(2025, 7, 5, 4, 59, 59, tzinfo=timezone.utc)  # 00:59:59 local
+        to_utc = lambda y, m, d, h, minute=0: datetime(
+            y, m, d, h, minute, tzinfo=tz
+        ).astimezone(timezone.utc)
+        periods = [
+            _period(to_utc(2025, 7, 4, 0, 30), 99.0),  # before 01:00 local — excluded
+            _period(to_utc(2025, 7, 4, 1, 0), 60.0),   # window start — included
+            _period(to_utc(2025, 7, 4, 18, 0), 90.0),  # included high
+            _period(to_utc(2025, 7, 5, 0, 59), 85.0),  # still included
+            _period(to_utc(2025, 7, 5, 1, 0), 40.0),   # next window start — excluded
+        ]
+        high, low = client.derive_daily_high_low_times_local(
+            periods, tz, now_utc, station_code="KATL"
+        )
+        assert high == to_utc(2025, 7, 4, 18, 0)
+        assert low == to_utc(2025, 7, 4, 1, 0)
+
+    def test_kphx_filtering_uses_midnight_window(self):
+        client = self._client()
+        tz = ZoneInfo("America/Phoenix")
+        now_utc = datetime(2025, 7, 5, 19, 0, 0, tzinfo=timezone.utc)  # 12:00 local
+        to_utc = lambda y, m, d, h, minute=0: datetime(
+            y, m, d, h, minute, tzinfo=tz
+        ).astimezone(timezone.utc)
+        periods = [
+            _period(to_utc(2025, 7, 4, 23, 59), 10.0),  # previous day — excluded
+            _period(to_utc(2025, 7, 5, 0, 0), 55.0),    # included low
+            _period(to_utc(2025, 7, 5, 15, 0), 105.0),  # included high
+            _period(to_utc(2025, 7, 5, 23, 59), 95.0),  # included
+            _period(to_utc(2025, 7, 6, 0, 0), 20.0),    # next day — excluded
+        ]
+        high, low = client.derive_daily_high_low_times_local(
+            periods, tz, now_utc, station_code="KPHX"
+        )
+        assert high == to_utc(2025, 7, 5, 15, 0)
+        assert low == to_utc(2025, 7, 5, 0, 0)
