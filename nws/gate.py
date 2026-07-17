@@ -79,10 +79,10 @@ def _expected_forecast_date_utc(
 
 
 def _forecast_day_matches(
-    forecast: StationForecast, station_code: str, now_utc: datetime
+    forecast_date_utc: datetime, station_code: str, now_utc: datetime
 ) -> tuple[bool, datetime, datetime, str]:
-    """Return whether *forecast* matches the station's current trading day."""
-    forecast_date_utc = _ensure_utc(forecast.forecast_date_utc)
+    """Return whether *forecast_date_utc* matches the station's current trading day."""
+    forecast_date_utc = _ensure_utc(forecast_date_utc)
     expected_forecast_date_utc, expected_tz = _expected_forecast_date_utc(
         station_code, now_utc
     )
@@ -129,17 +129,19 @@ def has_forecast(
     try:
         with get_session() as session:
             forecast = _latest_forecast(session, station_code)
+            if forecast is None:
+                return False
+            forecast_date_utc = forecast.forecast_date_utc
+            high_time_utc = forecast.high_time_utc
+            low_time_utc = forecast.low_time_utc
     except SQLAlchemyError:
         logger.exception(
             "gate.db_error station=%s — has_forecast returning False", station_code
         )
         return False
 
-    if forecast is None:
-        return False
-
     matches, forecast_date_utc, expected_forecast_date_utc, expected_tz = (
-        _forecast_day_matches(forecast, station_code, now)
+        _forecast_day_matches(forecast_date_utc, station_code, now)
     )
     logger.debug(
         "gate.has_forecast_check station=%s tz=%s forecast_date_utc=%s "
@@ -149,8 +151,8 @@ def has_forecast(
         expected_tz,
         forecast_date_utc.isoformat(),
         expected_forecast_date_utc.isoformat(),
-        forecast.high_time_utc.isoformat() if forecast.high_time_utc else None,
-        forecast.low_time_utc.isoformat() if forecast.low_time_utc else None,
+        high_time_utc.isoformat() if high_time_utc else None,
+        low_time_utc.isoformat() if low_time_utc else None,
         now.isoformat(),
         matches,
     )
@@ -180,20 +182,22 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
     try:
         with get_session() as session:
             forecast = _latest_forecast(session, station_code)
+            if forecast is None:
+                logger.warning(
+                    "gate.no_forecast station=%s — gate closed (no data)", station_code
+                )
+                return False
+            forecast_date_utc = forecast.forecast_date_utc
+            high_time_utc = forecast.high_time_utc
+            low_time_utc = forecast.low_time_utc
     except SQLAlchemyError:
         logger.exception(
             "gate.db_error station=%s — gate closed (fail-safe)", station_code
         )
         return False
 
-    if forecast is None:
-        logger.warning(
-            "gate.no_forecast station=%s — gate closed (no data)", station_code
-        )
-        return False
-
     matches, forecast_date_utc, expected_forecast_date_utc, expected_tz = (
-        _forecast_day_matches(forecast, station_code, now)
+        _forecast_day_matches(forecast_date_utc, station_code, now)
     )
     if not matches:
         logger.info(
@@ -204,8 +208,8 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
             expected_tz,
             forecast_date_utc.isoformat(),
             expected_forecast_date_utc.isoformat(),
-            forecast.high_time_utc.isoformat() if forecast.high_time_utc else None,
-            forecast.low_time_utc.isoformat() if forecast.low_time_utc else None,
+            high_time_utc.isoformat() if high_time_utc else None,
+            low_time_utc.isoformat() if low_time_utc else None,
             now.isoformat(),
         )
         return False
@@ -217,8 +221,8 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
     low_utc = low_open = low_close = None
     high_utc = high_open = high_close = None
 
-    if forecast.low_time_utc is not None:
-        low_utc = _ensure_utc(forecast.low_time_utc)
+    if low_time_utc is not None:
+        low_utc = _ensure_utc(low_time_utc)
         if window_start_utc <= low_utc < window_end_utc:
             low_open = low_utc - timedelta(minutes=GATE_LOW_BEFORE)
             low_close = low_utc + timedelta(minutes=GATE_LOW_AFTER)
@@ -235,8 +239,8 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
             )
             low_utc = None
 
-    if forecast.high_time_utc is not None:
-        high_utc = _ensure_utc(forecast.high_time_utc)
+    if high_time_utc is not None:
+        high_utc = _ensure_utc(high_time_utc)
         if window_start_utc <= high_utc < window_end_utc:
             high_open = high_utc - timedelta(minutes=GATE_HIGH_BEFORE)
             high_close = high_utc + timedelta(minutes=GATE_HIGH_AFTER)
