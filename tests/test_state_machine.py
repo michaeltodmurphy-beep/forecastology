@@ -687,6 +687,43 @@ async def test_partial_fill_path_unchanged(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_entry_overwrites_stale_position_quantity(monkeypatch):
+    ticker = "KXLOWTOKC-26JUN26-B73.5"
+    executor = FakeExecutor()
+    executor.buy_success = True
+    db = InMemoryDB(
+        [
+            PositionModel(
+                market_ticker=ticker,
+                event_ticker="EVT1",
+                series_ticker="KXLOWTOKC",
+                side="yes",
+                quantity=7,
+                avg_entry_price=88,
+                last_price=88,
+            )
+        ]
+    )
+    strategy = make_strategy(monkeypatch, executor=executor, db=db)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="entry",
+        phase=Phase.MONITORING,
+    )
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=82, quantity=10, order_count=1)]),
+        quantity=2,
+    )
+
+    assert len(db.store[PositionModel]) == 1
+    assert db.store[PositionModel][0].quantity == 2
+
+
+@pytest.mark.asyncio
 async def test_entry_self_heal_from_fills_updates_avg_entry(monkeypatch):
     logged = capture_logs(monkeypatch)
     executor = FakeExecutor()
@@ -3400,7 +3437,21 @@ async def test_stop_loss_stays_retryable_until_get_positions_confirms_flat(monke
         )
     )
 
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    db = InMemoryDB(
+        [
+            PositionModel(
+                market_ticker=ticker,
+                event_ticker="EVT1",
+                series_ticker="KXLOWTCHI",
+                side="yes",
+                quantity=2,
+                avg_entry_price=80,
+                last_price=40,
+                position_ts=datetime.datetime.utcnow(),
+            )
+        ]
+    )
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
     strategy.stop_loss_watcher = StopLossWatcher(lambda *_args: asyncio.sleep(0, result=True))
     strategy._reconciliation_complete = True
 
@@ -3427,6 +3478,7 @@ async def test_stop_loss_stays_retryable_until_get_positions_confirms_flat(monke
     assert actions[0].action_key == action_key
     assert actions[0].status == OrderActionStatus.PENDING
     assert strategy.stop_loss_watcher._positions[ticker].quantity == 1
+    assert db.store[PositionModel][0].quantity == 1
 
 
 @pytest.mark.asyncio
@@ -5595,3 +5647,205 @@ async def test_settle_gate_phoenix_midnight_rule(monkeypatch):
     assert strategy._execute_entry.await_count == 1
     gate_logs = [kw for event, kw in logged if event == "entry.blocked_local_settle_gate"]
     assert gate_logs == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: NWS gate async execution + station cache
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_nws_temp_gate_uses_to_thread_and_blocks_entry(monkeypatch):
+    import core.state_machine as _sm
+    import nws.gate as _nws_gate
+
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN25-B62.5"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTBOS")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: "KBOS")
+
+    has_calls = {"count": 0}
+    gate_calls = {"count": 0}
+
+    def fake_has_forecast(station):
+        has_calls["count"] += 1
+        assert station == "KBOS"
+        return True
+
+    def fake_is_gate_open(station, now_utc):
+        gate_calls["count"] += 1
+        assert station == "KBOS"
+        assert now_utc.tzinfo is not None
+        return False
+
+    monkeypatch.setattr(_nws_gate, "has_forecast", fake_has_forecast)
+    monkeypatch.setattr(_nws_gate, "is_trading_gate_open", fake_is_gate_open)
+
+    to_thread_calls = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        to_thread_calls.append(func)
+        await asyncio.sleep(0)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(_sm.asyncio, "to_thread", fake_to_thread)
+
+    await strategy._evaluate_watchlist()
+
+    assert has_calls["count"] == 1
+    assert gate_calls["count"] == 1
+    assert to_thread_calls == [fake_has_forecast, fake_is_gate_open]
+    strategy._execute_entry.assert_not_awaited()
+    assert any(event == "entry.blocked_nws_temp_gate" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_nws_temp_gate_cache_reuses_station_result_within_ttl(monkeypatch):
+    import core.state_machine as _sm
+    import nws.gate as _nws_gate
+
+    strategy = make_strategy(monkeypatch)
+    t1 = "KXLOWTBOS-26JUN25-B62.5"
+    t2 = "KXHIGHTBOS-26JUN25-T75"
+    strategy.brackets[t1] = _make_entry_bracket(t1, "KXLOWTBOS")
+    strategy.brackets[t2] = _make_entry_bracket(t2, "KXHIGHTBOS")
+    strategy.cache.update_quote(t1, 82, 82)
+    strategy.cache.update_quote(t2, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: "KBOS")
+
+    has_calls = {"count": 0}
+    gate_calls = {"count": 0}
+
+    def fake_has_forecast(_station):
+        has_calls["count"] += 1
+        return True
+
+    def fake_is_gate_open(_station, _now_utc):
+        gate_calls["count"] += 1
+        return True
+
+    monkeypatch.setattr(_nws_gate, "has_forecast", fake_has_forecast)
+    monkeypatch.setattr(_nws_gate, "is_trading_gate_open", fake_is_gate_open)
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(_sm.asyncio, "to_thread", fake_to_thread)
+
+    await strategy._evaluate_watchlist()
+    strategy.brackets[t1].crossed_buy = False
+    strategy.brackets[t2].crossed_buy = False
+    strategy.brackets[t1].phase = Phase.MONITORING
+    strategy.brackets[t2].phase = Phase.MONITORING
+    await strategy._evaluate_watchlist()
+
+    assert has_calls["count"] == 1
+    assert gate_calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_nws_temp_gate_fail_open_for_no_data_and_exception(monkeypatch):
+    import core.state_machine as _sm
+    import nws.gate as _nws_gate
+
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN25-B63.5"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTBOS")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+    monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: "KBOS")
+
+    def no_data(_station):
+        return False
+
+    monkeypatch.setattr(_nws_gate, "has_forecast", no_data)
+    monkeypatch.setattr(_nws_gate, "is_trading_gate_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_sm.asyncio, "to_thread", lambda func, *args, **kwargs: asyncio.sleep(0, result=func(*args, **kwargs)))
+
+    await strategy._evaluate_watchlist()
+    assert strategy._execute_entry.await_count == 1
+    assert any(event == "entry.nws_temp_gate_no_data_fail_open" for event, _ in logged)
+
+    strategy._execute_entry.reset_mock()
+    strategy.brackets[ticker].crossed_buy = False
+    strategy.brackets[ticker].phase = Phase.MONITORING
+    strategy._nws_gate_cache.clear()
+
+    def boom(_station):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_nws_gate, "has_forecast", boom)
+    await strategy._evaluate_watchlist()
+    assert strategy._execute_entry.await_count == 1
+    assert any(event == "entry.nws_temp_gate_error_fail_open" for event, _ in logged)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: stop-loss counter rollback on abort/recovery without fills
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_panic_revalidation_abort_rolls_back_counter_and_next_entry_is_base_size(monkeypatch):
+    import core.state_machine as _sm
+
+    ticker = "KXLOWTBOS-26JUN25-B71.5"
+    sibling = "KXLOWTBOS-26JUN25-B72.5"
+    db = InMemoryDB([StopLossLedger(series_ticker="KXLOWTBOS", date_prefix="26JUN25", stop_loss_count=1)])
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = _make_panic_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=48, initial_contract_count=2)
+
+    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
+    bracket.position_quantity = 1
+    bracket._stop_loss_counted = True
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    strategy.cache.update_quote(ticker, 85, 88)
+
+    await strategy._run_panic_flatten_exit(
+        bracket,
+        trigger_price=47,
+        trigger_source="test",
+        trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert await strategy._get_stop_loss_count_for_market(ticker) == 0
+    assert bracket._stop_loss_counted is False
+
+    monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: None)
+    strategy._execute_entry = AsyncMock()
+    strategy.brackets[sibling] = _make_entry_bracket(sibling, "KXLOWTBOS")
+    strategy.cache.update_quote(sibling, 82, 82)
+
+    await strategy._evaluate_watchlist()
+
+    assert strategy._execute_entry.await_count == 1
+    assert "quantity" not in strategy._execute_entry.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_successful_stop_loss_still_advances_counter(monkeypatch):
+    ticker = "KXLOWTBOS-26JUN25-B73.5"
+    executor = FakeExecutor()
+    executor.positions = {}
+    executor.sell_success = True
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50, enable_fast_sl_exit=False)
+
+    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
+    bracket.position_quantity = 1
+    bracket.avg_entry = 80
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    strategy.cache.update_quote(ticker, 40, 42)
+
+    await strategy._evaluate_held_positions()
+
+    assert await strategy._get_stop_loss_count_for_market(ticker) == 1
