@@ -262,8 +262,11 @@ def make_config(**overrides):
 
 def make_strategy(monkeypatch, db=None, db_items=None, executor=None, **config_overrides):
     import core.state_machine as state_machine
+    import nws.gate as nws_gate
 
     monkeypatch.setattr(state_machine, "load_private_key", lambda _path: object())
+    monkeypatch.setattr(nws_gate, "has_forecast", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_args, **_kwargs: True)
     return TemperatureStrategy(
         make_config(**config_overrides),
         TickerCache(),

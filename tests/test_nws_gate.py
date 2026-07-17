@@ -82,6 +82,9 @@ class TestTradingGateOpen:
             return is_trading_gate_open(station_code, current_time)
 
     def setup_method(self):
+        from nws.client import _station_cache
+
+        _station_cache.clear()
         self.engine = _make_sqlite_engine()
         self.Session = _make_session_factory(self.engine)
         self.session = self.Session()
@@ -414,6 +417,9 @@ class TestHasForecast:
             return has_forecast(station_code, current_time)
 
     def setup_method(self):
+        from nws.client import _station_cache
+
+        _station_cache.clear()
         self.engine = _make_sqlite_engine()
         self.Session = _make_session_factory(self.engine)
         self.session = self.Session()
