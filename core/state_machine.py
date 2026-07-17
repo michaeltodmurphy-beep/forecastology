@@ -1478,18 +1478,18 @@ class TemperatureStrategy:
                 # -----------------------------------
 
                 # --- NWS temperature-window gate ---
-                try:
-                    from nws.gate import has_forecast, is_trading_gate_open
-                    now_utc = datetime.datetime.now(datetime.timezone.utc)
-                    _station = get_series_station_code(ticker)
-                    if _station is not None:
+                _station = get_series_station_code(ticker)
+                if _station is not None:
+                    try:
+                        from nws.gate import has_forecast, is_trading_gate_open
+                        now_utc = datetime.datetime.now(datetime.timezone.utc)
                         cache_now = time.monotonic()
                         cache_entry = self._nws_gate_cache.get(_station)
                         if (
                             cache_entry is None
                             or cache_now - cache_entry[0] >= self._nws_gate_cache_refresh_seconds
                         ):
-                            _has_data = await asyncio.to_thread(has_forecast, _station)
+                            _has_data = await asyncio.to_thread(has_forecast, _station, now_utc)
                             _gate_open = True
                             if _has_data:
                                 _gate_open = await asyncio.to_thread(
@@ -1502,11 +1502,12 @@ class TemperatureStrategy:
                             _, _has_data, _gate_open = cache_entry
                         if not _has_data:
                             logger.info(
-                                "entry.nws_temp_gate_no_data_fail_open",
+                                "entry.blocked_nws_temp_gate_no_data",
                                 ticker=ticker,
                                 station=_station,
                             )
-                        elif not _gate_open:
+                            continue
+                        if not _gate_open:
                             logger.info(
                                 "entry.blocked_nws_temp_gate",
                                 ticker=ticker,
@@ -1514,12 +1515,14 @@ class TemperatureStrategy:
                                 now_utc=now_utc.isoformat(),
                             )
                             continue
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "entry.nws_temp_gate_error_fail_open",
-                        ticker=ticker,
-                        exc_info=True,
-                    )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "entry.blocked_nws_temp_gate_error",
+                            ticker=ticker,
+                            station=_station,
+                            exc_info=True,
+                        )
+                        continue
                 # -----------------------------------
 
                 bracket.crossed_buy = True

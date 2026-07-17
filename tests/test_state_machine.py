@@ -262,8 +262,11 @@ def make_config(**overrides):
 
 def make_strategy(monkeypatch, db=None, db_items=None, executor=None, **config_overrides):
     import core.state_machine as state_machine
+    import nws.gate as nws_gate
 
     monkeypatch.setattr(state_machine, "load_private_key", lambda _path: object())
+    monkeypatch.setattr(nws_gate, "has_forecast", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_args, **_kwargs: True)
     return TemperatureStrategy(
         make_config(**config_overrides),
         TickerCache(),
@@ -5670,9 +5673,10 @@ async def test_nws_temp_gate_uses_to_thread_and_blocks_entry(monkeypatch):
     has_calls = {"count": 0}
     gate_calls = {"count": 0}
 
-    def fake_has_forecast(station):
+    def fake_has_forecast(station, now_utc):
         has_calls["count"] += 1
         assert station == "KBOS"
+        assert now_utc.tzinfo is not None
         return True
 
     def fake_is_gate_open(station, now_utc):
@@ -5721,7 +5725,7 @@ async def test_nws_temp_gate_cache_reuses_station_result_within_ttl(monkeypatch)
     has_calls = {"count": 0}
     gate_calls = {"count": 0}
 
-    def fake_has_forecast(_station):
+    def fake_has_forecast(_station, _now_utc):
         has_calls["count"] += 1
         return True
 
@@ -5749,7 +5753,7 @@ async def test_nws_temp_gate_cache_reuses_station_result_within_ttl(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_nws_temp_gate_fail_open_for_no_data_and_exception(monkeypatch):
+async def test_nws_temp_gate_fail_closed_for_no_data_and_exception(monkeypatch):
     import core.state_machine as _sm
     import nws.gate as _nws_gate
 
@@ -5761,7 +5765,7 @@ async def test_nws_temp_gate_fail_open_for_no_data_and_exception(monkeypatch):
     strategy._execute_entry = AsyncMock()
     monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: "KBOS")
 
-    def no_data(_station):
+    def no_data(_station, _now_utc):
         return False
 
     monkeypatch.setattr(_nws_gate, "has_forecast", no_data)
@@ -5769,21 +5773,21 @@ async def test_nws_temp_gate_fail_open_for_no_data_and_exception(monkeypatch):
     monkeypatch.setattr(_sm.asyncio, "to_thread", lambda func, *args, **kwargs: asyncio.sleep(0, result=func(*args, **kwargs)))
 
     await strategy._evaluate_watchlist()
-    assert strategy._execute_entry.await_count == 1
-    assert any(event == "entry.nws_temp_gate_no_data_fail_open" for event, _ in logged)
+    strategy._execute_entry.assert_not_awaited()
+    assert any(event == "entry.blocked_nws_temp_gate_no_data" for event, _ in logged)
 
     strategy._execute_entry.reset_mock()
     strategy.brackets[ticker].crossed_buy = False
     strategy.brackets[ticker].phase = Phase.MONITORING
     strategy._nws_gate_cache.clear()
 
-    def boom(_station):
+    def boom(_station, _now_utc):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(_nws_gate, "has_forecast", boom)
     await strategy._evaluate_watchlist()
-    assert strategy._execute_entry.await_count == 1
-    assert any(event == "entry.nws_temp_gate_error_fail_open" for event, _ in logged)
+    strategy._execute_entry.assert_not_awaited()
+    assert any(event == "entry.blocked_nws_temp_gate_error" for event, _ in logged)
 
 
 # ---------------------------------------------------------------------------
