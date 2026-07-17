@@ -94,6 +94,27 @@ def _forecast_day_matches(
     )
 
 
+def _trading_day_window_bounds(station_code: str, now_utc: datetime) -> tuple[datetime, datetime]:
+    """Return UTC [start, end) bounds for the station's active trading day."""
+    cached_station = _station_cache.get(station_code)
+    if cached_station is not None:
+        _lat, _lon, _hourly_url, tz_name = cached_station
+        try:
+            station_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(
+                "gate.invalid_station_timezone station=%s tz=%s — using UTC-day window",
+                station_code,
+                tz_name,
+            )
+        else:
+            window = get_trading_day_window(station_code, station_tz, now_utc)
+            return window.utc_start, window.utc_end_exclusive
+
+    utc_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+    return utc_start, utc_start + timedelta(days=1)
+
+
 def has_forecast(
     station_code: str, current_utc_time: datetime | None = None
 ) -> bool:
@@ -189,6 +210,8 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
         )
         return False
 
+    window_start_utc, window_end_utc = _trading_day_window_bounds(station_code, now)
+
     in_low_window = False
     in_high_window = False
     low_utc = low_open = low_close = None
@@ -196,15 +219,54 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
 
     if forecast.low_time_utc is not None:
         low_utc = _ensure_utc(forecast.low_time_utc)
-        low_open = low_utc - timedelta(minutes=GATE_LOW_BEFORE)
-        low_close = low_utc + timedelta(minutes=GATE_LOW_AFTER)
-        in_low_window = low_open <= now <= low_close
+        if window_start_utc <= low_utc < window_end_utc:
+            low_open = low_utc - timedelta(minutes=GATE_LOW_BEFORE)
+            low_close = low_utc + timedelta(minutes=GATE_LOW_AFTER)
+            in_low_window = low_open <= now <= low_close
+        else:
+            logger.info(
+                "gate.reject_out_of_window_timestamp station=%s field=low_time_utc "
+                "timestamp_utc=%s window_start_utc=%s window_end_exclusive_utc=%s now_utc=%s",
+                station_code,
+                low_utc.isoformat(),
+                window_start_utc.isoformat(),
+                window_end_utc.isoformat(),
+                now.isoformat(),
+            )
+            low_utc = None
 
     if forecast.high_time_utc is not None:
         high_utc = _ensure_utc(forecast.high_time_utc)
-        high_open = high_utc - timedelta(minutes=GATE_HIGH_BEFORE)
-        high_close = high_utc + timedelta(minutes=GATE_HIGH_AFTER)
-        in_high_window = high_open <= now <= high_close
+        if window_start_utc <= high_utc < window_end_utc:
+            high_open = high_utc - timedelta(minutes=GATE_HIGH_BEFORE)
+            high_close = high_utc + timedelta(minutes=GATE_HIGH_AFTER)
+            in_high_window = high_open <= now <= high_close
+        else:
+            logger.info(
+                "gate.reject_out_of_window_timestamp station=%s field=high_time_utc "
+                "timestamp_utc=%s window_start_utc=%s window_end_exclusive_utc=%s now_utc=%s",
+                station_code,
+                high_utc.isoformat(),
+                window_start_utc.isoformat(),
+                window_end_utc.isoformat(),
+                now.isoformat(),
+            )
+            high_utc = None
+
+    if low_utc is None and high_utc is None:
+        logger.warning(
+            "gate.no_valid_forecast_times station=%s tz=%s forecast_date_utc=%s "
+            "expected_forecast_date_utc=%s window_start_utc=%s window_end_exclusive_utc=%s "
+            "now_utc=%s — gate closed (no valid forecast times)",
+            station_code,
+            expected_tz,
+            forecast_date_utc.isoformat(),
+            expected_forecast_date_utc.isoformat(),
+            window_start_utc.isoformat(),
+            window_end_utc.isoformat(),
+            now.isoformat(),
+        )
+        return False
 
     gate_open = in_low_window or in_high_window
     logger.debug(
