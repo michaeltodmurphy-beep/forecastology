@@ -523,3 +523,52 @@ class TestHasForecast:
             clear=False,
         ):
             assert self._has_forecast("KORD", self.session, now) is False
+
+
+class TestDetachedForecastSession:
+    """Regression coverage for detached/expired ORM forecast rows."""
+
+    def setup_method(self):
+        from nws.client import _station_cache
+
+        _station_cache.clear()
+        self.engine = _make_sqlite_engine()
+        self.Session = _make_session_factory(self.engine)
+        self.session = self.Session()
+
+    def teardown_method(self):
+        self.session.close()
+
+    def test_current_day_forecast_does_not_raise_when_session_expires_on_exit(self):
+        from contextlib import contextmanager
+
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 4, 0),
+            high_time=_utc(2025, 7, 4, 6, 30),
+            low_time=_utc(2025, 7, 4, 7, 0),
+        )
+        now = _utc(2025, 7, 4, 6, 20)
+
+        @contextmanager
+        def expiring_get_session():
+            session = self.Session()
+            try:
+                yield session
+            finally:
+                session.expire_all()
+                session.close()
+
+        with patch("nws.gate.get_session", expiring_get_session), patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ), patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            from nws.gate import has_forecast, is_trading_gate_open
+
+            assert has_forecast("KORD", now) is True
+            assert is_trading_gate_open("KORD", now) is True
