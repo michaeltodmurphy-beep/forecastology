@@ -147,6 +147,10 @@ class TemperatureStrategy:
         # tuples already entered in the current _evaluate_watchlist cycle.  Prevents
         # multiple brackets in the same series/day from all entering at the same count.
         self._entry_step_seen: set[tuple[str, str, int]] = set()
+        # Per-station NWS entry-gate cache:
+        # station -> (computed_monotonic_ts, has_data, gate_open)
+        self._nws_gate_cache: dict[str, tuple[float, bool, bool]] = {}
+        self._nws_gate_cache_refresh_seconds = 30
 
     @staticmethod
     def _first_non_none(*values):
@@ -221,6 +225,11 @@ class TemperatureStrategy:
         external_qty = max(total_qty - app_qty, 0)
         managed_qty = total_qty if self.config.manage_external_positions else app_qty
         return managed_qty, app_qty, external_qty
+
+    async def _rollback_stop_loss_count_if_counted(self, bracket: MarketBracket) -> None:
+        if getattr(bracket, "_stop_loss_counted", False):
+            await self._decrement_stop_loss_count_for_market(bracket.market_ticker)
+            bracket._stop_loss_counted = False
 
     async def _confirmed_remaining_stop_loss_qty(
         self,
@@ -496,6 +505,7 @@ class TemperatureStrategy:
             elapsed_ms=self._now_ms() - trigger_ts_ms,
             reason="max_attempts_exhausted",
         )
+        await self._rollback_stop_loss_count_if_counted(bracket)
 
     async def _run_panic_flatten_exit(
         self,
@@ -655,6 +665,7 @@ class TemperatureStrategy:
                             elapsed_ms=now_ms_rv - trigger_ts_ms,
                             reason="ask_above_stop",
                         )
+                        await self._rollback_stop_loss_count_if_counted(current)
                         return
             # ------------------------------------------------------------------
 
@@ -764,6 +775,7 @@ class TemperatureStrategy:
             elapsed_ms=self._now_ms() - trigger_ts_ms,
             reason="max_retries_exhausted",
         )
+        await self._rollback_stop_loss_count_if_counted(bracket)
 
     async def _remove_active_position(self, ticker: str, bracket: MarketBracket):
         bracket.phase = Phase.CLOSED
@@ -1471,22 +1483,37 @@ class TemperatureStrategy:
                     now_utc = datetime.datetime.now(datetime.timezone.utc)
                     _station = get_series_station_code(ticker)
                     if _station is not None:
-                        if not has_forecast(_station):
+                        cache_now = time.monotonic()
+                        cache_entry = self._nws_gate_cache.get(_station)
+                        if (
+                            cache_entry is None
+                            or cache_now - cache_entry[0] >= self._nws_gate_cache_refresh_seconds
+                        ):
+                            _has_data = await asyncio.to_thread(has_forecast, _station)
+                            _gate_open = True
+                            if _has_data:
+                                _gate_open = await asyncio.to_thread(
+                                    is_trading_gate_open,
+                                    _station,
+                                    now_utc,
+                                )
+                            self._nws_gate_cache[_station] = (cache_now, _has_data, _gate_open)
+                        else:
+                            _, _has_data, _gate_open = cache_entry
+                        if not _has_data:
                             logger.info(
                                 "entry.nws_temp_gate_no_data_fail_open",
                                 ticker=ticker,
                                 station=_station,
                             )
-                        else:
-                            _gate_open = is_trading_gate_open(_station, now_utc)
-                            if not _gate_open:
-                                logger.info(
-                                    "entry.blocked_nws_temp_gate",
-                                    ticker=ticker,
-                                    station=_station,
-                                    now_utc=now_utc.isoformat(),
-                                )
-                                continue
+                        elif not _gate_open:
+                            logger.info(
+                                "entry.blocked_nws_temp_gate",
+                                ticker=ticker,
+                                station=_station,
+                                now_utc=now_utc.isoformat(),
+                            )
+                            continue
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "entry.nws_temp_gate_error_fail_open",
@@ -1665,8 +1692,9 @@ class TemperatureStrategy:
                 )
                 pos = existing.scalar_one_or_none()
                 if pos:
-                    # Update existing position if found
-                    pos.quantity = pos.quantity + result.fill_quantity
+                    # Use absolute fill quantity to avoid compounding against any
+                    # stale row that may survive process restarts.
+                    pos.quantity = result.fill_quantity
                     pos.avg_entry_price = reconciled_fill_price
                     pos.last_price = reconciled_fill_price
                 else:
@@ -2169,6 +2197,18 @@ class TemperatureStrategy:
                     bracket._sl_held_for_spread = False
                     bracket._last_sl_held_log = 0
                     bracket._sl_held_for_spread_since = 0
+                if getattr(bracket, "_stop_loss_counted", False):
+                    task = self._sl_exit_tasks.get(ticker)
+                    in_flight = task is not None and not task.done()
+                    if not in_flight:
+                        action_key = f"{ticker}:STOP_LOSS"
+                        async with await self.db.get_session() as session:
+                            action = await session.execute(
+                                select(OrderAction).where(OrderAction.action_key == action_key)
+                            )
+                            action_row = action.scalar_one_or_none()
+                        if action_row is None or action_row.status != OrderActionStatus.SUCCEEDED:
+                            await self._rollback_stop_loss_count_if_counted(bracket)
 
     async def _adopt_untracked_exchange_fills(self, api_positions: dict[str, dict]) -> None:
         for ticker, bracket in list(self.brackets.items()):
@@ -2543,6 +2583,11 @@ class TemperatureStrategy:
                     update(OrderAction)
                     .where(OrderAction.action_key == action_key)
                     .values(status=OrderActionStatus.PENDING)
+                )
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.market_ticker == bracket.market_ticker)
+                    .values(quantity=live_count)
                 )
                 await session.commit()
             prev_qty = bracket.position_quantity
