@@ -303,6 +303,46 @@ class TestTradingGateOpen:
             result = self._gate_open("KMIA", now, self.session)
         assert result is True
 
+    def test_stale_previous_trading_day_returns_false(self):
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 3, 0),
+            high_time=_utc(2025, 7, 4, 6, 0),
+            low_time=None,
+        )
+        now = _utc(2025, 7, 4, 6, 20)
+        with patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ), patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            result = self._gate_open("KORD", now, self.session)
+        assert result is False
+
+    def test_current_trading_day_forecast_still_opens_inside_window_and_closes_outside(self):
+        high_time = _utc(2025, 7, 4, 6, 0)
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 4, 0),
+            high_time=high_time,
+            low_time=None,
+        )
+        with patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ), patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 20), self.session) is True
+            assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 31), self.session) is False
+
 
 # ---------------------------------------------------------------------------
 # Tests for get_series_station_code mapping helper
@@ -362,7 +402,7 @@ class TestGetSeriesStationCode:
 class TestHasForecast:
     """Tests for nws.gate.has_forecast."""
 
-    def _has_forecast(self, station_code: str, session):
+    def _has_forecast(self, station_code: str, session, current_time: datetime | None = None):
         from contextlib import contextmanager
 
         @contextmanager
@@ -371,7 +411,7 @@ class TestHasForecast:
 
         with patch("nws.gate.get_session", mock_get_session):
             from nws.gate import has_forecast
-            return has_forecast(station_code)
+            return has_forecast(station_code, current_time)
 
     def setup_method(self):
         self.engine = _make_sqlite_engine()
@@ -385,13 +425,14 @@ class TestHasForecast:
         assert self._has_forecast("KATL", self.session) is False
 
     def test_returns_true_when_row_exists(self):
+        now = _utc(2025, 7, 4, 12, 0)
         _insert_forecast(
             self.session, "KATL",
             _utc(2025, 7, 4, 0),
             high_time=_utc(2025, 7, 4, 15, 0),
             low_time=_utc(2025, 7, 4, 6, 0),
         )
-        assert self._has_forecast("KATL", self.session) is True
+        assert self._has_forecast("KATL", self.session, now) is True
 
     def test_returns_false_for_different_station(self):
         _insert_forecast(
@@ -401,3 +442,19 @@ class TestHasForecast:
             low_time=None,
         )
         assert self._has_forecast("KATL", self.session) is False
+
+    def test_returns_false_for_stale_previous_trading_day_row(self):
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 3, 0),
+            high_time=_utc(2025, 7, 4, 6, 0),
+            low_time=None,
+        )
+        now = _utc(2025, 7, 4, 6, 20)
+        with patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ):
+            assert self._has_forecast("KORD", self.session, now) is False
