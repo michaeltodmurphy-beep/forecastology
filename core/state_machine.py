@@ -979,7 +979,10 @@ class TemperatureStrategy:
             db_positions = result.scalars().all()
         db_by_ticker = {pos.market_ticker: pos for pos in db_positions}
 
-        today_utc = datetime.datetime.utcnow().date()
+        # Use Eastern today as the reference for stale-position checks, consistent
+        # with how tickers are dated (get_eastern_today_date_prefix).  Fail open
+        # (do not skip any positions) if the date cannot be parsed.
+        today_eastern = _parse_date_prefix(get_eastern_today_date_prefix())
         api_positions: dict[str, dict] = {}
 
         # In LIVE mode, also fetch positions directly from Kalshi API
@@ -997,7 +1000,7 @@ class TemperatureStrategy:
                     if parsed is not None:
                         _, date_prefix = parsed
                         market_date = _parse_date_prefix(date_prefix)
-                        if market_date is not None and market_date < today_utc:
+                        if today_eastern is not None and market_date is not None and market_date < today_eastern:
                             logger.info("strategy.skipped_stale_position",
                                         ticker=ticker, date_prefix=date_prefix)
                             continue
@@ -1055,7 +1058,7 @@ class TemperatureStrategy:
             if parsed is not None:
                 _, date_prefix = parsed
                 market_date = _parse_date_prefix(date_prefix)
-                if market_date is not None and market_date < today_utc:
+                if today_eastern is not None and market_date is not None and market_date < today_eastern:
                     logger.info("strategy.skipped_stale_position",
                                 ticker=ticker, date_prefix=date_prefix)
                     continue

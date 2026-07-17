@@ -832,7 +832,11 @@ async def test_adoption_is_idempotent(monkeypatch):
 @pytest.mark.asyncio
 async def test_restore_positions_uses_db_cost_basis_when_api_entry_missing(monkeypatch):
     logged = capture_logs(monkeypatch)
-    today_prefix = get_eastern_today_date_prefix()
+    # Pin to a fixed Eastern date so this test is deterministic regardless of
+    # wall-clock time (avoids the evening-ET UTC-rollover flake).
+    fixed_prefix = "26JAN15"
+    monkeypatch.setattr("core.state_machine.get_eastern_today_date_prefix", lambda days_offset=0: fixed_prefix)
+    today_prefix = fixed_prefix
     ticker = f"KXLOWTSEA-{today_prefix}-B61.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 0}}
@@ -3046,12 +3050,16 @@ async def test_market_not_found_does_not_increment_ledger_or_abandon(monkeypatch
 
 @pytest.mark.asyncio
 async def test_restore_skips_previous_day_positions(monkeypatch):
-    """Positions whose market date is before today (UTC) are skipped on restore;
+    """Positions whose market date is before today (Eastern) are skipped on restore;
     strategy.skipped_stale_position is logged and no stop-loss is attempted."""
     logged = capture_logs(monkeypatch)
 
-    today_prefix = get_eastern_today_date_prefix()
-    today_ticker = f"KXLOWTCHI-{today_prefix}-B62.5"
+    # Pin to a fixed Eastern date so this test is deterministic regardless of
+    # wall-clock time (avoids the evening-ET UTC-rollover flake).
+    fixed_prefix = "26JAN15"
+    monkeypatch.setattr("core.state_machine.get_eastern_today_date_prefix", lambda days_offset=0: fixed_prefix)
+
+    today_ticker = f"KXLOWTCHI-{fixed_prefix}-B62.5"
     # Use a clearly past date (definitely before today)
     stale_ticker = "KXLOWTATL-24DEC25-T55"
 
@@ -3141,8 +3149,11 @@ async def test_restore_keeps_unparseable_ticker(monkeypatch):
 async def test_restore_positions_registers_with_sl_watcher(monkeypatch):
     """Positions restored from DB on startup are registered with the
     StopLossWatcher so the WebSocket-driven SL path is active immediately."""
-    today_prefix = get_eastern_today_date_prefix()
-    ticker = f"KXLOWTSEA-{today_prefix}-B61.5"
+    # Pin to a fixed Eastern date so this test is deterministic regardless of
+    # wall-clock time (avoids the evening-ET UTC-rollover flake).
+    fixed_prefix = "26JAN15"
+    monkeypatch.setattr("core.state_machine.get_eastern_today_date_prefix", lambda days_offset=0: fixed_prefix)
+    ticker = f"KXLOWTSEA-{fixed_prefix}-B61.5"
 
     db = InMemoryDB([
         PositionModel(
@@ -3182,8 +3193,11 @@ async def test_restore_positions_registers_with_sl_watcher(monkeypatch):
 async def test_restore_live_positions_registers_with_sl_watcher(monkeypatch):
     """Positions fetched from the exchange API in LIVE mode are also
     registered with the StopLossWatcher during startup reconciliation."""
-    today_prefix = get_eastern_today_date_prefix()
-    ticker = f"KXHIGHTSEA-{today_prefix}-T75"
+    # Pin to a fixed Eastern date so this test is deterministic regardless of
+    # wall-clock time (avoids the evening-ET UTC-rollover flake).
+    fixed_prefix = "26JAN15"
+    monkeypatch.setattr("core.state_machine.get_eastern_today_date_prefix", lambda days_offset=0: fixed_prefix)
+    ticker = f"KXHIGHTSEA-{fixed_prefix}-T75"
 
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 85}}
@@ -3210,9 +3224,52 @@ async def test_restore_live_positions_registers_with_sl_watcher(monkeypatch):
     assert watcher._positions[ticker].quantity == 2
 
 
-# ===========================================================================
-# Post-merge hardening fixes 1–4
-# ===========================================================================
+@pytest.mark.asyncio
+async def test_restore_does_not_skip_positions_in_evening_et_window(monkeypatch):
+    """Regression test: when UTC has rolled over to day D+1 but Eastern is still
+    day D (the ~8pm–midnight ET window), positions dated to Eastern day D must be
+    restored, not skipped as stale.
+
+    Before the fix, the code used datetime.utcnow().date() as the reference date,
+    so in this window `market_date (Eastern D) < today_utc (D+1)` was True and
+    the position was wrongly skipped, leaving it unmanaged (no stop-loss protection).
+    The fix uses get_eastern_today_date_prefix() as the reference instead.
+    """
+    # Simulate the evening-ET failure window: Eastern date is "26JUL16" but UTC
+    # has already rolled over to July 17 (D+1).  We pin the Eastern reference to
+    # "26JUL16" via monkeypatch so the production code uses Eastern day D, not UTC.
+    eastern_today_prefix = "26JUL16"
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: eastern_today_prefix,
+    )
+
+    ticker = f"KXLOWTCHI-{eastern_today_prefix}-B62.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTCHI",
+            side="yes",
+            quantity=2,
+            avg_entry_price=80,
+            last_price=80,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="PAPER")
+
+    await strategy._restore_positions()
+
+    # The position must be restored even though UTC is already the next day.
+    assert ticker in strategy.active_positions, (
+        f"Position {ticker} was skipped as stale, but Eastern today is "
+        f"{eastern_today_prefix} — the UTC-rollover bug has regressed."
+    )
+
+
+
 
 # ---------------------------------------------------------------------------
 # Fix 1: Durable idempotency + DB-enforced execution invariants
