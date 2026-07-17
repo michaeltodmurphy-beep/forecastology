@@ -346,6 +346,65 @@ class TestTradingGateOpen:
             assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 20), self.session) is True
             assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 31), self.session) is False
 
+    def test_current_day_out_of_window_high_time_is_ignored(self):
+        # For KORD at this "now", trading day is [2025-07-04T06:00Z, 2025-07-05T06:00Z).
+        # Stored high time is corrupt/out-of-window, but forecast_date_utc still matches.
+        high_time = _utc(2025, 7, 4, 5, 50)
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 4, 0),
+            high_time=high_time,
+            low_time=None,
+        )
+        with patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ), patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            # Would be inside high window if corrupt high_time_utc were used.
+            assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 10), self.session) is False
+
+    def test_current_day_both_out_of_window_times_returns_no_valid_data_false(self):
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 4, 0),
+            high_time=_utc(2025, 7, 4, 5, 50),
+            low_time=_utc(2025, 7, 4, 5, 10),
+        )
+        with patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ), patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 10), self.session) is False
+
+    def test_current_day_in_window_timestamps_preserve_open_and_close_behavior(self):
+        _insert_forecast(
+            self.session,
+            "KORD",
+            _utc(2025, 7, 4, 0),
+            high_time=_utc(2025, 7, 4, 6, 0),
+            low_time=_utc(2025, 7, 4, 7, 0),
+        )
+        with patch.dict(
+            "nws.gate._station_cache",
+            {"KORD": (41.0, -87.0, "https://example.test/hourly", "America/Chicago")},
+            clear=False,
+        ), patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate_open("KORD", _utc(2025, 7, 4, 6, 20), self.session) is True
+            assert self._gate_open("KORD", _utc(2025, 7, 4, 8, 0), self.session) is False
+
 
 # ---------------------------------------------------------------------------
 # Tests for get_series_station_code mapping helper
