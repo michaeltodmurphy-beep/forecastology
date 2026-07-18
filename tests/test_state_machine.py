@@ -265,6 +265,7 @@ def make_strategy(monkeypatch, db=None, db_items=None, executor=None, **config_o
     import nws.gate as nws_gate
 
     monkeypatch.setattr(state_machine, "load_private_key", lambda _path: object())
+    monkeypatch.setattr(state_machine, "is_entry_allowed", lambda *_args, **_kwargs: (True, {}))
     monkeypatch.setattr(nws_gate, "has_forecast", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_args, **_kwargs: True)
     return TemperatureStrategy(
@@ -5513,7 +5514,7 @@ from core.local_time_gate import is_entry_allowed as _is_entry_allowed
 
 def _gate_at_utc(blocked_utc: _dt.datetime):
     """Return a gate function that always uses the given fixed UTC time."""
-    return lambda ticker, config, now_utc=None: _is_entry_allowed(
+    return lambda ticker, config, now_utc=None, market_date=None: _is_entry_allowed(
         ticker, config, now_utc=blocked_utc
     )
 
@@ -5673,13 +5674,13 @@ async def test_nws_temp_gate_uses_to_thread_and_blocks_entry(monkeypatch):
     has_calls = {"count": 0}
     gate_calls = {"count": 0}
 
-    def fake_has_forecast(station, now_utc):
+    def fake_has_forecast(station, now_utc, market_date=None):
         has_calls["count"] += 1
         assert station == "KBOS"
         assert now_utc.tzinfo is not None
         return True
 
-    def fake_is_gate_open(station, now_utc):
+    def fake_is_gate_open(station, now_utc, market_date=None):
         gate_calls["count"] += 1
         assert station == "KBOS"
         assert now_utc.tzinfo is not None
@@ -5725,11 +5726,11 @@ async def test_nws_temp_gate_cache_reuses_station_result_within_ttl(monkeypatch)
     has_calls = {"count": 0}
     gate_calls = {"count": 0}
 
-    def fake_has_forecast(_station, _now_utc):
+    def fake_has_forecast(_station, _now_utc, _market_date=None):
         has_calls["count"] += 1
         return True
 
-    def fake_is_gate_open(_station, _now_utc):
+    def fake_is_gate_open(_station, _now_utc, _market_date=None):
         gate_calls["count"] += 1
         return True
 
@@ -5765,7 +5766,7 @@ async def test_nws_temp_gate_fail_closed_for_no_data_and_exception(monkeypatch):
     strategy._execute_entry = AsyncMock()
     monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: "KBOS")
 
-    def no_data(_station, _now_utc):
+    def no_data(_station, _now_utc, _market_date=None):
         return False
 
     monkeypatch.setattr(_nws_gate, "has_forecast", no_data)
@@ -5781,7 +5782,7 @@ async def test_nws_temp_gate_fail_closed_for_no_data_and_exception(monkeypatch):
     strategy.brackets[ticker].phase = Phase.MONITORING
     strategy._nws_gate_cache.clear()
 
-    def boom(_station, _now_utc):
+    def boom(_station, _now_utc, _market_date=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(_nws_gate, "has_forecast", boom)

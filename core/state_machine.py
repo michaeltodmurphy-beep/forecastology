@@ -1471,7 +1471,12 @@ class TemperatureStrategy:
                 # -----------------------------------
 
                 # --- City-local-time settle gate ---
-                gate_ok, gate_ctx = is_entry_allowed(ticker, self.config)
+                _market_date = None
+                parsed = parse_series_and_date(ticker)
+                if parsed is not None:
+                    _, _date_prefix = parsed
+                    _market_date = _parse_date_prefix(_date_prefix)
+                gate_ok, gate_ctx = is_entry_allowed(ticker, self.config, market_date=_market_date)
                 if not gate_ok:
                     logger.info("entry.blocked_local_settle_gate", **gate_ctx)
                     continue
@@ -1489,13 +1494,16 @@ class TemperatureStrategy:
                             cache_entry is None
                             or cache_now - cache_entry[0] >= self._nws_gate_cache_refresh_seconds
                         ):
-                            _has_data = await asyncio.to_thread(has_forecast, _station, now_utc)
+                            _has_data = await asyncio.to_thread(
+                                has_forecast, _station, now_utc, _market_date
+                            )
                             _gate_open = True
                             if _has_data:
                                 _gate_open = await asyncio.to_thread(
                                     is_trading_gate_open,
                                     _station,
                                     now_utc,
+                                    _market_date,
                                 )
                             self._nws_gate_cache[_station] = (cache_now, _has_data, _gate_open)
                         else:

@@ -354,3 +354,162 @@ class TestCustomThreshold:
         now = _utc(2025, 6, 25, 6, 0)
         allowed, _ = is_entry_allowed(self.NYC_TICKER, cfg, now_utc=now)
         assert allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Market-date awareness (next-day blocking)
+# ---------------------------------------------------------------------------
+
+class TestMarketDateAwareness:
+    """Regression tests for date-aware gate behaviour.
+
+    A next-day ticker (market_date = tomorrow) evaluated during today's local
+    evening (local time ≥ 01:00, so the time-only gate passes) must still be
+    BLOCKED because the ticker's market date does not match the station's
+    current local trading day.
+
+    A same-day ticker evaluated after the 01:00 threshold must be ALLOWED.
+    """
+
+    # -----------------------------------------------------------------------
+    # Los Angeles (Pacific Time) — 01:00 threshold
+    # -----------------------------------------------------------------------
+
+    # Production scenario: KXHIGHLAX-26JUL18-T79 bought at 00:08 UTC on Jul 18
+    # which is 17:08 PDT on Jul 17 — the Jul-18 market, but evaluated on Jul-17.
+
+    LAX_HIGH_TICKER = "KXHIGHLAX-26JUL18-T79"
+    LAX_LOW_TICKER  = "KXLOWTLAX-26JUL18-B55"
+
+    def test_la_next_day_ticker_blocked_during_prior_evening(self):
+        """Jul-18 LA ticker evaluated at 17:09 PDT Jul-17 → BLOCKED (wrong date)."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        # 2026-07-18T00:09Z = 2026-07-17T17:09 PDT (UTC-7)
+        now = _utc(2026, 7, 18, 0, 9)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 18)
+        allowed, ctx = is_entry_allowed(self.LAX_HIGH_TICKER, cfg, now_utc=now, market_date=market_date)
+        assert allowed is False
+        assert ctx.get("reason") == "market_date_not_current_trading_day"
+        assert ctx["market_date"] == "2026-07-18"
+        assert ctx["current_trading_date"] == "2026-07-17"
+
+    def test_la_next_day_low_ticker_blocked_during_prior_evening(self):
+        """Jul-18 LA LOW ticker at 17:09 PDT Jul-17 → BLOCKED."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        now = _utc(2026, 7, 18, 0, 9)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 18)
+        allowed, ctx = is_entry_allowed(self.LAX_LOW_TICKER, cfg, now_utc=now, market_date=market_date)
+        assert allowed is False
+        assert ctx.get("reason") == "market_date_not_current_trading_day"
+
+    def test_la_same_day_ticker_allowed_after_threshold(self):
+        """Jul-17 LA ticker at 02:00 PDT Jul-17 → ALLOWED (same day, after 01:00)."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        # 2026-07-17T09:00Z = 2026-07-17T02:00 PDT (UTC-7)
+        now = _utc(2026, 7, 17, 9, 0)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 17)
+        allowed, ctx = is_entry_allowed("KXHIGHLAX-26JUL17-T79", cfg, now_utc=now, market_date=market_date)
+        assert allowed is True
+        assert ctx.get("reason") is None
+
+    def test_la_same_day_ticker_blocked_before_threshold(self):
+        """Jul-17 LA ticker at 00:30 PDT Jul-17 → BLOCKED (below 01:00 threshold)."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        # 2026-07-17T07:30Z = 2026-07-17T00:30 PDT (UTC-7)
+        now = _utc(2026, 7, 17, 7, 30)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 17)
+        allowed, ctx = is_entry_allowed("KXHIGHLAX-26JUL17-T79", cfg, now_utc=now, market_date=market_date)
+        assert allowed is False
+        # Blocked by time threshold, not date mismatch
+        assert ctx.get("reason") != "market_date_not_current_trading_day"
+
+    def test_la_next_day_blocked_just_before_own_window_starts(self):
+        """Jul-18 LA ticker at 00:59 PDT Jul-18 → BLOCKED (< 01:00 threshold for Jul-18)."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        # 2026-07-18T07:59Z = 2026-07-18T00:59 PDT (UTC-7)
+        now = _utc(2026, 7, 18, 7, 59)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 18)
+        allowed, ctx = is_entry_allowed(self.LAX_HIGH_TICKER, cfg, now_utc=now, market_date=market_date)
+        assert allowed is False
+
+    def test_la_ticker_allowed_at_own_window_start(self):
+        """Jul-18 LA ticker at exactly 01:00 PDT Jul-18 → ALLOWED."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        # 2026-07-18T08:00Z = 2026-07-18T01:00 PDT (UTC-7)
+        now = _utc(2026, 7, 18, 8, 0)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 18)
+        allowed, ctx = is_entry_allowed(self.LAX_HIGH_TICKER, cfg, now_utc=now, market_date=market_date)
+        assert allowed is True
+        assert ctx.get("reason") is None
+
+    # -----------------------------------------------------------------------
+    # Without market_date — existing time-only behaviour preserved
+    # -----------------------------------------------------------------------
+
+    def test_no_market_date_passes_time_check_unchanged(self):
+        """Without market_date, the gate still passes on time alone (backward compat)."""
+        cfg = _make_config(enable_local_settle_gate=True, default_entry_start_local="01:00")
+        # 17:09 PDT = time >= 01:00 → allowed (no date check)
+        now = _utc(2026, 7, 18, 0, 9)
+        allowed, ctx = is_entry_allowed(self.LAX_HIGH_TICKER, cfg, now_utc=now)
+        assert allowed is True
+        assert ctx.get("reason") is None
+
+    # -----------------------------------------------------------------------
+    # Phoenix (midnight threshold) — same logic but 00:00 boundary
+    # -----------------------------------------------------------------------
+
+    PHX_TICKER_TODAY = "KXHIGHTPHX-26JUL17-T105"
+    PHX_TICKER_TOMORROW = "KXHIGHTPHX-26JUL18-T105"
+
+    def test_phoenix_next_day_blocked_during_prior_day(self):
+        """Phoenix Jul-18 ticker at 22:00 MST Jul-17 → BLOCKED (wrong date)."""
+        cfg = _make_config(
+            enable_local_settle_gate=True,
+            default_entry_start_local="01:00",
+            phoenix_entry_start_local="00:00",
+        )
+        # Phoenix is always UTC-7: 22:00 MST Jul-17 = 05:00 UTC Jul-18
+        now = _utc(2026, 7, 18, 5, 0)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 18)
+        allowed, ctx = is_entry_allowed(self.PHX_TICKER_TOMORROW, cfg, now_utc=now, market_date=market_date)
+        assert allowed is False
+        assert ctx.get("reason") == "market_date_not_current_trading_day"
+        assert ctx["market_date"] == "2026-07-18"
+        assert ctx["current_trading_date"] == "2026-07-17"
+
+    def test_phoenix_same_day_allowed_at_midnight(self):
+        """Phoenix Jul-18 ticker at 00:00 MST Jul-18 → ALLOWED (Phoenix midnight rule)."""
+        cfg = _make_config(
+            enable_local_settle_gate=True,
+            default_entry_start_local="01:00",
+            phoenix_entry_start_local="00:00",
+        )
+        # 00:00 MST Jul-18 = 07:00 UTC Jul-18
+        now = _utc(2026, 7, 18, 7, 0)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 18)
+        allowed, ctx = is_entry_allowed(self.PHX_TICKER_TOMORROW, cfg, now_utc=now, market_date=market_date)
+        assert allowed is True
+        assert ctx.get("reason") is None
+
+    def test_phoenix_same_day_ticker_always_allowed(self):
+        """Phoenix Jul-17 ticker at any time on Jul-17 (>= midnight) → ALLOWED."""
+        cfg = _make_config(
+            enable_local_settle_gate=True,
+            default_entry_start_local="01:00",
+            phoenix_entry_start_local="00:00",
+        )
+        # 12:00 MST Jul-17 = 19:00 UTC Jul-17
+        now = _utc(2026, 7, 17, 19, 0)
+        import datetime as _dt
+        market_date = _dt.date(2026, 7, 17)
+        allowed, ctx = is_entry_allowed(self.PHX_TICKER_TODAY, cfg, now_utc=now, market_date=market_date)
+        assert allowed is True

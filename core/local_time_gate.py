@@ -153,10 +153,28 @@ def _parse_hhmm(value: str) -> datetime.time:
     return datetime.time(int(h), int(m))
 
 
+def _current_local_trading_date(
+    now_local: datetime.datetime, is_phoenix: bool
+) -> datetime.date:
+    """Return the station's current local trading date for *now_local*.
+
+    For Phoenix (midnight threshold): the trading date is the calendar date.
+    For all other cities (01:00 threshold): the trading date is the calendar
+    date, but rolled back by one day if the local time is before 01:00
+    (i.e. the very early hours still belong to the *previous* market day).
+    """
+    if is_phoenix:
+        return now_local.date()
+    if now_local.time() < datetime.time(1, 0):
+        return now_local.date() - datetime.timedelta(days=1)
+    return now_local.date()
+
+
 def is_entry_allowed(
     ticker: str,
     config: "AppConfig",
     now_utc: Optional[datetime.datetime] = None,
+    market_date: Optional[datetime.date] = None,
 ) -> tuple[bool, dict]:
     """Determine whether a new entry order is allowed right now for *ticker*.
 
@@ -169,6 +187,12 @@ def is_entry_allowed(
     now_utc:
         Current UTC time.  Defaults to ``datetime.datetime.now(UTC)`` if
         omitted; pass an explicit value in tests to control the clock.
+    market_date:
+        The parsed calendar date embedded in the ticker (e.g. July 18 for a
+        ``26JUL18`` ticker).  When provided and the ticker's timezone is
+        known, entry is blocked unless *market_date* equals the station's
+        current local trading date.  Existing call-sites that omit this
+        parameter retain the previous (time-only) behaviour.
 
     Returns
     -------
@@ -208,4 +232,15 @@ def is_entry_allowed(
         "local_time": now_local.strftime("%H:%M:%S"),
         "threshold": threshold_str,
     }
+
+    if allowed and market_date is not None:
+        current_trading_date = _current_local_trading_date(now_local, is_phoenix)
+        if market_date != current_trading_date:
+            ctx["reason"] = "market_date_not_current_trading_day"
+            ctx["market_date"] = market_date.isoformat()
+            ctx["current_trading_date"] = current_trading_date.isoformat()
+            ctx["station"] = get_series_station_code(ticker)
+            ctx["now_local"] = now_local.isoformat()
+            return False, ctx
+
     return allowed, ctx
