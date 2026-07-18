@@ -60,6 +60,35 @@ class TestAppConfig:
         assert cfg.hedge_max_factor == 3
         assert isinstance(cfg.hedge_max_factor, int)
 
+    def test_unknown_env_keys_do_not_raise(self):
+        """AppConfig must not crash when .env contains keys owned by other modules.
+
+        Regression for the startup crash caused by NWS/GATE keys being
+        present in .env but not declared in AppConfig.  Setting extra='ignore'
+        in SettingsConfigDict is the fix; this test ensures it stays in place.
+        """
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        from pydantic import ValidationError
+        # Simulate the six NWS keys that live in .env and are read by nws/config.py
+        nws_keys = {
+            "NWS_USER_AGENT": "forecastology/1.0 (test@example.com)",
+            "HIGH_LOW_UPDATE": "30",
+            "GATE_LOW_BEFORE": "150",
+            "GATE_LOW_AFTER": "60",
+            "GATE_HIGH_BEFORE": "120",
+            "GATE_HIGH_AFTER": "60",
+        }
+        for k, v in nws_keys.items():
+            os.environ[k] = v
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()  # must not raise ValidationError
+            assert cfg.kalshi_api_key == 'test_key'
+        finally:
+            for k in nws_keys:
+                os.environ.pop(k, None)
+
 
         import pytest
         pytest.importorskip("pydantic_settings")
