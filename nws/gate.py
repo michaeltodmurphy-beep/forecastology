@@ -11,7 +11,7 @@ Window durations are controlled by environment variables (see ``nws/config.py``)
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -115,13 +115,52 @@ def _trading_day_window_bounds(station_code: str, now_utc: datetime) -> tuple[da
     return utc_start, utc_start + timedelta(days=1)
 
 
+def _trading_day_window_for_date(
+    station_code: str, market_date: date
+) -> tuple[datetime, datetime]:
+    """Return UTC [start, end) bounds for *market_date*'s trading window.
+
+    Unlike ``_trading_day_window_bounds`` (which derives the trading day from
+    the current time), this helper is keyed to a specific *market_date* so
+    that the gate can verify a ticker's own trading window regardless of
+    the current wall-clock time.
+    """
+    cached_station = _station_cache.get(station_code)
+    if cached_station is not None:
+        _lat, _lon, _hourly_url, tz_name = cached_station
+        try:
+            station_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(
+                "gate.invalid_station_timezone station=%s tz=%s — using UTC-day window",
+                station_code,
+                tz_name,
+            )
+        else:
+            if station_code == "KPHX":
+                local_start = datetime.combine(market_date, time(0, 0), tzinfo=station_tz)
+            else:
+                local_start = datetime.combine(market_date, time(1, 0), tzinfo=station_tz)
+            local_end = local_start + timedelta(days=1)
+            return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+
+    utc_start = datetime(market_date.year, market_date.month, market_date.day, tzinfo=timezone.utc)
+    return utc_start, utc_start + timedelta(days=1)
+
+
 def has_forecast(
-    station_code: str, current_utc_time: datetime | None = None
+    station_code: str,
+    current_utc_time: datetime | None = None,
+    market_date: date | None = None,
 ) -> bool:
     """Return ``True`` if a current trading-day forecast row exists for *station_code*.
 
     Used by the entry gate to distinguish "gate closed because outside window"
     from "gate closed because no valid data".
+
+    When *market_date* is provided, the check is keyed to that specific date
+    instead of the trading day derived from *current_utc_time*.  This ensures
+    the gate only considers a forecast valid for the ticker's own market date.
 
     Returns ``False`` on any DB error (treating it the same as no data).
     """
@@ -140,16 +179,23 @@ def has_forecast(
         )
         return False
 
-    matches, forecast_date_utc, expected_forecast_date_utc, expected_tz = (
-        _forecast_day_matches(forecast_date_utc, station_code, now)
-    )
+    if market_date is not None:
+        expected_forecast_date_utc = _forecast_date_utc_for_local_date(market_date)
+        forecast_date_utc_aware = _ensure_utc(forecast_date_utc)
+        matches = forecast_date_utc_aware == expected_forecast_date_utc
+        expected_tz = "market_date"
+        forecast_date_utc_log = forecast_date_utc_aware
+    else:
+        matches, forecast_date_utc_log, expected_forecast_date_utc, expected_tz = (
+            _forecast_day_matches(forecast_date_utc, station_code, now)
+        )
     logger.debug(
         "gate.has_forecast_check station=%s tz=%s forecast_date_utc=%s "
         "expected_forecast_date_utc=%s high_time_utc=%s low_time_utc=%s now_utc=%s "
         "has_current_forecast=%s",
         station_code,
         expected_tz,
-        forecast_date_utc.isoformat(),
+        forecast_date_utc_log.isoformat(),
         expected_forecast_date_utc.isoformat(),
         high_time_utc.isoformat() if high_time_utc else None,
         low_time_utc.isoformat() if low_time_utc else None,
@@ -159,7 +205,11 @@ def has_forecast(
     return matches
 
 
-def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
+def is_trading_gate_open(
+    station_code: str,
+    current_utc_time: datetime,
+    market_date: date | None = None,
+) -> bool:
     """Return ``True`` if trading is currently allowed for *station_code*.
 
     The gate is open when *current_utc_time* falls within either:
@@ -170,9 +220,17 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
     If no forecast data exists for the station, the gate is **closed**
     (fail-safe: do not trade on missing data).
 
+    When *market_date* is provided, all date comparisons are keyed to that
+    specific date rather than the trading day derived from *current_utc_time*.
+    This blocks entry for a next-day market if the current time has not yet
+    reached that market's own trading window.
+
     Args:
         station_code: NWS ICAO code, e.g. ``"KATL"``.
         current_utc_time: The time to evaluate; naive datetimes are assumed UTC.
+        market_date: Optional ticker market date.  When supplied the gate
+            uses this date's trading window instead of deriving it from
+            *current_utc_time*.
 
     Returns:
         ``True`` if the gate is open, ``False`` otherwise.
@@ -196,9 +254,17 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
         )
         return False
 
-    matches, forecast_date_utc, expected_forecast_date_utc, expected_tz = (
-        _forecast_day_matches(forecast_date_utc, station_code, now)
-    )
+    if market_date is not None:
+        expected_forecast_date_utc = _forecast_date_utc_for_local_date(market_date)
+        forecast_date_utc_aware = _ensure_utc(forecast_date_utc)
+        matches = forecast_date_utc_aware == expected_forecast_date_utc
+        expected_tz = "market_date"
+        forecast_date_utc = forecast_date_utc_aware
+    else:
+        matches, forecast_date_utc, expected_forecast_date_utc, expected_tz = (
+            _forecast_day_matches(forecast_date_utc, station_code, now)
+        )
+
     if not matches:
         logger.info(
             "gate.stale_forecast station=%s tz=%s forecast_date_utc=%s "
@@ -214,7 +280,10 @@ def is_trading_gate_open(station_code: str, current_utc_time: datetime) -> bool:
         )
         return False
 
-    window_start_utc, window_end_utc = _trading_day_window_bounds(station_code, now)
+    if market_date is not None:
+        window_start_utc, window_end_utc = _trading_day_window_for_date(station_code, market_date)
+    else:
+        window_start_utc, window_end_utc = _trading_day_window_bounds(station_code, now)
 
     in_low_window = False
     in_high_window = False
