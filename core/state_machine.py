@@ -152,6 +152,15 @@ class TemperatureStrategy:
         self._nws_gate_cache: dict[str, tuple[float, bool, bool]] = {}
         self._nws_gate_cache_refresh_seconds = 30
 
+        # Bounded queue for non-blocking trade-log persistence (Change B).
+        # Trade logging is non-critical; drops are acceptable when the queue
+        # is saturated so that DB writes never block the WS reader / SL path.
+        _TRADE_LOG_QUEUE_MAX = 500
+        self._trade_log_queue: asyncio.Queue = asyncio.Queue(maxsize=_TRADE_LOG_QUEUE_MAX)
+        self._trade_log_writer_task: Optional[asyncio.Task] = None
+        self._trade_log_drop_count: int = 0
+        self._trade_log_drop_last_warned: float = 0.0
+
     @staticmethod
     def _first_non_none(*values):
         for value in values:
@@ -920,6 +929,9 @@ class TemperatureStrategy:
         # Start the strategy evaluation loop
         asyncio.create_task(self._strategy_loop())
 
+        # Start the background trade-log writer (Change B)
+        self._trade_log_writer_task = asyncio.create_task(self._trade_log_writer())
+
         logger.info("strategy.started",
                      monitor_start=self.config.monitor_start_price,
                      buy_trigger=self.config.buy_trigger_price,
@@ -1187,20 +1199,68 @@ class TemperatureStrategy:
         if not market_ticker or price is None:
             return
 
-        # Update last price from trades too
+        # Update last price synchronously — cheap, on the hot path.
         self.cache.update_last_price(market_ticker, price)
 
-        # Log to database
-        async with await self.db.get_session() as session:
-            st = StreamedTrade(
-                market_ticker=market_ticker,
-                price=price,
-                quantity=quantity or 0,
-                side=side,
-                trade_ts=datetime.datetime.fromtimestamp(trade_ts / 1000) if trade_ts else datetime.datetime.utcnow(),
-            )
-            session.add(st)
-            await session.commit()
+        # Enqueue the trade record for background persistence.
+        # If the queue is full we drop the row (non-critical bookkeeping) so
+        # that the WS reader is never blocked by DB writes.
+        record = {
+            "market_ticker": market_ticker,
+            "price": price,
+            "quantity": quantity or 0,
+            "side": side,
+            "trade_ts": trade_ts,
+        }
+        try:
+            self._trade_log_queue.put_nowait(record)
+        except asyncio.QueueFull:
+            self._trade_log_drop_count += 1
+            now = time.monotonic()
+            if now - self._trade_log_drop_last_warned >= 60.0:
+                self._trade_log_drop_last_warned = now
+                logger.warning(
+                    "trade_log.queue_full_dropping",
+                    dropped_since_last_warn=self._trade_log_drop_count,
+                )
+                self._trade_log_drop_count = 0
+
+    async def _trade_log_writer(self) -> None:
+        """Background task: drains ``_trade_log_queue`` and persists records to DB.
+
+        Trade logging is non-critical bookkeeping.  This task runs independently
+        of the WS reader so that DB commits never block SL trigger handling.
+        """
+        logger.info("trade_log_writer.started")
+        try:
+            while True:
+                record = await self._trade_log_queue.get()
+                try:
+                    trade_ts = record["trade_ts"]
+                    async with await self.db.get_session() as session:
+                        st = StreamedTrade(
+                            market_ticker=record["market_ticker"],
+                            price=record["price"],
+                            quantity=record["quantity"],
+                            side=record["side"],
+                            trade_ts=(
+                                datetime.datetime.fromtimestamp(trade_ts / 1000)
+                                if trade_ts else datetime.datetime.utcnow()
+                            ),
+                        )
+                        session.add(st)
+                        await session.commit()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("trade_log_writer.write_failed", error=str(exc))
+                finally:
+                    self._trade_log_queue.task_done()
+        except asyncio.CancelledError:
+            logger.info("trade_log_writer.cancelled")
+            raise
+        finally:
+            logger.info("trade_log_writer.stopped")
 
     async def _handle_orderbook_snapshot(self, msg: dict):
         """Process orderbook snapshot - initialize cache baseline price."""
@@ -2846,4 +2906,11 @@ class TemperatureStrategy:
                 task.cancel()
         self._sl_exit_tasks.clear()
         self._sl_cycles.clear()
+        if self._trade_log_writer_task is not None and not self._trade_log_writer_task.done():
+            self._trade_log_writer_task.cancel()
+            try:
+                await self._trade_log_writer_task
+            except asyncio.CancelledError:
+                pass
+            self._trade_log_writer_task = None
         logger.info("strategy.stopped")

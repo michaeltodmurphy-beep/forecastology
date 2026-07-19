@@ -122,6 +122,7 @@ class StopLossWatcher:
         if best_ask is None:
             return False
 
+        to_spawn: Optional[tuple[str, PositionSide, int, int]] = None
         suppressed_state: Optional[StopLossWatcherState] = None
         async with self._lock:
             position = self._positions.get(ticker)
@@ -137,18 +138,29 @@ class StopLossWatcher:
             if position.state in {"TRIGGERED", "SUBMITTING", "RETRYING"} or position.exit_in_progress:
                 suppressed_state = position.state
             else:
+                # Fresh trigger: transition state and inline-dispatch the worker.
                 position.state = "TRIGGERED"
                 position.trigger_price = best_ask
-                return True
+                existing_task = self._worker_tasks.get(ticker)
+                if existing_task is None or existing_task.done():
+                    position.exit_in_progress = True
+                    to_spawn = (ticker, position.side, position.quantity, best_ask)
 
-        logger.info(
-            "sl.trigger_suppressed_in_flight",
-            ticker=ticker,
-            action_key=self._action_key(ticker),
-            best_ask=best_ask,
-            state=suppressed_state or "SUBMITTING",
-        )
-        return False
+        if suppressed_state is not None:
+            logger.info(
+                "sl.trigger_suppressed_in_flight",
+                ticker=ticker,
+                action_key=self._action_key(ticker),
+                best_ask=best_ask,
+                state=suppressed_state,
+            )
+            return False
+
+        # Spawn the worker outside the lock — mirrors _run_cycle_once discipline.
+        if to_spawn is not None:
+            self._spawn_worker(*to_spawn)
+
+        return True
 
     async def _set_position_state(
         self,
@@ -218,6 +230,24 @@ class StopLossWatcher:
         if normalized == "retry":
             logger.warning("sl.exit_order_failed", ticker=ticker, quantity=quantity)
 
+    def _spawn_worker(self, ticker: str, side: PositionSide, quantity: int, trigger_price: int) -> asyncio.Task:
+        """Create a worker task for a position and register it in ``_worker_tasks``.
+
+        Must be called **outside** ``self._lock``.  The caller is responsible for
+        setting ``position.exit_in_progress = True`` while holding the lock before
+        calling this method.
+        """
+        task = asyncio.create_task(self._process_position(ticker, side, quantity, trigger_price))
+        self._worker_tasks[ticker] = task
+
+        def _cleanup(done_task: asyncio.Task, *, task_ticker: str = ticker) -> None:
+            current = self._worker_tasks.get(task_ticker)
+            if current is done_task:
+                self._worker_tasks.pop(task_ticker, None)
+
+        task.add_done_callback(_cleanup)
+        return task
+
     async def _run_cycle_once(self) -> None:
         scheduled: list[tuple[str, PositionSide, int, int]] = []
         async with self._lock:
@@ -238,15 +268,7 @@ class StopLossWatcher:
                 )
 
         for ticker, side, quantity, trigger_price in scheduled:
-            task = asyncio.create_task(self._process_position(ticker, side, quantity, trigger_price))
-            self._worker_tasks[ticker] = task
-
-            def _cleanup(done_task: asyncio.Task, *, task_ticker: str = ticker) -> None:
-                current = self._worker_tasks.get(task_ticker)
-                if current is done_task:
-                    self._worker_tasks.pop(task_ticker, None)
-
-            task.add_done_callback(_cleanup)
+            self._spawn_worker(ticker, side, quantity, trigger_price)
 
     async def run(self) -> None:
         logger.info("sl.watcher_started")
