@@ -41,7 +41,9 @@ class OrderBookLevel:
 class OrderBook:
     yes_bids: list[OrderBookLevel] = field(default_factory=list)
     yes_asks: list[OrderBookLevel] = field(default_factory=list)
-    # Note: In Kalshi, no asks are implicit from yes bids (100 - price).
+    # NO bids are tracked so the YES ask can be derived as (100 - best_no_bid).
+    # On Kalshi, YES ask = 100 - highest NO bid (complementary contract pricing).
+    no_bids: list[OrderBookLevel] = field(default_factory=list)
 
     @property
     def best_bid(self) -> Optional[int]:
@@ -49,7 +51,19 @@ class OrderBook:
 
     @property
     def best_ask(self) -> Optional[int]:
-        return self.yes_asks[0].price if self.yes_asks else None
+        """Return the YES ask price in cents.
+
+        Prefers explicit YES ask levels (populated from ticker channel when
+        available).  Falls back to deriving the ask from NO bids:
+        YES ask = 100 - best_NO_bid, which is the minimum price at which
+        someone will sell YES (equivalently, the best price to buy NO minus
+        their implied cost).
+        """
+        if self.yes_asks:
+            return self.yes_asks[0].price
+        if self.no_bids:
+            return 100 - self.no_bids[0].price
+        return None
 
     @property
     def spread(self) -> Optional[int]:

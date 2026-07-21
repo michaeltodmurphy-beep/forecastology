@@ -5854,3 +5854,403 @@ async def test_successful_stop_loss_still_advances_counter(monkeypatch):
     await strategy._evaluate_held_positions()
 
     assert await strategy._get_stop_loss_count_for_market(ticker) == 1
+
+
+# ---------------------------------------------------------------------------
+# Change 1: Dedicated fast held-position SL loop tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_held_positions_loop_calls_evaluate_held_positions(monkeypatch):
+    """The new _held_positions_loop calls _evaluate_held_positions on each cycle."""
+    strategy = make_strategy(monkeypatch, held_positions_loop_interval_ms=0)
+    strategy._reconciliation_complete = True
+    strategy._running = True
+
+    calls = []
+
+    async def tracked_held():
+        calls.append(1)
+
+    strategy._evaluate_held_positions = tracked_held
+
+    # Run one cycle of the loop then cancel it.
+    task = asyncio.create_task(strategy._held_positions_loop())
+    await asyncio.sleep(0.02)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_loop_no_longer_calls_evaluate_held_positions(monkeypatch):
+    """_strategy_loop must NOT call _evaluate_held_positions (moved to its own loop)."""
+    strategy = make_strategy(monkeypatch)
+    strategy._reconciliation_complete = True
+    strategy._running = True
+
+    held_calls = []
+    watchlist_calls = []
+
+    async def tracked_held():
+        held_calls.append(1)
+
+    async def tracked_watchlist():
+        watchlist_calls.append(1)
+
+    strategy._evaluate_held_positions = tracked_held
+    strategy._evaluate_watchlist = tracked_watchlist
+    strategy._log_periodic_snapshot = AsyncMock()
+
+    # Run one iteration then stop.
+    async def run_one():
+        task = asyncio.create_task(strategy._strategy_loop())
+        await asyncio.sleep(0.05)
+        strategy._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    await run_one()
+
+    assert len(held_calls) == 0, "_strategy_loop must not call _evaluate_held_positions"
+    assert len(watchlist_calls) >= 1, "_strategy_loop must still call _evaluate_watchlist"
+
+
+@pytest.mark.asyncio
+async def test_held_positions_loop_readiness_gate_blocks_until_reconciliation(monkeypatch):
+    """The new loop must not call _evaluate_held_positions before reconciliation completes."""
+    strategy = make_strategy(monkeypatch, held_positions_loop_interval_ms=0)
+    strategy._reconciliation_complete = False
+    strategy._running = True
+
+    calls = []
+
+    async def tracked_held():
+        calls.append(1)
+
+    strategy._evaluate_held_positions = tracked_held
+
+    task = asyncio.create_task(strategy._held_positions_loop())
+    await asyncio.sleep(0.02)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(calls) == 0, "held-position loop must be blocked by readiness gate"
+
+
+@pytest.mark.asyncio
+async def test_held_positions_loop_runs_after_reconciliation_completes(monkeypatch):
+    """After _reconciliation_complete flips to True the loop starts evaluating."""
+    strategy = make_strategy(monkeypatch, held_positions_loop_interval_ms=0)
+    strategy._reconciliation_complete = False
+    strategy._running = True
+
+    calls = []
+
+    async def tracked_held():
+        calls.append(1)
+
+    strategy._evaluate_held_positions = tracked_held
+
+    task = asyncio.create_task(strategy._held_positions_loop())
+    await asyncio.sleep(0.01)
+    # No calls yet — gate is closed.
+    assert len(calls) == 0
+    # Open the gate.
+    strategy._reconciliation_complete = True
+    # Wait enough for the sleep (0.05 s minimum) to expire and one iteration to run.
+    await asyncio.sleep(0.15)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_held_positions_loop_independent_of_blocked_watchlist(monkeypatch):
+    """Held-position evaluation runs even when watchlist scanning is slow/blocked."""
+    strategy = make_strategy(monkeypatch, held_positions_loop_interval_ms=0)
+    strategy._reconciliation_complete = True
+    strategy._running = True
+
+    held_calls = []
+    # watchlist blocks indefinitely
+    watchlist_barrier = asyncio.Event()
+
+    async def blocking_watchlist():
+        await watchlist_barrier.wait()
+
+    async def tracked_held():
+        held_calls.append(1)
+
+    strategy._evaluate_held_positions = tracked_held
+    strategy._evaluate_watchlist = blocking_watchlist
+    strategy._log_periodic_snapshot = AsyncMock()
+
+    strategy_task = asyncio.create_task(strategy._strategy_loop())
+    held_task = asyncio.create_task(strategy._held_positions_loop())
+
+    await asyncio.sleep(0.02)
+
+    strategy._running = False
+    strategy_task.cancel()
+    held_task.cancel()
+    try:
+        await strategy_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await held_task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(held_calls) >= 1, "held-position loop must fire even when watchlist is blocked"
+
+
+# ---------------------------------------------------------------------------
+# Change 2: Orderbook channels feed the StopLossWatcher
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_handle_orderbook_snapshot_calls_watcher_with_derived_ask(monkeypatch):
+    """_handle_orderbook_snapshot passes the YES ask derived from NO bids to the watcher."""
+    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    watcher_calls = []
+
+    class FakeWatcher:
+        async def on_market_update(self, ticker, ask):
+            watcher_calls.append((ticker, ask))
+            return True
+
+    strategy.stop_loss_watcher = FakeWatcher()
+
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    await strategy._ensure_bracket(ticker)
+
+    # Snapshot with a NO bid at 32¢ → YES ask = 100 - 32 = 68¢
+    msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [["0.67", "10"]],   # YES bid 67¢
+        "no_dollars_fp":  [["0.32", "5"]],    # NO bid 32¢  → YES ask 68¢
+    }
+    await strategy._handle_orderbook_snapshot({"msg": msg})
+
+    assert len(watcher_calls) == 1
+    call_ticker, call_ask = watcher_calls[0]
+    assert call_ticker == ticker
+    assert call_ask == 68  # 100 - 32
+
+
+@pytest.mark.asyncio
+async def test_handle_orderbook_delta_calls_watcher_with_derived_ask(monkeypatch):
+    """_handle_orderbook_delta passes the YES ask derived from NO bids to the watcher."""
+    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    watcher_calls = []
+
+    class FakeWatcher:
+        async def on_market_update(self, ticker, ask):
+            watcher_calls.append((ticker, ask))
+            return True
+
+    strategy.stop_loss_watcher = FakeWatcher()
+
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    await strategy._ensure_bracket(ticker)
+
+    # Prime the orderbook with a snapshot first.
+    snapshot_msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [["0.67", "10"]],
+        "no_dollars_fp":  [["0.32", "5"]],  # YES ask = 68¢
+    }
+    await strategy._handle_orderbook_snapshot({"msg": snapshot_msg})
+    watcher_calls.clear()
+
+    # Now send a delta that moves the NO bid to 40¢ → YES ask = 60¢
+    delta_msg = {
+        "market_ticker": ticker,
+        "price_dollars": "0.40",
+        "delta_fp": "5",
+        "side": "no",
+    }
+    await strategy._handle_orderbook_delta({"msg": delta_msg})
+
+    assert len(watcher_calls) == 1
+    _, call_ask = watcher_calls[0]
+    assert call_ask == 60  # 100 - 40
+
+
+@pytest.mark.asyncio
+async def test_orderbook_watcher_call_skipped_when_ask_is_none(monkeypatch):
+    """No call to the watcher when the orderbook has no ask information."""
+    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    watcher_calls = []
+
+    class FakeWatcher:
+        async def on_market_update(self, ticker, ask):
+            watcher_calls.append((ticker, ask))
+            return True
+
+    strategy.stop_loss_watcher = FakeWatcher()
+
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    await strategy._ensure_bracket(ticker)
+
+    # Snapshot with ONLY YES bids, no NO bids → best_ask is None
+    msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [["0.67", "10"]],
+        "no_dollars_fp":  [],
+    }
+    await strategy._handle_orderbook_snapshot({"msg": msg})
+
+    assert len(watcher_calls) == 0, "watcher must not be called when ask is None"
+
+
+@pytest.mark.asyncio
+async def test_orderbook_watcher_call_skipped_when_ask_is_zero(monkeypatch):
+    """No call to the watcher when derived ask is zero (invalid NO bid == 100¢)."""
+    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    watcher_calls = []
+
+    class FakeWatcher:
+        async def on_market_update(self, ticker, ask):
+            watcher_calls.append((ticker, ask))
+            return True
+
+    strategy.stop_loss_watcher = FakeWatcher()
+
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    await strategy._ensure_bracket(ticker)
+
+    # NO bid at 100¢ → derived YES ask = 100 - 100 = 0 → must be skipped
+    msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [],
+        "no_dollars_fp":  [["1.00", "1"]],
+    }
+    await strategy._handle_orderbook_snapshot({"msg": msg})
+
+    assert len(watcher_calls) == 0, "watcher must not be called for zero ask"
+
+
+@pytest.mark.asyncio
+async def test_orderbook_watcher_not_called_when_no_watcher_set(monkeypatch):
+    """No AttributeError when stop_loss_watcher is None (orderbook handler guard)."""
+    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    assert strategy.stop_loss_watcher is None
+
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    await strategy._ensure_bracket(ticker)
+
+    msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [["0.67", "10"]],
+        "no_dollars_fp":  [["0.32", "5"]],
+    }
+    # Must not raise even when stop_loss_watcher is None.
+    await strategy._handle_orderbook_snapshot({"msg": msg})
+    await strategy._handle_orderbook_delta({"msg": {
+        "market_ticker": ticker,
+        "price_dollars": "0.32",
+        "delta_fp": "5",
+        "side": "no",
+    }})
+
+
+@pytest.mark.asyncio
+async def test_orderbook_trigger_below_sl_fires_exit(monkeypatch):
+    """An orderbook update whose derived YES ask <= sl_price triggers the SL exit."""
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._reconciliation_complete = True
+
+    exit_calls = []
+
+    async def fake_exit(t, side, qty, trigger_price):
+        exit_calls.append((t, trigger_price))
+        return True
+
+    from execution.sl_watcher import StopLossWatcher
+    watcher = StopLossWatcher(fake_exit)
+    strategy.stop_loss_watcher = watcher
+    await watcher.register_position(ticker, "yes", 1, sl_price=50)
+
+    await strategy._ensure_bracket(ticker)
+
+    # Orderbook snapshot with NO bid at 55¢ → YES ask = 45¢ < SL(50¢) → triggers
+    msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [["0.40", "5"]],
+        "no_dollars_fp":  [["0.55", "3"]],  # YES ask = 45¢
+    }
+    await strategy._handle_orderbook_snapshot({"msg": msg})
+    # Allow spawned tasks to run.
+    await asyncio.sleep(0.01)
+
+    assert len(exit_calls) == 1
+    assert exit_calls[0][0] == ticker
+    assert exit_calls[0][1] == 45
+
+
+@pytest.mark.asyncio
+async def test_ticker_then_orderbook_trigger_fires_only_once(monkeypatch):
+    """Trigger from ticker channel followed immediately by an orderbook update
+    must result in exactly ONE exit dispatch (dedup via exit_in_progress guard)."""
+    ticker = "KXLOWTBOS-26JUN25-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
+    strategy._reconciliation_complete = True
+
+    exit_calls = []
+
+    async def fake_exit(t, side, qty, trigger_price):
+        exit_calls.append((t, trigger_price))
+        # Simulate a slow exit so the second trigger still sees in_progress.
+        await asyncio.sleep(0.05)
+        return True
+
+    from execution.sl_watcher import StopLossWatcher
+    watcher = StopLossWatcher(fake_exit)
+    strategy.stop_loss_watcher = watcher
+    await watcher.register_position(ticker, "yes", 1, sl_price=50)
+
+    # Trigger from ticker channel (YES ask = 40¢ < 50¢)
+    await strategy._handle_ticker({"msg": {
+        "market_ticker": ticker,
+        "yes_ask_dollars": "0.40",
+        "yes_bid_dollars": "0.38",
+        "last_price_dollars": "0.39",
+    }})
+
+    # Immediately trigger from orderbook channel (NO bid 65¢ → YES ask = 35¢ < 50¢)
+    msg = {
+        "market_ticker": ticker,
+        "yes_dollars_fp": [["0.35", "5"]],
+        "no_dollars_fp":  [["0.65", "3"]],  # YES ask = 35¢
+    }
+    await strategy._handle_orderbook_snapshot({"msg": msg})
+
+    # Let the spawned exit task finish.
+    await asyncio.sleep(0.1)
+
+    assert len(exit_calls) == 1, (
+        f"Expected exactly 1 exit call, got {len(exit_calls)}. "
+        "Double sell must be prevented by exit_in_progress guard."
+    )
