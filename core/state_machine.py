@@ -161,6 +161,15 @@ class TemperatureStrategy:
         self._trade_log_drop_count: int = 0
         self._trade_log_drop_last_warned: float = 0.0
 
+        # Dedicated held-position SL evaluation loop (fast, independent of entry scanning).
+        self._held_positions_task: Optional[asyncio.Task] = None
+        # Throttle the REST get_positions() call inside _evaluate_held_positions so the
+        # fast loop (~250 ms) does not flood the API.  Position data is refreshed at most
+        # every held_position_price_refresh_seconds (default 10 s); the cheap in-memory
+        # SL checks still run every cycle.
+        self._positions_api_cache: dict = {}
+        self._positions_api_last_fetch: float = 0.0
+
     @staticmethod
     def _first_non_none(*values):
         for value in values:
@@ -929,6 +938,10 @@ class TemperatureStrategy:
         # Start the strategy evaluation loop
         asyncio.create_task(self._strategy_loop())
 
+        # Start the dedicated held-position SL evaluation loop (fast, independent of
+        # entry scanning — decoupled so a slow watchlist cycle never delays SL checks).
+        self._held_positions_task = asyncio.create_task(self._held_positions_loop())
+
         # Start the background trade-log writer (Change B)
         self._trade_log_writer_task = asyncio.create_task(self._trade_log_writer())
 
@@ -1284,6 +1297,12 @@ class TemperatureStrategy:
                 bracket = self.brackets[market_ticker]
                 bracket.last_price = price
 
+            # Feed the orderbook-derived YES ask into the SL watcher so that
+            # book updates (which often arrive before the next ticker snapshot)
+            # can trigger the SL earlier.  Skip invalid/zero asks.
+            if self.stop_loss_watcher is not None and price > 0:
+                await self.stop_loss_watcher.on_market_update(market_ticker, price)
+
     async def _handle_orderbook_delta(self, msg: dict):
         """Process orderbook delta - update cached price."""
         data = msg.get("msg", msg)
@@ -1306,6 +1325,12 @@ class TemperatureStrategy:
             
             if market_ticker in self.brackets:
                 self.brackets[market_ticker].last_price = current_price
+
+            # Feed the orderbook-derived YES ask into the SL watcher so that
+            # book updates (which often arrive before the next ticker snapshot)
+            # can trigger the SL earlier.  Skip invalid/zero asks.
+            if self.stop_loss_watcher is not None and current_price > 0:
+                await self.stop_loss_watcher.on_market_update(market_ticker, current_price)
 
     async def _handle_lifecycle(self, msg: dict):
         """Handle market lifecycle events (new markets, status changes)."""
@@ -1367,6 +1392,7 @@ class TemperatureStrategy:
         """
         Main strategy evaluation loop runs every ~1 second.
         Evaluates all brackets and transitions phases.
+        Held-position SL management runs in the separate _held_positions_loop.
         """
         while self._running:
             if not self._reconciliation_complete:
@@ -1382,13 +1408,48 @@ class TemperatureStrategy:
                 continue
             try:
                 await asyncio.wait_for(self._evaluate_watchlist(), timeout=30.0)
-                await asyncio.wait_for(self._evaluate_held_positions(), timeout=30.0)
                 await asyncio.wait_for(self._log_periodic_snapshot(), timeout=10.0)
             except asyncio.TimeoutError:
                 logger.error("strategy.loop_timeout", msg="A strategy step timed out and was skipped")
             except Exception as e:
                 logger.error("strategy.loop_error", error=str(e), exc_info=True)
             await asyncio.sleep(1)
+
+    async def _held_positions_loop(self):
+        """
+        Dedicated fast loop for held-position SL management.
+
+        Runs independently of the entry-scanning _strategy_loop so that a slow
+        watchlist cycle never delays stop-loss evaluation.  Cadence is controlled
+        by held_positions_loop_interval_ms (default 250 ms).
+
+        REST get_positions() calls inside _evaluate_held_positions are throttled
+        to at most once per held_position_price_refresh_seconds (default 10 s) so
+        the higher cycle frequency does not multiply API call volume.
+        """
+        interval_s = max(0.05, self.config.held_positions_loop_interval_ms / 1000.0)
+        while self._running:
+            if not self._reconciliation_complete:
+                now_gate = asyncio.get_event_loop().time()
+                last_gate_log = getattr(self, "_last_held_pos_gate_log", 0)
+                if now_gate - last_gate_log >= 10:
+                    self._last_held_pos_gate_log = now_gate
+                    logger.warning(
+                        "held_positions.readiness_gate_blocking",
+                        msg="held-position loop blocked until reconciliation completes",
+                    )
+                await asyncio.sleep(interval_s)
+                continue
+            try:
+                await asyncio.wait_for(self._evaluate_held_positions(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "held_positions.loop_timeout",
+                    msg="_evaluate_held_positions timed out and was skipped",
+                )
+            except Exception as e:
+                logger.error("held_positions.loop_error", error=str(e), exc_info=True)
+            await asyncio.sleep(interval_s)
 
     async def _fetch_live_prices(self, tickers: list[str]) -> dict[str, OrderBook]:
         """
@@ -1867,12 +1928,23 @@ class TemperatureStrategy:
                 await session.commit()
 
     async def _evaluate_held_positions(self):
-        """Phase C: manage held positions with live sellable-price stop-losses."""
-        try:
-            api_positions = await self.executor.get_positions()
-        except Exception as e:
-            logger.error("phase.c.get_positions_failed", error=str(e))
-            api_positions = {}
+        """Phase C: manage held positions with live sellable-price stop-losses.
+
+        The REST get_positions() call is throttled to at most once per
+        held_position_price_refresh_seconds (default 10 s) so that the fast
+        _held_positions_loop (~250 ms cadence) does not flood the Kalshi API.
+        Cached position data is used between refreshes; in-memory SL price
+        checks run every cycle regardless.
+        """
+        now_fetch = asyncio.get_event_loop().time()
+        refresh_interval = max(int(self.config.held_position_price_refresh_seconds or 1), 1)
+        if now_fetch - self._positions_api_last_fetch >= refresh_interval:
+            try:
+                self._positions_api_cache = await self.executor.get_positions()
+                self._positions_api_last_fetch = now_fetch
+            except Exception as e:
+                logger.error("phase.c.get_positions_failed", error=str(e))
+        api_positions = self._positions_api_cache
         await self._adopt_untracked_exchange_fills(api_positions)
         if not self.active_positions:
             return
@@ -2906,6 +2978,13 @@ class TemperatureStrategy:
                 task.cancel()
         self._sl_exit_tasks.clear()
         self._sl_cycles.clear()
+        if self._held_positions_task is not None and not self._held_positions_task.done():
+            self._held_positions_task.cancel()
+            try:
+                await self._held_positions_task
+            except asyncio.CancelledError:
+                pass
+            self._held_positions_task = None
         if self._trade_log_writer_task is not None and not self._trade_log_writer_task.done():
             self._trade_log_writer_task.cancel()
             try:

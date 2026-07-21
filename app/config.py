@@ -128,6 +128,12 @@ class AppConfig(BaseSettings):
     default_entry_start_local: str = "01:00"
     phoenix_entry_start_local: str = "00:00"
     held_position_price_refresh_seconds: int = 10
+    # Interval (ms) for the dedicated held-position SL evaluation loop that runs
+    # independently of entry scanning.  Range: 100–250 ms.  Configurable via
+    # HELD_POSITIONS_LOOP_INTERVAL_MS env var.  Default 250 ms is intentionally
+    # conservative; lower values increase SL check frequency at the cost of more
+    # CPU/asyncio scheduling overhead.
+    held_positions_loop_interval_ms: int = 250
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
     enable_fast_sl_exit: bool | None = None
