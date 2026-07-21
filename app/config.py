@@ -76,7 +76,7 @@ def _parse_trade_toggle(raw: str | None, name: str, default: bool = True) -> boo
 
 
 class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
     kalshi_api_key: str = ''
     kalshi_private_key_path: str = 'kalshi_private_key.pem'
