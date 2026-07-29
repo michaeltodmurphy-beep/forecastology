@@ -50,6 +50,47 @@ def _parse_hedge_max_factor(raw: str | None) -> int:
         return 3
 
 
+def _parse_initial_contract_count(raw: str | None) -> int:
+    """Parse INITIAL_CONTRACT_COUNT from an env-var string.
+
+    Accepts positive integer strings ("1", "4", "10").
+    Float strings ("4.0", "2.5") are truncated to int with a warning.
+    Missing / empty → returns default of 1.
+    Values below 1 are clamped to 1 with a warning.
+    Unparseable input logs a warning and returns the default (1).
+    """
+    if not raw or not raw.strip():
+        return 1
+    stripped = raw.strip()
+    try:
+        parsed_float = float(stripped)
+        parsed_int = int(parsed_float)
+        if parsed_float != parsed_int:
+            logger.warning(
+                "config.initial_contract_count_non_integer",
+                raw=raw,
+                truncated_to=parsed_int,
+                message=f"INITIAL_CONTRACT_COUNT='{raw}' is not an integer; truncating to {parsed_int}",
+            )
+        if parsed_int < 1:
+            logger.warning(
+                "config.initial_contract_count_below_minimum",
+                raw=raw,
+                clamped_to=1,
+                message=f"INITIAL_CONTRACT_COUNT='{raw}' is below 1; clamping to 1",
+            )
+            return 1
+        return parsed_int
+    except (ValueError, TypeError):
+        logger.warning(
+            "config.initial_contract_count_invalid",
+            raw=raw,
+            fallback=1,
+            message=f"Unrecognized value for INITIAL_CONTRACT_COUNT='{raw}'; defaulting to 1",
+        )
+        return 1
+
+
 def _parse_trade_toggle(raw: str | None, name: str, default: bool = True) -> bool:
     """Parse a yes/no trade-direction toggle from an env-var string.
 
@@ -225,6 +266,7 @@ class AppConfig(BaseSettings):
         default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
+        initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -235,4 +277,5 @@ class AppConfig(BaseSettings):
             default_entry_start_local=default_entry_start_local,
             phoenix_entry_start_local=phoenix_entry_start_local,
             hedge_max_factor=hedge_max_factor,
+            initial_contract_count=initial_contract_count,
         )

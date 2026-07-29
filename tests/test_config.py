@@ -60,9 +60,30 @@ class TestAppConfig:
         assert cfg.hedge_max_factor == 3
         assert isinstance(cfg.hedge_max_factor, int)
 
-
+    def test_initial_contract_count_loaded_from_env(self):
+        """Regression test: INITIAL_CONTRACT_COUNT=4 in env must produce initial_contract_count == 4."""
         import pytest
         pytest.importorskip("pydantic_settings")
+        import os
+        os.environ['INITIAL_CONTRACT_COUNT'] = '4'
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.initial_contract_count == 4
+            assert isinstance(cfg.initial_contract_count, int)
+        finally:
+            os.environ.pop('INITIAL_CONTRACT_COUNT', None)
+
+    def test_initial_contract_count_default_is_one(self):
+        """Missing INITIAL_CONTRACT_COUNT must default to 1."""
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ.pop('INITIAL_CONTRACT_COUNT', None)
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.initial_contract_count == 1
+        assert isinstance(cfg.initial_contract_count, int)
         from app.config import AppConfig
         cfg = AppConfig(
             kalshi_api_key='k',
@@ -217,3 +238,37 @@ class TestNoTradeTickers:
         from app.config import AppConfig
         cfg = AppConfig.from_env()
         assert cfg.no_trade_tickers == {"KXLOWTSEA", "KXHIGHTSFO"}
+
+
+class TestParseInitialContractCount:
+    """Unit tests for _parse_initial_contract_count helper."""
+
+    def test_missing_returns_default_one(self):
+        from app.config import _parse_initial_contract_count
+        assert _parse_initial_contract_count(None) == 1
+        assert _parse_initial_contract_count("") == 1
+        assert _parse_initial_contract_count("   ") == 1
+
+    def test_integer_string_parses(self):
+        from app.config import _parse_initial_contract_count
+        assert _parse_initial_contract_count("4") == 4
+        assert _parse_initial_contract_count("1") == 1
+        assert _parse_initial_contract_count("10") == 10
+
+    def test_float_string_truncates_with_warning(self):
+        from app.config import _parse_initial_contract_count
+        assert _parse_initial_contract_count("4.0") == 4
+        assert _parse_initial_contract_count("4.9") == 4
+
+    def test_zero_clamped_to_one(self):
+        from app.config import _parse_initial_contract_count
+        assert _parse_initial_contract_count("0") == 1
+
+    def test_negative_clamped_to_one(self):
+        from app.config import _parse_initial_contract_count
+        assert _parse_initial_contract_count("-3") == 1
+
+    def test_garbage_returns_default_one(self):
+        from app.config import _parse_initial_contract_count
+        assert _parse_initial_contract_count("abc") == 1
+        assert _parse_initial_contract_count("?!") == 1
