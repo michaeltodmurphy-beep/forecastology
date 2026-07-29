@@ -1516,6 +1516,29 @@ async def test_hard_cap_guard_blocks_oversized_submission(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hard_cap_guard_blocks_oversized_initial4_factor2(monkeypatch):
+    """Regression: with initial=4, factor=2, max=8 — an order for >8 must be blocked."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTBOS-26JUN23-T68"
+    strategy = make_strategy(monkeypatch, initial_contract_count=4, hedge_max_factor=2)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTBOS",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 70, 77)
+
+    # Attempt to place 20 contracts — reproduces the reported live over-order.
+    await strategy._execute_entry(bracket, quantity=20)
+
+    assert len(strategy.executor.orders) == 0, "hard cap must block qty=20 (max is 8)"
+    assert any(event == "hedge.cap_blocked" for event, _ in logged)
+
+
+@pytest.mark.asyncio
 async def test_duplicate_bracket_same_series_step_blocked(monkeypatch):
     """Two brackets in the same (series, date, count) slot produce at most one order per cycle."""
     logged = capture_logs(monkeypatch)
@@ -1664,6 +1687,88 @@ def test_hedge_max_factor_invalid_string_defaults(monkeypatch):
     from app.config import _parse_hedge_max_factor
     assert _parse_hedge_max_factor("abc") == 3
     assert _parse_hedge_max_factor("?!") == 3
+
+
+# ---------------------------------------------------------------------------
+# Config loading: INITIAL_CONTRACT_COUNT is parsed as int and enforced
+# ---------------------------------------------------------------------------
+
+def test_initial_contract_count_loaded_from_env(monkeypatch):
+    """Regression test: INITIAL_CONTRACT_COUNT=4 in env must be honored by from_env()."""
+    env = {
+        "KALSHI_API_KEY": "test-key",
+        "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
+        "MYSQL_DATABASE_URL": "******localhost:3306/test",
+        "TRADING_MODE": "PAPER",
+        "BUY_TRIGGER_PRICE": "0.82",
+        "STOP_LOSS_PRICE": "0.35",
+        "INITIAL_CONTRACT_COUNT": "4",
+        "MINIMUM_SPREAD": "0.04",
+        "MONITOR_START_PRICE": "0.80",
+        "SPREAD_MONITOR_PRICE": "0.90",
+        "HEDGE_MAX_FACTOR": "2",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("HEDGE_TRIGGER_PRICE", raising=False)
+    monkeypatch.delenv("HEDGE_BUY", raising=False)
+
+    cfg = AppConfig.from_env()
+
+    assert cfg.initial_contract_count == 4
+    assert isinstance(cfg.initial_contract_count, int)
+    assert cfg.hedge_max_factor == 2
+    # max_allowed_qty must be 4 * 2^(2-1) = 8; orders exceeding this must be blocked
+    _, _, max_qty = hedge_policy(cfg.initial_contract_count, cfg.hedge_max_factor, 0)
+    assert max_qty == 8
+
+
+def test_initial_contract_count_non_integer_string_truncates(monkeypatch):
+    """A float string like '4.0' must be truncated to int 4."""
+    from app.config import _parse_initial_contract_count
+    assert _parse_initial_contract_count("4.0") == 4
+    assert _parse_initial_contract_count("4.9") == 4
+
+
+def test_initial_contract_count_below_minimum_clamped(monkeypatch):
+    """Values below 1 must clamp to 1."""
+    from app.config import _parse_initial_contract_count
+    assert _parse_initial_contract_count("0") == 1
+    assert _parse_initial_contract_count("-3") == 1
+
+
+def test_initial_contract_count_missing_defaults_to_one(monkeypatch):
+    """Missing / empty INITIAL_CONTRACT_COUNT must default to 1."""
+    from app.config import _parse_initial_contract_count
+    assert _parse_initial_contract_count(None) == 1
+    assert _parse_initial_contract_count("") == 1
+    assert _parse_initial_contract_count("   ") == 1
+
+
+def test_initial_contract_count_invalid_string_defaults(monkeypatch):
+    """Garbage string must default safely to 1, not raise."""
+    from app.config import _parse_initial_contract_count
+    assert _parse_initial_contract_count("abc") == 1
+    assert _parse_initial_contract_count("?!") == 1
+
+
+# ---------------------------------------------------------------------------
+# hedge_policy sizing: INITIAL_CONTRACT_COUNT=4, HEDGE_MAX_FACTOR=2
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("count,exp_qty,exp_allowed,exp_max", [
+    (0, 4, True, 8),   # initial buy: 4 contracts allowed
+    (1, 8, True, 8),   # first recovery: 8 contracts allowed, still at cap
+    (2, 8, False, 8),  # count >= factor=2: blocked
+    (3, 8, False, 8),  # still blocked
+])
+def test_hedge_policy_initial4_factor2(count, exp_qty, exp_allowed, exp_max):
+    """With initial=4 and factor=2, max_allowed_qty=8 and count>=2 is blocked."""
+    qty, allowed, max_qty = hedge_policy(4, 2, count)
+    assert max_qty == exp_max
+    assert allowed is exp_allowed
+    if allowed:
+        assert qty == exp_qty
 
 
 # ---------------------------------------------------------------------------
