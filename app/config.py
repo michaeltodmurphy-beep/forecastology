@@ -116,6 +116,32 @@ def _parse_trade_toggle(raw: str | None, name: str, default: bool = True) -> boo
     return default
 
 
+def _parse_positive_int(raw: str | None, name: str, default: int) -> int:
+    if not raw or not raw.strip():
+        return default
+    try:
+        parsed = int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "config.positive_int_invalid",
+            name=name,
+            raw=raw,
+            fallback=default,
+            message=f"Unrecognized value for {name}='{raw}'; defaulting to {default}",
+        )
+        return default
+    if parsed < 1:
+        logger.warning(
+            "config.positive_int_below_minimum",
+            name=name,
+            raw=raw,
+            fallback=default,
+            message=f"Value for {name} must be >= 1; defaulting to {default}",
+        )
+        return default
+    return parsed
+
+
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
@@ -233,6 +259,12 @@ class AppConfig(BaseSettings):
     # Parsed by from_env().  Does NOT affect stop-loss / exit paths.
     low_ticker_entry_halt_enabled: bool = True
     low_ticker_entry_halt_time_et: str = "22:00"
+    instance_lock_enabled: bool = True
+    instance_lock_file: str = "/tmp/forecastology.lock"
+    instance_id: str = ""
+    log_file: str = "logs/run.log"
+    log_max_bytes: int = 104857600
+    log_backup_count: int = 10
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
@@ -311,6 +343,26 @@ class AppConfig(BaseSettings):
             default=True,
         )
         low_ticker_entry_halt_time_et = os.getenv("LOW_TICKER_ENTRY_HALT_TIME_ET", "22:00")
+        instance_lock_enabled = _parse_trade_toggle(
+            os.getenv("INSTANCE_LOCK_ENABLED"),
+            "INSTANCE_LOCK_ENABLED",
+            default=True,
+        )
+        instance_lock_file = os.getenv("INSTANCE_LOCK_FILE") or os.getenv(
+            "FORECASTOLOGY_LOCKFILE", "/tmp/forecastology.lock"
+        )
+        instance_id = os.getenv("INSTANCE_ID", "").strip()
+        log_file = os.getenv("LOG_FILE", "logs/run.log")
+        log_max_bytes = _parse_positive_int(
+            os.getenv("LOG_MAX_BYTES"),
+            "LOG_MAX_BYTES",
+            default=104857600,
+        )
+        log_backup_count = _parse_positive_int(
+            os.getenv("LOG_BACKUP_COUNT"),
+            "LOG_BACKUP_COUNT",
+            default=10,
+        )
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -327,4 +379,10 @@ class AppConfig(BaseSettings):
             low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,
             low_ticker_entry_halt_enabled=low_ticker_entry_halt_enabled,
             low_ticker_entry_halt_time_et=low_ticker_entry_halt_time_et,
+            instance_lock_enabled=instance_lock_enabled,
+            instance_lock_file=instance_lock_file,
+            instance_id=instance_id,
+            log_file=log_file,
+            log_max_bytes=log_max_bytes,
+            log_backup_count=log_backup_count,
         )

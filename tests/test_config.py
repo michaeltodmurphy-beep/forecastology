@@ -214,6 +214,28 @@ class TestTradeToggles:
         assert cfg.manage_external_positions is True
         os.environ.pop("MANAGE_EXTERNAL_POSITIONS", None)
 
+    def test_instance_lock_and_log_rotation_env(self):
+        os.environ["INSTANCE_LOCK_ENABLED"] = "false"
+        os.environ["INSTANCE_LOCK_FILE"] = "/tmp/instance.lock"
+        os.environ["INSTANCE_ID"] = "kalshi-account-a"
+        os.environ["LOG_FILE"] = "logs/custom.log"
+        os.environ["LOG_MAX_BYTES"] = "2048"
+        os.environ["LOG_BACKUP_COUNT"] = "3"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.instance_lock_enabled is False
+        assert cfg.instance_lock_file == "/tmp/instance.lock"
+        assert cfg.instance_id == "kalshi-account-a"
+        assert cfg.log_file == "logs/custom.log"
+        assert cfg.log_max_bytes == 2048
+        assert cfg.log_backup_count == 3
+        os.environ.pop("INSTANCE_LOCK_ENABLED", None)
+        os.environ.pop("INSTANCE_LOCK_FILE", None)
+        os.environ.pop("INSTANCE_ID", None)
+        os.environ.pop("LOG_FILE", None)
+        os.environ.pop("LOG_MAX_BYTES", None)
+        os.environ.pop("LOG_BACKUP_COUNT", None)
+
 
 class TestNoTradeTickers:
     def setup_method(self):
