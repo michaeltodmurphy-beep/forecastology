@@ -99,10 +99,11 @@ class LiveTradeExecutor(BaseExecutor):
     NEVER connects to demo/sandbox URLs.
     """
 
-    def __init__(self, base_url: str, api_key: str, private_key_path: str, dry_run: bool = False):
+    def __init__(self, base_url: str, api_key: str, private_key_path: str, dry_run: bool = False, max_buy_qty: Optional[int] = None):
         self.base_url = base_url
         self.api_key = api_key
         self.dry_run = dry_run
+        self.max_buy_qty = max_buy_qty
         self._private_key = load_private_key(private_key_path)
         self._client = httpx.AsyncClient(timeout=30.0)
 
@@ -110,6 +111,26 @@ class LiveTradeExecutor(BaseExecutor):
         return build_auth_headers(self._private_key, self.api_key, method, path)
 
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
+        if self.max_buy_qty is not None and order.quantity > self.max_buy_qty:
+            logger.critical(
+                "hedge.cap_blocked",
+                ticker=order.market_ticker,
+                proposed_qty=order.quantity,
+                max_allowed_qty=self.max_buy_qty,
+                action="executor_hard_cap_blocked_submission",
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="REJECTED",
+                notes=f"hard_cap_blocked: qty={order.quantity} exceeds max_buy_qty={self.max_buy_qty}",
+            )
         if self.dry_run:
             logger.warning(
                 "live.dry_run_skip_order",
