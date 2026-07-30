@@ -113,7 +113,7 @@ Key variables:
 | `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for PANIC_FLATTEN pre-submit revalidation (default `30000`). Set to `0` to disable the freshness check. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `INSTANCE_LOCK_ENABLED` | `true` (default) / `false` — enables startup single-instance guard |
 | `INSTANCE_LOCK_FILE` | Base path for the run.py startup lock file (default `/tmp/forecastology.lock`). The runtime appends an account hash so two bots for the same account conflict while distinct accounts can run separately. |
-| `INSTANCE_ID` | Optional stable lock identity (if unset, derived from `KALSHI_API_KEY_ID` or `KALSHI_API_KEY`; only a short hash is logged) |
+| `INSTANCE_ID` | Optional stable lock identity (if unset, derived from `KALSHI_API_KEY_ID`; only a short hash is logged) |
 | `LOG_FILE` | Application log file path for built-in rotating file logging (default `logs/run.log`) |
 | `LOG_MAX_BYTES` | Max log file size in bytes before rollover (default `104857600` = 100 MB) |
 | `LOG_BACKUP_COUNT` | Number of rotated log files to keep (default `10`) |
@@ -190,7 +190,7 @@ Use these env vars to control behavior:
 
 - `INSTANCE_LOCK_ENABLED=true|false` (default `true`)
 - `INSTANCE_LOCK_FILE=/tmp/forecastology.lock` (default shown; runtime appends account hash)
-- `INSTANCE_ID=<optional stable id>` (optional override for account/environment lock key)
+- `INSTANCE_ID=<optional stable id>` (optional override for account/environment lock key; default key is derived from `KALSHI_API_KEY_ID`)
 
 Operational cleanup after the incident: remove old duplicate systemd units from prior deployments so they cannot be auto-started again:
 

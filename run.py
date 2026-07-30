@@ -24,7 +24,6 @@ def _account_id_hash(config: AppConfig) -> str:
     identity = (
         config.instance_id.strip()
         or os.getenv("KALSHI_API_KEY_ID", "").strip()
-        or config.kalshi_api_key.strip()
         or "default"
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
