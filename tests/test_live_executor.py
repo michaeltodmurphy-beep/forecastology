@@ -271,6 +271,28 @@ def test_extract_fill_wrapped_order_key():
     assert price == 85
 
 
+def test_extract_fill_fractional_fill_count_fp_is_parsed():
+    data = {
+        "order": {
+            "fill_count_fp": "6.85",
+            "taker_fill_cost_dollars": "6.165000",
+            "maker_fill_cost_dollars": "0.000000",
+        }
+    }
+    count, price = live._extract_fill(data)
+    assert count == 7
+    assert price == 90
+
+
+def test_extract_fill_uses_fill_count_fp_fallback():
+    data = {
+        "fill": {"count_fp": "0.05", "price": 93},
+    }
+    count, price = live._extract_fill(data)
+    assert count == 0
+    assert price == 93
+
+
 # ---------------------------------------------------------------------------
 # _avg_fill_price_cents_from_fills
 # ---------------------------------------------------------------------------
@@ -542,3 +564,25 @@ async def test_get_positions_no_fills_stays_none(monkeypatch):
     assert positions["KXLOWTMIA-26JUN22-B80.5"]["average_fill_cost_cents"] == 0
     cost_log = next(kw for event, kw in debug_logged if event == "live.position_cost_basis")
     assert cost_log["source"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_buy_yes_blocks_when_existing_plus_proposed_exceeds_cap(monkeypatch):
+    critical_logged = []
+    monkeypatch.setattr(live.logger, "critical", lambda event, **kwargs: critical_logged.append((event, kwargs)))
+    executor = _make_executor(monkeypatch, responses=[])
+    executor.max_buy_qty = 10
+
+    async def fake_positions():
+        return {"TICKER": {"count": 10}}
+
+    executor.get_positions = fake_positions  # type: ignore[assignment]
+    order = OrderRequest("TICKER", OrderSide.BUY_YES, 80, 10)
+
+    result = await executor.buy_yes(order, max_price=90)
+
+    assert result.success is False
+    assert result.status == "REJECTED"
+    assert "position_cap_blocked" in result.notes
+    cap_log = next(kwargs for event, kwargs in critical_logged if event == "hedge.cap_blocked")
+    assert cap_log["action"] == "executor_position_cap_blocked_total"

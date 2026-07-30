@@ -281,9 +281,9 @@ The general formula: `max_allowed_qty = INITIAL_CONTRACT_COUNT * 2 ** (HEDGE_MAX
 **Multi-layer hard cap enforcement (choke-point fix):** Every buy path is subject to the same cap regardless of how it reaches the exchange:
 
 1. **`_evaluate_watchlist`** checks `is_allowed` from `hedge_policy` and skips entries where `count >= HEDGE_MAX_FACTOR` — no order is ever computed for a blocked count.
-2. **`_execute_entry`** re-validates `proposed_qty <= max_allowed_qty` as a final guard before calling the executor, and logs `hedge.cap_blocked` at CRITICAL if the check fails.
-3. **Executor layer** (`LiveTradeExecutor` / `PaperTradeExecutor`) enforces `max_buy_qty = INITIAL_CONTRACT_COUNT * 2**(HEDGE_MAX_FACTOR-1)` at `buy_yes` entry. Any path that bypasses the state machine still cannot exceed the cap.
-4. **`monitor.py`'s `_buy_hedge`** helper checks the same formula before POSTing to the Kalshi REST API. This path previously had no cap and was the primary leak path for the 16-contract order.
+2. **`_execute_entry`** re-validates both `proposed_qty <= max_allowed_qty` **and** `existing_position_qty + proposed_qty <= max_allowed_qty` before calling the executor, and logs `hedge.cap_blocked` at CRITICAL if either check fails.
+3. **Executor layer** (`LiveTradeExecutor` / `PaperTradeExecutor`) enforces `max_buy_qty = INITIAL_CONTRACT_COUNT * 2**(HEDGE_MAX_FACTOR-1)` as a per-order backstop **and** a position-aware guard (`existing + proposed <= cap`) at `buy_yes` entry.
+4. **`scanner.py` and `monitor.py` buy paths** apply the same position-aware total-cap check before submitting orders, so side-path entries cannot stack a market past cap.
 5. **`stop_loss_count` clamp**: `_increment_stop_loss_count_for_market` now clamps the stored count to `hedge_max_factor` so a stale or corrupt ledger row can never produce an oversized quantity on the next sizing calculation. A `hedge.stop_loss_count_clamped` warning is logged when clamping fires.
 
 Root cause of the 16-contract order: `monitor.py`'s `_buy_hedge` computed `qty = pos.quantity` from a live position and POSTed directly to Kalshi with no cap check, bypassing all guards in the state machine. The fix adds an explicit cap check in `_buy_hedge` (step 4) and at the executor layer (step 3) so no order path can bypass the cap.
@@ -419,9 +419,11 @@ Key variables:
 ### Trade ownership model (APP vs manual)
 
 - Every app-submitted order uses a client order id with `APP_` prefix (`APP_<uuid>`).
+- Live ownership reconciliation uses Kalshi fill history for `APP_` client-order IDs and aggregates fractional/partial fragments (`count_fp` / fixed-point fields) before classifying ownership.
 - Position ownership is partitioned per ticker:
   - `app_owned`: quantity attributable to app-tracked holdings.
   - `external_manual`: quantity not attributable to app-owned tracking.
+- `external_manual` is now only the unmatched remainder after APP-fill attribution; APP-attributed quantity is never classified as external.
 - Default (`MANAGE_EXTERNAL_POSITIONS=false`): stop-loss/exit logic only acts on `app_owned` quantity and never sells external/manual quantity.
 - Mixed positions are capped on exit to app-owned qty only; if app-owned qty is zero, exits are skipped (`exit.skipped_no_app_qty`).
 

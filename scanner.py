@@ -173,6 +173,26 @@ async def buy_market(
         quantity=proposed_qty,
     )
 
+    existing_position_qty = 0
+    try:
+        positions = await executor.get_positions()
+        existing_raw = (positions.get(ticker) or {}).get("count", 0)
+        existing_position_qty = max(int(float(existing_raw or 0)), 0)
+    except Exception as e:
+        logger.warning("scanner.position_cap_lookup_failed", ticker=ticker, error=str(e))
+    total_position_qty = existing_position_qty + proposed_qty
+    if total_position_qty > max_allowed_qty:
+        logger.critical(
+            "hedge.cap_blocked",
+            ticker=ticker,
+            existing_position_qty=existing_position_qty,
+            proposed_qty=proposed_qty,
+            total_position_qty=total_position_qty,
+            max_allowed_qty=max_allowed_qty,
+            action="scanner_position_cap_blocked_before_submit",
+        )
+        return False
+
     logger.info("scanner.buy_attempt", ticker=ticker, price=price_cents,
                 max_price=max_price, qty=proposed_qty)
 
