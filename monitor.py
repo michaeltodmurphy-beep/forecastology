@@ -134,16 +134,20 @@ async def _buy_hedge(
     qty: int,
     config: AppConfig,
     client: httpx.AsyncClient,
+    existing_position_qty: int = 0,
 ) -> bool:
     """Buy a hedge bracket at the given price with max_price for fill guarantee."""
     # Hard cap: never submit a hedge order that exceeds the per-step maximum.
     hedge_max_factor = max(int(config.hedge_max_factor), 1)
     max_allowed_qty = config.initial_contract_count * (2 ** (hedge_max_factor - 1))
-    if qty > max_allowed_qty:
+    total_position_qty = max(int(existing_position_qty or 0), 0) + max(int(qty or 0), 0)
+    if qty > max_allowed_qty or total_position_qty > max_allowed_qty:
         logger.critical(
             "hedge.cap_blocked",
             ticker=ticker,
+            existing_position_qty=max(int(existing_position_qty or 0), 0),
             proposed_qty=qty,
+            total_position_qty=total_position_qty,
             max_allowed_qty=max_allowed_qty,
             initial_contract_count=config.initial_contract_count,
             hedge_factor=hedge_max_factor,
@@ -284,8 +288,19 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                 logger.info("monitor.hedge_attempt", ticker=ticker,
                            hedge_ticker=hedge_ticker, hedge_price=hedge_price)
 
+                existing_hedge_qty = 0
+                for existing_pos in positions:
+                    if existing_pos.market_ticker == hedge_ticker:
+                        existing_hedge_qty = max(int(existing_pos.quantity or 0), 0)
+                        break
+
                 success = await _buy_hedge(
-                    hedge_ticker, hedge_price, pos.quantity, config, client
+                    hedge_ticker,
+                    hedge_price,
+                    pos.quantity,
+                    config,
+                    client,
+                    existing_position_qty=existing_hedge_qty,
                 )
 
                 if success:

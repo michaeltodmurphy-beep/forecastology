@@ -8,6 +8,7 @@ import structlog
 from typing import Literal, Optional
 from core.types import (
     Phase, MarketBracket, OrderRequest, OrderSide, OrderBook, OrderBookLevel,
+    APP_CLIENT_ORDER_PREFIX,
 )
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from core.local_time_gate import is_entry_allowed, get_series_station_code
@@ -239,6 +240,92 @@ class TemperatureStrategy:
             return None
 
     @staticmethod
+    def _to_quantity_float(raw) -> float:
+        if raw is None or raw == "":
+            return 0.0
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _fill_qty(cls, fill: dict) -> float:
+        return max(
+            cls._to_quantity_float(
+                cls._first_non_none(
+                    fill.get("count_fp"),
+                    fill.get("count"),
+                    fill.get("fill_count_fp"),
+                    fill.get("fill_count"),
+                    fill.get("filled_count"),
+                    fill.get("quantity_fp"),
+                    fill.get("quantity"),
+                )
+            ),
+            0.0,
+        )
+
+    async def _app_owned_qty_from_fills(
+        self,
+        ticker: str,
+        *,
+        total_position_qty: int,
+        fallback_app_owned_qty: int,
+        source: str,
+    ) -> int:
+        total_qty = max(int(total_position_qty or 0), 0)
+        fallback_qty = max(min(int(fallback_app_owned_qty or 0), total_qty), 0)
+        if self.config.manage_external_positions or not hasattr(self.executor, "get_fills"):
+            return total_qty if self.config.manage_external_positions else fallback_qty
+
+        try:
+            fills = await self.executor.get_fills(ticker=ticker)
+        except Exception as e:
+            logger.warning("reconcile.app_fill_lookup_failed", ticker=ticker, source=source, error=str(e))
+            return fallback_qty
+
+        app_net_qty = 0.0
+        matched_any = False
+        for fill in fills or []:
+            fill_ticker = self._first_non_none(fill.get("ticker"), fill.get("market_ticker"), "")
+            if fill_ticker != ticker:
+                continue
+            client_order_id = str(
+                self._first_non_none(
+                    fill.get("client_order_id"),
+                    fill.get("order_client_id"),
+                    fill.get("clientOrderId"),
+                    "",
+                )
+            )
+            if not client_order_id.startswith(APP_CLIENT_ORDER_PREFIX):
+                continue
+            qty = self._fill_qty(fill)
+            if qty <= 0:
+                continue
+            matched_any = True
+            action = str(self._first_non_none(fill.get("action"), fill.get("side"), "")).lower()
+            if action in {"sell", "ask", "sell_yes", "sell_no"}:
+                app_net_qty -= qty
+            else:
+                app_net_qty += qty
+
+        if not matched_any:
+            return fallback_qty
+
+        app_owned_qty = max(min(int(round(max(app_net_qty, 0.0))), total_qty), 0)
+        logger.info(
+            "reconcile.app_fill_matched",
+            ticker=ticker,
+            source=source,
+            total_position_qty=total_qty,
+            app_fill_net_qty=app_net_qty,
+            app_owned_qty=app_owned_qty,
+            external_qty=max(total_qty - app_owned_qty, 0),
+        )
+        return app_owned_qty
+
+    @staticmethod
     def _market_is_settled(rest_data: Optional[dict]) -> bool:
         if not rest_data:
             return False
@@ -343,8 +430,14 @@ class TemperatureStrategy:
         if self.config.manage_external_positions:
             live_app_owned_qty = live_total_qty
         else:
-            live_app_owned_qty = max(int(prior_app_qty or 0) - max(int(filled_qty or 0), 0), 0)
-            live_app_owned_qty = min(live_app_owned_qty, live_total_qty)
+            fallback_app_qty = max(int(prior_app_qty or 0) - max(int(filled_qty or 0), 0), 0)
+            fallback_app_qty = min(fallback_app_qty, live_total_qty)
+            live_app_owned_qty = await self._app_owned_qty_from_fills(
+                ticker,
+                total_position_qty=live_total_qty,
+                fallback_app_owned_qty=fallback_app_qty,
+                source="stop_loss_reconciliation",
+            )
 
         live_external_qty = max(live_total_qty - live_app_owned_qty, 0)
         live_managed_qty = live_total_qty if self.config.manage_external_positions else live_app_owned_qty
@@ -1162,7 +1255,15 @@ class TemperatureStrategy:
                     bracket.position_quantity = qty
                     db_pos = db_by_ticker.get(ticker)
                     db_qty = max(int((db_pos.quantity if db_pos else 0) or 0), 0)
-                    app_owned_qty = qty if self.config.manage_external_positions else min(db_qty, qty)
+                    if self.config.manage_external_positions:
+                        app_owned_qty = qty
+                    else:
+                        app_owned_qty = await self._app_owned_qty_from_fills(
+                            ticker,
+                            total_position_qty=qty,
+                            fallback_app_owned_qty=min(db_qty, qty),
+                            source="startup_live_positions",
+                        )
                     app_owned_qty, external_qty = self._set_ownership(
                         ticker,
                         total_position_qty=qty,
@@ -1230,7 +1331,15 @@ class TemperatureStrategy:
             bracket.last_price = pos.last_price
             bracket.hedge_market = pos.hedge_market_ticker
             bracket.hedge_quantity = pos.hedge_quantity
-            app_owned_qty = total_qty if self.config.manage_external_positions else min(int(pos.quantity or 0), total_qty)
+            if self.config.manage_external_positions:
+                app_owned_qty = total_qty
+            else:
+                app_owned_qty = await self._app_owned_qty_from_fills(
+                    ticker,
+                    total_position_qty=total_qty,
+                    fallback_app_owned_qty=min(int(pos.quantity or 0), total_qty),
+                    source="startup_db_positions",
+                )
             app_owned_qty, external_qty = self._set_ownership(
                 ticker,
                 total_position_qty=total_qty,
@@ -1774,15 +1883,38 @@ class TemperatureStrategy:
                 # -----------------------------------
 
                 bracket.crossed_buy = True
-                spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
-                logger.info("phase.b.buying", ticker=ticker,
-                            label=bracket.bracket_label, price=price, spread=spread,
-                            spread_note=spread_note)
                 count = await self._get_stop_loss_count_for_market(ticker)
                 hedge_max = int(self.config.hedge_max_factor)
                 next_qty, is_allowed, max_allowed_qty = hedge_policy(
                     self.config.initial_contract_count, hedge_max, count
                 )
+                live_total_qty = max(int(bracket.position_quantity or 0), 0)
+                try:
+                    live_positions = await self.executor.get_positions()
+                    live_raw = (live_positions.get(ticker) or {}).get("count", 0)
+                    live_total_qty = max(live_total_qty, max(int(float(live_raw or 0)), 0))
+                except Exception:
+                    pass
+                fallback_app_qty = min(
+                    max(int(self._app_owned_qty.get(ticker, bracket.position_quantity or 0) or 0), 0),
+                    live_total_qty,
+                )
+                known_app_qty = await self._app_owned_qty_from_fills(
+                    ticker,
+                    total_position_qty=live_total_qty,
+                    fallback_app_owned_qty=fallback_app_qty,
+                    source="watchlist_entry_guard",
+                )
+                if count == 0 and known_app_qty > 0 and known_app_qty >= next_qty:
+                    logger.info(
+                        "phase.b.entry_blocked_existing_position",
+                        ticker=ticker,
+                        app_owned_qty=known_app_qty,
+                        proposed_qty=next_qty,
+                        max_allowed_qty=max_allowed_qty,
+                        action="already_holding_app_owned_qty",
+                    )
+                    continue
 
                 if not is_allowed:
                     logger.info(
@@ -1800,6 +1932,28 @@ class TemperatureStrategy:
                                 count=count,
                                 max_doublings=hedge_max)
                     continue
+
+                if known_app_qty + next_qty > max_allowed_qty:
+                    logger.critical(
+                        "hedge.cap_blocked",
+                        ticker=ticker,
+                        series_ticker=bracket.series_ticker,
+                        hedge_step=count,
+                        hedge_factor=hedge_max,
+                        initial_qty=self.config.initial_contract_count,
+                        existing_position_qty=known_app_qty,
+                        proposed_qty=next_qty,
+                        total_position_qty=known_app_qty + next_qty,
+                        max_allowed_qty=max_allowed_qty,
+                        action="recovery_position_cap_blocked",
+                    )
+                    continue
+
+                bracket.crossed_buy = True
+                spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
+                logger.info("phase.b.buying", ticker=ticker,
+                            label=bracket.bracket_label, price=price, spread=spread,
+                            spread_note=spread_note)
 
                 # Duplicate-entry guard: at most one entry per (series, date, count) per cycle.
                 parsed_key = parse_series_and_date(ticker)
@@ -1878,6 +2032,33 @@ class TemperatureStrategy:
             bracket.phase = Phase.MONITORING
             return
 
+        existing_position_qty = max(int(bracket.position_quantity or 0), 0)
+        try:
+            positions = await self.executor.get_positions()
+            existing_raw = (positions.get(bracket.market_ticker) or {}).get("count", 0)
+            existing_position_qty = max(existing_position_qty, int(float(existing_raw or 0)))
+        except Exception as e:
+            logger.warning(
+                "phase.b.entry_position_lookup_failed",
+                ticker=bracket.market_ticker,
+                error=str(e),
+            )
+        total_position_qty = existing_position_qty + proposed_qty
+        if total_position_qty > max_allowed_qty:
+            logger.critical(
+                "hedge.cap_blocked",
+                ticker=bracket.market_ticker,
+                initial_contract_count=self.config.initial_contract_count,
+                existing_position_qty=existing_position_qty,
+                proposed_qty=proposed_qty,
+                total_position_qty=total_position_qty,
+                max_allowed_qty=max_allowed_qty,
+                hedge_factor=hedge_max,
+                action="hard_cap_guard_position_total_blocked_submission",
+            )
+            bracket.phase = Phase.MONITORING
+            return
+
         import uuid
         order = OrderRequest(
             market_ticker=bracket.market_ticker,
@@ -1919,12 +2100,30 @@ class TemperatureStrategy:
                                 cents=backfilled_cents)
 
             bracket.phase = Phase.HOLDING
-            bracket.position_quantity = result.fill_quantity
+            new_position_qty = max(existing_position_qty + max(int(result.fill_quantity or 0), 0), 0)
+            try:
+                positions = await self.executor.get_positions()
+                existing_raw = (positions.get(bracket.market_ticker) or {}).get("count", 0)
+                new_position_qty = max(new_position_qty, max(int(float(existing_raw or 0)), 0))
+            except Exception:
+                pass
+            bracket.position_quantity = new_position_qty
             bracket.avg_entry = reconciled_fill_price
+            prior_app_owned_qty = max(int(self._app_owned_qty.get(bracket.market_ticker, existing_position_qty) or 0), 0)
+            fallback_app_owned_qty = min(
+                new_position_qty,
+                prior_app_owned_qty + max(int(result.fill_quantity or 0), 0),
+            )
+            app_owned_qty = await self._app_owned_qty_from_fills(
+                bracket.market_ticker,
+                total_position_qty=new_position_qty,
+                fallback_app_owned_qty=fallback_app_owned_qty,
+                source="entry_fill",
+            )
             self._set_ownership(
                 bracket.market_ticker,
                 total_position_qty=bracket.position_quantity,
-                app_owned_qty=bracket.position_quantity,
+                app_owned_qty=app_owned_qty,
                 source="entry_fill",
                 action="position_updated",
             )
@@ -1943,9 +2142,8 @@ class TemperatureStrategy:
                 )
                 pos = existing.scalar_one_or_none()
                 if pos:
-                    # Use absolute fill quantity to avoid compounding against any
-                    # stale row that may survive process restarts.
-                    pos.quantity = result.fill_quantity
+                    # Keep DB position aligned to reconciled cumulative quantity.
+                    pos.quantity = bracket.position_quantity
                     pos.avg_entry_price = reconciled_fill_price
                     pos.last_price = reconciled_fill_price
                 else:
@@ -1955,7 +2153,7 @@ class TemperatureStrategy:
                         event_ticker=bracket.event_ticker,
                         series_ticker=bracket.series_ticker,
                         side="yes",
-                        quantity=result.fill_quantity,
+                        quantity=bracket.position_quantity,
                         avg_entry_price=reconciled_fill_price,
                         last_price=reconciled_fill_price,
                     )
@@ -2143,6 +2341,12 @@ class TemperatureStrategy:
                 except (TypeError, ValueError):
                     bracket.position_quantity = max(int(bracket.position_quantity or 0), 0)
                 app_known = self._app_owned_qty.get(ticker, bracket.position_quantity)
+                app_known = await self._app_owned_qty_from_fills(
+                    ticker,
+                    total_position_qty=bracket.position_quantity,
+                    fallback_app_owned_qty=app_known,
+                    source="periodic_reconciliation",
+                )
                 self._set_ownership(
                     ticker,
                     total_position_qty=bracket.position_quantity,
@@ -2555,15 +2759,23 @@ class TemperatureStrategy:
             qty = int(float(pos_data.get("count", 0) or 0))
             if qty <= 0:
                 continue
+            adopted_app_qty = qty
             if not self.config.manage_external_positions:
+                adopted_app_qty = await self._app_owned_qty_from_fills(
+                    ticker,
+                    total_position_qty=qty,
+                    fallback_app_owned_qty=0,
+                    source="untracked_exchange_position",
+                )
                 self._set_ownership(
                     ticker,
                     total_position_qty=qty,
-                    app_owned_qty=0,
+                    app_owned_qty=adopted_app_qty,
                     source="untracked_exchange_position",
-                    action="ignored_external_manual",
+                    action="ignored_external_manual" if adopted_app_qty <= 0 else "app_fill_reclassified",
                 )
-                continue
+                if adopted_app_qty <= 0:
+                    continue
 
             prior_phase = bracket.phase.name
             entry = int(pos_data.get("average_fill_cost_cents", 0) or 0)
@@ -2578,9 +2790,9 @@ class TemperatureStrategy:
             self._set_ownership(
                 ticker,
                 total_position_qty=qty,
-                app_owned_qty=qty,
+                app_owned_qty=adopted_app_qty,
                 source="untracked_exchange_position",
-                action="adopted_legacy_mode",
+                action="adopted_legacy_mode" if self.config.manage_external_positions else "adopted_app_fill_position",
             )
             if entry > 0:
                 bracket.avg_entry = entry

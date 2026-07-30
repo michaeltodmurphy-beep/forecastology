@@ -808,6 +808,73 @@ async def test_untracked_fill_is_classified_external_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_periodic_reconciliation_matches_fractional_app_fills(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTHOU-26JUL30-B96.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 20, "average_fill_cost_cents": 92}}
+    executor.fills = [
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_A", "count_fp": "10.00"},
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_A", "count_fp": "6.85"},
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_A", "count_fp": "0.10"},
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_A", "count_fp": "0.05"},
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_B", "count_fp": "1.00"},
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_B", "count_fp": "2.00"},
+    ]
+    strategy = make_strategy(monkeypatch, executor=executor)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTHOU",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=20,
+        avg_entry=92,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 90, 92)
+
+    await strategy._evaluate_held_positions()
+
+    ownership_logs = [kwargs for event, kwargs in logged if event == "ownership.classified"]
+    assert ownership_logs
+    assert ownership_logs[-1]["app_owned_qty"] == 20
+    assert ownership_logs[-1]["external_qty"] == 0
+    assert any(event == "reconcile.app_fill_matched" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconciliation_keeps_unmatched_qty_external(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTOKC-26JUN26-B72.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 12, "average_fill_cost_cents": 90}}
+    executor.fills = [
+        {"ticker": ticker, "action": "buy", "client_order_id": "APP_X", "count_fp": "10.00"},
+    ]
+    strategy = make_strategy(monkeypatch, executor=executor)
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTOKC",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=12,
+        avg_entry=90,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 80, 82)
+
+    await strategy._evaluate_held_positions()
+
+    ownership_logs = [kwargs for event, kwargs in logged if event == "ownership.classified"]
+    assert ownership_logs[-1]["app_owned_qty"] == 10
+    assert ownership_logs[-1]["external_qty"] == 2
+
+
+@pytest.mark.asyncio
 async def test_manage_external_positions_true_preserves_legacy_adoption(monkeypatch):
     ticker = "KXLOWTOKC-26JUN26-B72.5"
     executor = FakeExecutor()
@@ -1536,6 +1603,72 @@ async def test_hard_cap_guard_blocks_oversized_initial4_factor2(monkeypatch):
 
     assert len(strategy.executor.orders) == 0, "hard cap must block qty=20 (max is 8)"
     assert any(event == "hedge.cap_blocked" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_recovery_entry_blocks_when_existing_position_already_at_cap(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTHOU-26JUL30-B96.5"
+    db = InMemoryDB([
+        StopLossLedger(
+            series_ticker="KXHIGHTHOU",
+            date_prefix="26JUL30",
+            stop_loss_count=1,
+        )
+    ])
+    strategy = make_strategy(
+        monkeypatch,
+        db=db,
+        initial_contract_count=5,
+        hedge_max_factor=2,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTHOU",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+        position_quantity=10,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 10
+    strategy.cache.update_quote(ticker, 84, 86)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 0
+    assert any(event == "hedge.cap_blocked" for event, _ in logged)
+    cap_log = next(kwargs for event, kwargs in logged if event == "hedge.cap_blocked")
+    assert cap_log["action"] == "recovery_position_cap_blocked"
+    assert not any(event == "phase.b.buying" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_watchlist_does_not_reenter_when_app_owned_position_already_exists(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTHOU-26JUL30-B96.5"
+    strategy = make_strategy(
+        monkeypatch,
+        initial_contract_count=5,
+        hedge_max_factor=2,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTHOU",
+        bracket_label="buy",
+        phase=Phase.MONITORING,
+        position_quantity=10,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 10
+    strategy.cache.update_quote(ticker, 84, 86)
+
+    await strategy._evaluate_watchlist()
+
+    assert len(strategy.executor.orders) == 0
+    assert any(event == "phase.b.entry_blocked_existing_position" for event, _ in logged)
+    assert not any(event == "phase.b.buying" for event, _ in logged)
 
 
 @pytest.mark.asyncio

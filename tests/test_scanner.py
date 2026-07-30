@@ -258,6 +258,45 @@ async def test_scanner_buy_logs_cap_blocked_not_buy_yes_when_qty_at_cap(monkeypa
     assert len(buy_yes_calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_scanner_buy_blocks_when_existing_plus_proposed_exceeds_cap(monkeypatch):
+    import scanner as scanner_module
+    from app.config import AppConfig
+
+    critical_logged = []
+    monkeypatch.setattr(scanner_module.logger, "critical",
+                        lambda ev, **kw: critical_logged.append((ev, kw)))
+
+    class FakeExecutorInstance:
+        async def get_positions(self):
+            return {"KXLOWTLAX-26JUL30-B65.5": {"count": 10}}
+
+        async def buy_yes(self, order, max_price=None):
+            raise AssertionError("buy_yes should not run when pre-submit cap blocks")
+
+    monkeypatch.setattr(scanner_module, "create_executor", lambda *a, **kw: FakeExecutorInstance())
+
+    config = AppConfig(
+        kalshi_api_key="test-key",
+        kalshi_private_key_path="unused.pem",
+        mysql_database_url="******localhost:3306/test",
+        trading_mode="PAPER",
+        initial_contract_count=5,
+        monitor_start_price=80,
+        buy_trigger_price=72,
+        spread_monitor_price=90,
+        minimum_spread=2,
+        stop_loss_price=25,
+        hedge_max_factor=2,
+    )
+
+    result = await scanner_module.buy_market(config, "KXLOWTLAX-26JUL30-B65.5", 80, None)
+    assert result is False
+    cap_log = next(kw for ev, kw in critical_logged if ev == "hedge.cap_blocked")
+    assert cap_log["action"] == "scanner_position_cap_blocked_before_submit"
+    assert cap_log["total_position_qty"] == 15
+
+
 def test_scanner_daemon_guard_prevents_buy_when_daemon_running(tmp_path, monkeypatch):
     """When daemon lockfile is held, main() exits without calling buy_market."""
     import scanner as scanner_module

@@ -55,6 +55,40 @@ class PaperTradeExecutor(BaseExecutor):
                 status="REJECTED",
                 notes=f"hard_cap_blocked: qty={order.quantity} exceeds max_buy_qty={self.max_buy_qty}",
             )
+        if self.max_buy_qty is not None:
+            existing_position_qty = 0
+            existing = self.positions.get(order.market_ticker)
+            if existing is not None:
+                try:
+                    existing_position_qty = max(int(existing.get("quantity", 0) or 0), 0)
+                except (TypeError, ValueError):
+                    existing_position_qty = 0
+            total_position_qty = existing_position_qty + max(int(order.quantity or 0), 0)
+            if total_position_qty > self.max_buy_qty:
+                logger.critical(
+                    "hedge.cap_blocked",
+                    ticker=order.market_ticker,
+                    existing_position_qty=existing_position_qty,
+                    proposed_qty=order.quantity,
+                    total_position_qty=total_position_qty,
+                    max_allowed_qty=self.max_buy_qty,
+                    action="executor_position_cap_blocked_total",
+                )
+                return ExecutionResult(
+                    success=False,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=0,
+                    fill_quantity=0,
+                    total_cost_cents=0,
+                    status="REJECTED",
+                    notes=(
+                        f"position_cap_blocked: existing={existing_position_qty} + "
+                        f"proposed={order.quantity} exceeds max_buy_qty={self.max_buy_qty}"
+                    ),
+                )
         # Simulate: fill at the lowest available ask from cache
         ob = self.ticker_cache.get_orderbook(order.market_ticker)
         fill_price = order.price  # default to requested price

@@ -22,6 +22,13 @@ def _to_cents_int(value) -> int:
         return 0
 
 
+def _to_quantity_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _to_dollars_float(value) -> float:
     try:
         return float(value)
@@ -41,13 +48,14 @@ def _extract_fill(data: dict) -> tuple[int, int]:
 
     # Fill count: prefer fill_count_fp; fall back to legacy keys.
     fill_obj = data.get("fill") or {}
-    fill_count = _to_cents_int(
+    fill_count_raw = _to_quantity_float(
         order.get("fill_count_fp")
         or order.get("fill_count")
         or order.get("filled_count")
+        or fill_obj.get("count_fp")
         or fill_obj.get("count")
     )
-    if fill_count <= 0:
+    if fill_count_raw <= 0:
         return 0, 0
 
     # Total fill cost in dollars (taker + maker), fees excluded.
@@ -56,7 +64,7 @@ def _extract_fill(data: dict) -> tuple[int, int]:
     total_cost_dollars = taker_cost + maker_cost
 
     if total_cost_dollars > 0:
-        avg_price_cents = round((total_cost_dollars / fill_count) * 100)
+        avg_price_cents = round((total_cost_dollars / fill_count_raw) * 100)
     else:
         # Fallback chain when fill-cost is absent (older/partial responses):
         #  1) an explicit fill avg price, if present
@@ -71,6 +79,7 @@ def _extract_fill(data: dict) -> tuple[int, int]:
             if avg_price_cents > 0:
                 logger.warning("live.fill_price_fallback_to_limit",
                                note="used yes_price_dollars (limit) as fill price")
+    fill_count = max(int(round(fill_count_raw)), 0)
     return fill_count, avg_price_cents
 
 
@@ -110,6 +119,18 @@ class LiveTradeExecutor(BaseExecutor):
     def _headers(self, method: str, path: str) -> dict:
         return build_auth_headers(self._private_key, self.api_key, method, path)
 
+    async def _current_position_qty(self, ticker: str) -> int:
+        try:
+            positions = await self.get_positions()
+        except Exception as e:
+            logger.warning("live.position_cap_lookup_failed", ticker=ticker, error=str(e))
+            return 0
+        raw = (positions.get(ticker) or {}).get("count", 0)
+        try:
+            return max(int(float(raw or 0)), 0)
+        except (TypeError, ValueError):
+            return 0
+
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         if self.max_buy_qty is not None and order.quantity > self.max_buy_qty:
             logger.critical(
@@ -131,6 +152,34 @@ class LiveTradeExecutor(BaseExecutor):
                 status="REJECTED",
                 notes=f"hard_cap_blocked: qty={order.quantity} exceeds max_buy_qty={self.max_buy_qty}",
             )
+        if self.max_buy_qty is not None:
+            existing_position_qty = await self._current_position_qty(order.market_ticker)
+            total_position_qty = existing_position_qty + max(int(order.quantity or 0), 0)
+            if total_position_qty > self.max_buy_qty:
+                logger.critical(
+                    "hedge.cap_blocked",
+                    ticker=order.market_ticker,
+                    existing_position_qty=existing_position_qty,
+                    proposed_qty=order.quantity,
+                    total_position_qty=total_position_qty,
+                    max_allowed_qty=self.max_buy_qty,
+                    action="executor_position_cap_blocked_total",
+                )
+                return ExecutionResult(
+                    success=False,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=0,
+                    fill_quantity=0,
+                    total_cost_cents=0,
+                    status="REJECTED",
+                    notes=(
+                        f"position_cap_blocked: existing={existing_position_qty} + "
+                        f"proposed={order.quantity} exceeds max_buy_qty={self.max_buy_qty}"
+                    ),
+                )
         if self.dry_run:
             logger.warning(
                 "live.dry_run_skip_order",

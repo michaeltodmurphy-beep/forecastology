@@ -226,6 +226,30 @@ async def test_paper_executor_buy_yes_refuses_oversized_order(monkeypatch):
     assert any(ev == "hedge.cap_blocked" for ev, _ in critical_logged)
 
 
+@pytest.mark.asyncio
+async def test_paper_executor_blocks_when_existing_plus_proposed_exceeds_cap(monkeypatch):
+    critical_logged = []
+    import execution.paper as paper_mod
+    monkeypatch.setattr(paper_mod.logger, "critical",
+                        lambda ev, **kw: critical_logged.append((ev, kw)))
+
+    ex = _make_paper_executor(max_buy_qty=10)
+    ex.positions["KXLOWTLAX-26JUL30-B60.5"] = {
+        "market_ticker": "KXLOWTLAX-26JUL30-B60.5",
+        "side": "yes",
+        "quantity": 10,
+        "avg_entry_price": 80,
+    }
+    order = _make_order(ticker="KXLOWTLAX-26JUL30-B60.5", qty=10)
+
+    result = await ex.buy_yes(order)
+
+    assert result.success is False
+    assert result.status == "REJECTED"
+    cap_log = next(kw for ev, kw in critical_logged if ev == "hedge.cap_blocked")
+    assert cap_log["action"] == "executor_position_cap_blocked_total"
+
+
 # ---------------------------------------------------------------------------
 # Part 1 — Factory wires max_buy_qty
 # ---------------------------------------------------------------------------
@@ -329,6 +353,35 @@ async def test_monitor_buy_hedge_allows_at_cap(monkeypatch):
 
     assert result is True
     assert not any(ev == "hedge.cap_blocked" for ev, _ in critical_logged)
+
+
+@pytest.mark.asyncio
+async def test_monitor_buy_hedge_blocks_when_existing_plus_proposed_exceeds_cap(monkeypatch):
+    import monitor as mon
+
+    critical_logged = []
+    monkeypatch.setattr(mon.logger, "critical",
+                        lambda ev, **kw: critical_logged.append((ev, kw)))
+
+    config = make_config(initial_contract_count=5, hedge_max_factor=2)  # max=10
+
+    class _FakeClient:
+        async def post(self, *_, **__):
+            return MagicMock(status_code=201)
+
+    result = await mon._buy_hedge(
+        ticker="KXLOWTLAX-26JUL30-B60.5",
+        price_cents=80,
+        qty=10,
+        config=config,
+        client=_FakeClient(),
+        existing_position_qty=10,
+    )
+
+    assert result is False
+    cap_log = next(kw for ev, kw in critical_logged if ev == "hedge.cap_blocked")
+    assert cap_log["total_position_qty"] == 20
+    assert cap_log["max_allowed_qty"] == 10
 
 
 # ---------------------------------------------------------------------------
