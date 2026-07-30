@@ -13,22 +13,30 @@ scanner would cause split-brain order execution.
 This script is intended for use only in legacy deployments where run.py is
 NOT running as an always-on daemon.  When both services are deployed, disable
 the scanner systemd timer and rely on run.py exclusively.
+
+Buy orders are routed through the shared executor (LiveTradeExecutor /
+PaperTradeExecutor) so that the V2 /portfolio/orders payload and the
+martingale per-market cap (max_buy_qty = INITIAL_CONTRACT_COUNT *
+2**(HEDGE_MAX_FACTOR-1)) are always enforced — the same limits that apply
+to the state-machine buy path.
 """
 
 import asyncio
 import fcntl
 import os
-import uuid
-import httpx
 import structlog
 from typing import Optional
 
+import httpx
+
 from app.config import AppConfig
-from app.signing import load_private_key, build_auth_headers
 from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
 from core.constants import SERIES_LIST, get_eastern_today_date_prefix
-from core.types import ensure_app_client_order_id
+from core.state_machine import hedge_policy
+from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
+from data.ticker_cache import TickerCache
+from execution.factory import create_executor
 from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
@@ -117,51 +125,66 @@ async def buy_market(
     price_cents: int,
     client: httpx.AsyncClient,
 ) -> bool:
+    """Place a buy order for *ticker* through the shared capped executor.
+
+    Routes through ``create_executor`` / ``LiveTradeExecutor.buy_yes`` (or
+    ``PaperTradeExecutor``) so that:
+    - The V2 ``/portfolio/orders`` payload is always used (fixes HTTP 410).
+    - The per-market cap ``max_buy_qty = INITIAL_CONTRACT_COUNT *
+      2**(HEDGE_MAX_FACTOR-1)`` is enforced at the executor level.
+
+    An extra defense-in-depth cap check is performed before calling the
+    executor: if the proposed order would exceed ``max_allowed_qty``, the
+    order is rejected and ``hedge.cap_blocked`` is logged at CRITICAL.
+
+    Returns True if the order was filled, False otherwise.
     """
-    Place a buy order for a market at the given price.
-    Uses spread_monitor_price as max_price to ensure fill.
-    Returns True if filled, False otherwise.
-    """
-    private_key = load_private_key(config.kalshi_private_key_path)
-    max_price = config.spread_monitor_price  # e.g. 90
+    _, _, max_allowed_qty = hedge_policy(
+        config.initial_contract_count, config.hedge_max_factor, 0
+    )
+    proposed_qty = config.initial_contract_count
 
-    order_id = ensure_app_client_order_id(str(uuid.uuid4()))
-    price_str = f"{price_cents / 100:.4f}"
-    max_price_str = f"{max_price / 100:.4f}"
+    if proposed_qty > max_allowed_qty:
+        logger.critical(
+            "hedge.cap_blocked",
+            ticker=ticker,
+            proposed_qty=proposed_qty,
+            max_allowed_qty=max_allowed_qty,
+            action="scanner_cap_blocked_before_submit",
+        )
+        return False
 
-    payload = {
-        "ticker": ticker,
-        "side": "bid",
-        "type": "limit",
-        "price": max_price_str if max_price > price_cents else price_str,
-        "count": f"{config.initial_contract_count}.00",
-        "client_order_id": order_id,
-        "time_in_force": "good_till_canceled",
-        "self_trade_prevention_type": "taker_at_cross",
-    }
+    cache = TickerCache()
+    executor = create_executor(
+        trading_mode=config.trading_mode,
+        ticker_cache=cache,
+        rest_base_url=config.rest_base_url,
+        api_key=config.kalshi_api_key,
+        private_key_path=config.kalshi_private_key_path,
+        dry_run=config.dry_run,
+        max_buy_qty=max_allowed_qty,
+    )
 
-    path = "/trade-api/v2/portfolio/orders"
-    url = f"{config.rest_base_url}{path}"
-    headers = build_auth_headers(private_key, config.kalshi_api_key, "POST", path)
-    headers["Content-Type"] = "application/json"
+    max_price = config.spread_monitor_price
+    order = OrderRequest(
+        market_ticker=ticker,
+        side=OrderSide.BUY_YES,
+        price=price_cents,
+        quantity=proposed_qty,
+    )
 
     logger.info("scanner.buy_attempt", ticker=ticker, price=price_cents,
-                max_price=max_price, qty=config.initial_contract_count)
+                max_price=max_price, qty=proposed_qty)
 
     try:
-        resp = await client.post(url, json=payload, headers=headers)
-        data = resp.json()
-
-        if resp.status_code in (200, 201):
-            fill = data.get("fill", {})
-            fill_price = fill.get("price", price_cents)
-            fill_qty = fill.get("count", config.initial_contract_count)
+        result = await executor.buy_yes(order, max_price=max_price)
+        if result.success:
             logger.info("scanner.buy_filled", ticker=ticker,
-                        price=fill_price, qty=fill_qty)
+                        price=result.fill_price, qty=result.fill_quantity)
             return True
         else:
             logger.warning("scanner.buy_rejected", ticker=ticker,
-                           status=resp.status_code, response=data)
+                           status=result.status, notes=result.notes)
             return False
     except Exception as e:
         logger.error("scanner.buy_error", ticker=ticker, error=str(e))

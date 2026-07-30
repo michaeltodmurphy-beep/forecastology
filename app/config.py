@@ -265,6 +265,20 @@ class AppConfig(BaseSettings):
     log_file: str = "logs/run.log"
     log_max_bytes: int = 104857600
     log_backup_count: int = 10
+    # ── Unprotected-position remediation ────────────────────────────────────
+    # When a restored/adopted position goes blind (no price feed) for more than
+    # this many consecutive SL evaluation cycles, the bot escalates to a
+    # logger.critical alert (phase.c.unprotected_escalation) and optionally
+    # attempts a protective panic-flatten of the app-owned quantity.
+    #
+    # SL_UNPROTECTED_MAX_BLIND_CYCLES: number of consecutive no-price cycles
+    #   before escalation fires. Default: 30 (at 250 ms cadence ≈ 7.5 seconds).
+    # SL_FLATTEN_UNPROTECTED_ON_BLIND: when true, attempt a panic-flatten exit
+    #   of app_owned_qty once the escalation threshold is exceeded. Only
+    #   app-owned quantity is ever sold — MANAGE_EXTERNAL_POSITIONS semantics
+    #   are fully respected. Default: false (conservative; alert only).
+    sl_unprotected_max_blind_cycles: int = 30
+    sl_flatten_unprotected_on_blind: bool = False
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
@@ -363,6 +377,16 @@ class AppConfig(BaseSettings):
             "LOG_BACKUP_COUNT",
             default=10,
         )
+        sl_unprotected_max_blind_cycles = _parse_positive_int(
+            os.getenv("SL_UNPROTECTED_MAX_BLIND_CYCLES"),
+            "SL_UNPROTECTED_MAX_BLIND_CYCLES",
+            default=30,
+        )
+        sl_flatten_unprotected_on_blind = _parse_trade_toggle(
+            os.getenv("SL_FLATTEN_UNPROTECTED_ON_BLIND"),
+            "SL_FLATTEN_UNPROTECTED_ON_BLIND",
+            default=False,
+        )
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -385,4 +409,6 @@ class AppConfig(BaseSettings):
             log_file=log_file,
             log_max_bytes=log_max_bytes,
             log_backup_count=log_backup_count,
+            sl_unprotected_max_blind_cycles=sl_unprotected_max_blind_cycles,
+            sl_flatten_unprotected_on_blind=sl_flatten_unprotected_on_blind,
         )
