@@ -1,9 +1,12 @@
 import asyncio
-import fcntl
 import os
+import hashlib
+import atexit
+import signal
 import structlog
 import sys
 from app.config import AppConfig
+from app.runtime_safety import LockConflict, InstanceLock, configure_logging, maybe_acquire_instance_lock
 from app.database import DatabaseManager
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
@@ -14,18 +17,75 @@ from nws.scheduler import bootstrap as nws_bootstrap
 from nws.scheduler import shutdown as shutdown_nws_scheduler
 
 logger = structlog.get_logger(__name__)
+_active_instance_lock: InstanceLock | None = None
 
 
-def _acquire_lock():
-    lockfile_path = os.getenv("FORECASTOLOGY_LOCKFILE", "/tmp/forecastology.lock")
-    lock_handle = open(lockfile_path, "w")
-    try:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        logger.error("app.already_running", lockfile=lockfile_path)
-        lock_handle.close()
-        sys.exit(1)
-    return lock_handle
+def _account_id_hash(config: AppConfig) -> str:
+    identity = (
+        config.instance_id.strip()
+        or os.getenv("KALSHI_API_KEY_ID", "").strip()
+        or "default"
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
+def _release_instance_lock() -> None:
+    global _active_instance_lock
+    if _active_instance_lock is None:
+        return
+    _active_instance_lock.release()
+    logger.info(
+        "instance.lock_released",
+        lock_file=_active_instance_lock.lock_file,
+        account_id_hash=_active_instance_lock.account_id_hash,
+    )
+    _active_instance_lock = None
+
+
+def _install_signal_handlers() -> None:
+    def _shutdown(signum, _frame):
+        logger.info("instance.shutdown_signal_received", signal=signal.Signals(signum).name)
+        _release_instance_lock()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+
+def _acquire_startup_lock(config: AppConfig, account_id_hash: str) -> InstanceLock | None:
+    lock_result = maybe_acquire_instance_lock(
+        enabled=config.instance_lock_enabled,
+        base_lock_file=config.instance_lock_file,
+        account_id_hash=account_id_hash,
+    )
+    if isinstance(lock_result, LockConflict):
+        logger.critical(
+            "instance.lock_conflict",
+            lock_file=lock_result.lock_file,
+            holder_pid=lock_result.holder_pid,
+            account_id_hash=lock_result.account_id_hash,
+        )
+        print(
+            "Another Forecastology instance is already running against this account; refusing to start.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if lock_result is not None:
+        logger.info(
+            "instance.lock_acquired",
+            lock_file=lock_result.lock_file,
+            pid=os.getpid(),
+            account_id_hash=account_id_hash,
+        )
+        atexit.register(_release_instance_lock)
+        _install_signal_handlers()
+        return lock_result
+    logger.warning(
+        "instance.lock_disabled",
+        account_id_hash=account_id_hash,
+        message="INSTANCE_LOCK_ENABLED=false; startup single-instance guard is disabled.",
+    )
+    return None
 
 
 async def _start_nws_backend() -> None:
@@ -47,7 +107,7 @@ def _shutdown_nws_backend() -> None:
 
 
 async def main():
-    lock_handle = _acquire_lock()
+    global _active_instance_lock
     db = None
     ws_manager = None
     executor = None
@@ -56,6 +116,20 @@ async def main():
     stop_loss_task = None
     try:
         config = AppConfig.from_env()
+        configure_logging(
+            log_file=config.log_file,
+            log_max_bytes=config.log_max_bytes,
+            log_backup_count=config.log_backup_count,
+        )
+        logger.info(
+            "app.logging_configured",
+            log_file=config.log_file,
+            log_max_bytes=config.log_max_bytes,
+            log_backup_count=config.log_backup_count,
+        )
+
+        account_id_hash = _account_id_hash(config)
+        _active_instance_lock = _acquire_startup_lock(config, account_id_hash)
         logger.info("app.config_loaded", mode=config.trading_mode)
         if config.trading_mode == "LIVE":
             if "demo" in config.rest_base_url.lower() or "demo" in config.ws_url.lower():
@@ -111,11 +185,7 @@ async def main():
             await executor.close()
         if db is not None:
             await db.dispose()
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        lock_handle.close()
+        _release_instance_lock()
 
 if __name__ == "__main__":
     asyncio.run(main())

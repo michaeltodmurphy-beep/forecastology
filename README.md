@@ -111,7 +111,12 @@ Key variables:
 | `SL_PANIC_RETRY_MS` | Retry interval (ms) between panic-flatten re-submissions (default `250`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_RETRIES` | Max retry attempts for panic-flatten exit (default `5`). Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
 | `SL_PANIC_MAX_QUOTE_AGE_MS` | Max age (ms) of a cached YES ask quote for PANIC_FLATTEN pre-submit revalidation (default `30000`). Set to `0` to disable the freshness check. Only used when `SL_EXIT_MODE=PANIC_FLATTEN` |
-| `FORECASTOLOGY_LOCKFILE` | Path to the run.py process lockfile (default `/tmp/forecastology.lock`) |
+| `INSTANCE_LOCK_ENABLED` | `true` (default) / `false` — enables startup single-instance guard |
+| `INSTANCE_LOCK_FILE` | Base path for the run.py startup lock file (default `/tmp/forecastology.lock`). The runtime appends an account hash so two bots for the same account conflict while distinct accounts can run separately. |
+| `INSTANCE_ID` | Optional stable lock identity (if unset, derived from `KALSHI_API_KEY_ID`; only a short hash is logged) |
+| `LOG_FILE` | Application log file path for built-in rotating file logging (default `logs/run.log`) |
+| `LOG_MAX_BYTES` | Max log file size in bytes before rollover (default `104857600` = 100 MB) |
+| `LOG_BACKUP_COUNT` | Number of rotated log files to keep (default `10`) |
 | `HEDGE_MAX_FACTOR` | Total number of allowed buy levels per `(series_ticker, date_prefix)` (counting from 0). Buying is allowed while `stop_loss_count < HEDGE_MAX_FACTOR`; default `3` gives sizes `2/4/8` when `INITIAL_CONTRACT_COUNT=2`. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` the max is `12` |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
@@ -173,6 +178,42 @@ python monitor.py
 
 ```bash
 python bracket_scanner.py --min-spread 7 --buy-trigger 85
+```
+
+## Running safely: single instance
+
+`run.py` now acquires an account-scoped startup file lock before the strategy starts. If a second bot process starts against the same account, startup is denied with `instance.lock_conflict` and a clear fatal message:
+
+> Another Forecastology instance is already running against this account; refusing to start.
+
+Use these env vars to control behavior:
+
+- `INSTANCE_LOCK_ENABLED=true|false` (default `true`)
+- `INSTANCE_LOCK_FILE=/tmp/forecastology.lock` (default shown; runtime appends account hash)
+- `INSTANCE_ID=<optional stable id>` (optional override for account/environment lock key; default key is derived from `KALSHI_API_KEY_ID`)
+
+Operational cleanup after the incident: remove old duplicate systemd units from prior deployments so they cannot be auto-started again:
+
+```bash
+sudo systemctl disable --now kalshibot.service kalshibot-monitor.service
+sudo rm -f /etc/systemd/system/kalshibot.service /etc/systemd/system/kalshibot-monitor.service
+sudo systemctl daemon-reload
+```
+
+## Logging & rotation
+
+The application now includes built-in size-based log rotation via `RotatingFileHandler`, so log growth is bounded even without host-level logrotate.
+
+- `LOG_FILE` (default `logs/run.log`)
+- `LOG_MAX_BYTES` (default `104857600`, 100 MB)
+- `LOG_BACKUP_COUNT` (default `10`)
+
+As a belt-and-suspenders host safeguard, install the repo logrotate profile:
+
+```bash
+sudo cp deploy/logrotate/forecastology /etc/logrotate.d/forecastology
+sudo chmod 644 /etc/logrotate.d/forecastology
+sudo logrotate -f /etc/logrotate.d/forecastology
 ```
 
 ## Trading Strategy

@@ -1,0 +1,9 @@
+/home/ubuntu/forecastology/logs/run.log {
+    daily
+    maxsize 100M
+    rotate 10
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
