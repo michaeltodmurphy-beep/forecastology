@@ -206,6 +206,33 @@ class AppConfig(BaseSettings):
     # Maximum age (ms) of a cached YES ask quote before it is considered stale
     # for PANIC_FLATTEN pre-submit revalidation. Set to 0 to disable the check.
     sl_panic_max_quote_age_ms: int = 30000
+    # ── Low-ticker daily close-out at 22:00 ET ──────────────────────────────
+    # Automatically flattens all open KXLOW* positions at the configured time
+    # (Eastern, DST-aware) every day.  KXHIGH* positions are not touched.
+    #
+    # LOW_TICKER_DAILY_CLOSEOUT_ENABLED=true|false  (default: true)
+    # LOW_TICKER_CLOSEOUT_TIME_ET=HH:MM             (default: 22:00)
+    # LOW_TICKER_CLOSEOUT_ON_LATE_START=true|false  (default: true)
+    #   When true, if the process starts after the configured closeout time
+    #   on a given ET day, perform the closeout once immediately so the
+    #   "no Low positions held overnight" intent is honoured.
+    #
+    # Parsed by from_env().
+    low_ticker_daily_closeout_enabled: bool = True
+    low_ticker_closeout_time_et: str = "22:00"
+    low_ticker_closeout_on_late_start: bool = True
+    # ── Low-ticker entry halt after 22:00 ET ────────────────────────────────
+    # Prevents new KXLOW* entry orders from being placed at/after the
+    # configured Eastern time.  The block lasts for the remainder of that
+    # ET trading day; new Low entries resume the following ET day.
+    # KXHIGH* entries are completely unaffected.
+    #
+    # LOW_TICKER_ENTRY_HALT_ENABLED=true|false  (default: true)
+    # LOW_TICKER_ENTRY_HALT_TIME_ET=HH:MM       (default: 22:00)
+    #
+    # Parsed by from_env().  Does NOT affect stop-loss / exit paths.
+    low_ticker_entry_halt_enabled: bool = True
+    low_ticker_entry_halt_time_et: str = "22:00"
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
@@ -267,6 +294,23 @@ class AppConfig(BaseSettings):
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
+        low_ticker_daily_closeout_enabled = _parse_trade_toggle(
+            os.getenv("LOW_TICKER_DAILY_CLOSEOUT_ENABLED"),
+            "LOW_TICKER_DAILY_CLOSEOUT_ENABLED",
+            default=True,
+        )
+        low_ticker_closeout_time_et = os.getenv("LOW_TICKER_CLOSEOUT_TIME_ET", "22:00")
+        low_ticker_closeout_on_late_start = _parse_trade_toggle(
+            os.getenv("LOW_TICKER_CLOSEOUT_ON_LATE_START"),
+            "LOW_TICKER_CLOSEOUT_ON_LATE_START",
+            default=True,
+        )
+        low_ticker_entry_halt_enabled = _parse_trade_toggle(
+            os.getenv("LOW_TICKER_ENTRY_HALT_ENABLED"),
+            "LOW_TICKER_ENTRY_HALT_ENABLED",
+            default=True,
+        )
+        low_ticker_entry_halt_time_et = os.getenv("LOW_TICKER_ENTRY_HALT_TIME_ET", "22:00")
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -278,4 +322,9 @@ class AppConfig(BaseSettings):
             phoenix_entry_start_local=phoenix_entry_start_local,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
+            low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,
+            low_ticker_closeout_time_et=low_ticker_closeout_time_et,
+            low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,
+            low_ticker_entry_halt_enabled=low_ticker_entry_halt_enabled,
+            low_ticker_entry_halt_time_et=low_ticker_entry_halt_time_et,
         )

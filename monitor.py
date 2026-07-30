@@ -136,6 +136,20 @@ async def _buy_hedge(
     client: httpx.AsyncClient,
 ) -> bool:
     """Buy a hedge bracket at the given price with max_price for fill guarantee."""
+    # Hard cap: never submit a hedge order that exceeds the per-step maximum.
+    hedge_max_factor = max(int(config.hedge_max_factor), 1)
+    max_allowed_qty = config.initial_contract_count * (2 ** (hedge_max_factor - 1))
+    if qty > max_allowed_qty:
+        logger.critical(
+            "hedge.cap_blocked",
+            ticker=ticker,
+            proposed_qty=qty,
+            max_allowed_qty=max_allowed_qty,
+            initial_contract_count=config.initial_contract_count,
+            hedge_factor=hedge_max_factor,
+            action="monitor_buy_hedge_blocked",
+        )
+        return False
     private_key = load_private_key(config.kalshi_private_key_path)
     max_price = 90
     order_id = ensure_app_client_order_id(str(uuid.uuid4()))

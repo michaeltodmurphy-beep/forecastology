@@ -24,6 +24,7 @@ class PaperTradeExecutor(BaseExecutor):
         api_key: str = "",
         private_key_path: str = "",
         initial_balance_cents: int = 100_000_00,
+        max_buy_qty: Optional[int] = None,
     ):
         self.ticker_cache = ticker_cache
         self.rest_base_url = rest_base_url
@@ -31,8 +32,29 @@ class PaperTradeExecutor(BaseExecutor):
         self.private_key_path = private_key_path
         self.balance_cents = initial_balance_cents
         self.positions: dict[str, dict] = {}
+        self.max_buy_qty = max_buy_qty
 
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
+        if self.max_buy_qty is not None and order.quantity > self.max_buy_qty:
+            logger.critical(
+                "hedge.cap_blocked",
+                ticker=order.market_ticker,
+                proposed_qty=order.quantity,
+                max_allowed_qty=self.max_buy_qty,
+                action="executor_hard_cap_blocked_submission",
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="REJECTED",
+                notes=f"hard_cap_blocked: qty={order.quantity} exceeds max_buy_qty={self.max_buy_qty}",
+            )
         # Simulate: fill at the lowest available ask from cache
         ob = self.ticker_cache.get_orderbook(order.market_ticker)
         fill_price = order.price  # default to requested price

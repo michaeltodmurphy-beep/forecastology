@@ -26,9 +26,15 @@ from app.models import (
 )
 from sqlalchemy import select, delete, update
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
 logger = structlog.get_logger(__name__)
 SERIES_DATE_RE = re.compile(r"^(.+?)-(\d{2}[A-Z]{3}\d{2})-(?:T\d+|B\d+\.?\d*)$")
 StopLossCycleState = Literal["TRIGGERED", "SUBMITTING", "RETRYING", "TERMINAL"]
+_ET_ZONE = ZoneInfo("America/New_York")
 
 
 def parse_series_and_date(market_ticker: str) -> Optional[tuple[str, str]]:
@@ -83,6 +89,49 @@ def hedge_policy(
     is_allowed = stop_loss_count < factor
     next_qty = initial_qty * (2 ** stop_loss_count) if is_allowed else 0
     return next_qty, is_allowed, max_allowed_qty
+
+
+def _parse_hhmm_et(value: str) -> datetime.time:
+    """Parse 'HH:MM' into a :class:`datetime.time` object."""
+    h, m = value.strip().split(":")
+    return datetime.time(int(h), int(m))
+
+
+def is_low_entry_halted_et(config: "AppConfig", now_utc: Optional[datetime.datetime] = None) -> tuple[bool, dict]:
+    """Return (halted, log_ctx) for the Low-ticker 22:00 ET entry gate.
+
+    Returns ``(True, ctx)`` if new KXLOW entries should be blocked (it is at
+    or after the configured halt time in Eastern time), ``(False, {})`` otherwise.
+    Always returns ``(False, {})`` when the feature is disabled.
+    """
+    if not config.low_ticker_entry_halt_enabled:
+        return False, {}
+    if now_utc is None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_et = now_utc.astimezone(_ET_ZONE)
+    try:
+        halt_time = _parse_hhmm_et(config.low_ticker_entry_halt_time_et)
+    except (ValueError, AttributeError):
+        halt_time = datetime.time(22, 0)
+    halted = now_et.time() >= halt_time
+    ctx = {
+        "now_et": now_et.strftime("%H:%M:%S"),
+        "halt_time_et": config.low_ticker_entry_halt_time_et,
+    }
+    return halted, ctx
+
+
+def is_past_closeout_time_et(config: "AppConfig", now_utc: Optional[datetime.datetime] = None) -> tuple[bool, datetime.date]:
+    """Return (past_closeout_time, et_date) for the Low-ticker 22:00 ET close-out gate."""
+    if now_utc is None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_et = now_utc.astimezone(_ET_ZONE)
+    try:
+        closeout_time = _parse_hhmm_et(config.low_ticker_closeout_time_et)
+    except (ValueError, AttributeError):
+        closeout_time = datetime.time(22, 0)
+    past = now_et.time() >= closeout_time
+    return past, now_et.date()
 
 
 @dataclass
@@ -169,6 +218,9 @@ class TemperatureStrategy:
         # SL checks still run every cycle.
         self._positions_api_cache: dict = {}
         self._positions_api_last_fetch: float = 0.0
+        # Low-ticker daily close-out idempotency: track the ET date on which the
+        # close-out has already run so it is not repeated within the same day.
+        self._low_ticker_closeout_date: Optional[datetime.date] = None
 
     @staticmethod
     def _first_non_none(*values):
@@ -977,6 +1029,9 @@ class TemperatureStrategy:
         # Start DB cleanup task (runs hourly)
         asyncio.create_task(self._db_cleanup_loop())
 
+        # Start Low-ticker 22:00 ET daily close-out loop
+        asyncio.create_task(self._low_ticker_closeout_loop())
+
     async def _restore_positions(self):
         """
         On startup, re-populate active_positions from the database
@@ -1591,6 +1646,18 @@ class TemperatureStrategy:
                     continue
                 # -----------------------------------
 
+                # --- Low-ticker Eastern-time entry halt gate (22:00 ET) ---
+                if is_low:
+                    _halted, _halt_ctx = is_low_entry_halted_et(self.config)
+                    if _halted:
+                        logger.info(
+                            "entry.blocked_low_after_2200_et",
+                            ticker=ticker,
+                            **_halt_ctx,
+                        )
+                        continue
+                # -----------------------------------------------------------
+
                 # --- City-local-time settle gate ---
                 _market_date = None
                 parsed = parse_series_and_date(ticker)
@@ -1750,7 +1817,7 @@ class TemperatureStrategy:
             logger.critical(
                 "hedge.cap_blocked",
                 ticker=bracket.market_ticker,
-                initial_qty=self.config.initial_contract_count,
+                initial_contract_count=self.config.initial_contract_count,
                 proposed_qty=proposed_qty,
                 max_allowed_qty=max_allowed_qty,
                 hedge_factor=hedge_max,
@@ -1887,6 +1954,9 @@ class TemperatureStrategy:
             return
 
         series_ticker, date_prefix = parsed
+        # Clamp the stored count to hedge_max_factor so a corrupt/stale ledger
+        # row can never produce an oversized order on the next recovery entry.
+        max_count = max(int(self.config.hedge_max_factor), 1)
         async with await self.db.get_session() as session:
             result = await session.execute(
                 select(StopLossLedger).where(
@@ -1899,12 +1969,23 @@ class TemperatureStrategy:
                 row = StopLossLedger(
                     series_ticker=series_ticker,
                     date_prefix=date_prefix,
-                    stop_loss_count=1,
+                    stop_loss_count=min(1, max_count),
                     updated_at=datetime.datetime.utcnow(),
                 )
                 session.add(row)
             else:
-                row.stop_loss_count += 1
+                new_count = row.stop_loss_count + 1
+                if new_count > max_count:
+                    logger.warning(
+                        "hedge.stop_loss_count_clamped",
+                        series_ticker=series_ticker,
+                        date_prefix=date_prefix,
+                        raw_count=new_count,
+                        clamped_to=max_count,
+                        hedge_max_factor=max_count,
+                    )
+                    new_count = max_count
+                row.stop_loss_count = new_count
                 row.updated_at = datetime.datetime.utcnow()
             await session.commit()
 
@@ -2970,6 +3051,88 @@ class TemperatureStrategy:
                 logger.error("db.cleanup_error", error=str(e))
             
             await asyncio.sleep(3600)  # run every hour
+
+    async def _run_low_ticker_closeout(self) -> None:
+        """Flatten all open KXLOW* positions.
+
+        Routes each exit through the existing ``_execute_stop_loss`` machinery
+        so the ownership/idempotency guards are respected.  KXHIGH* positions
+        are never touched.  ``manage_external_positions=false`` is honoured by
+        the exit path — external/manual holdings are not sold.
+        """
+        low_tickers = [
+            ticker for ticker in list(self.active_positions.keys())
+            if "KXLOW" in ticker.upper()
+        ]
+        if not low_tickers:
+            logger.info("lowticker.daily_closeout_complete", closed=0,
+                        reason="no_open_low_positions")
+            return
+
+        logger.info("lowticker.daily_closeout_start", tickers=low_tickers,
+                    count=len(low_tickers))
+        closed = 0
+        for ticker in low_tickers:
+            bracket = self.active_positions.get(ticker)
+            if bracket is None:
+                continue
+            try:
+                await self._execute_stop_loss(bracket, bypass_cooldown=True)
+                closed += 1
+                logger.info("lowticker.daily_closeout_ticker_done", ticker=ticker)
+            except Exception as e:
+                logger.error("lowticker.daily_closeout_ticker_error",
+                             ticker=ticker, error=str(e), exc_info=True)
+        logger.info("lowticker.daily_closeout_complete", closed=closed,
+                    total=len(low_tickers))
+
+    async def _low_ticker_closeout_loop(self) -> None:
+        """Scheduled loop that triggers the 22:00 ET Low-ticker close-out once per ET day.
+
+        Checks ET wall-clock time every 30 seconds.  Once the configured close-out
+        time is reached for a given ET date the close-out is run exactly once.
+        If the process starts after the configured time (and
+        ``low_ticker_closeout_on_late_start`` is true), the close-out runs once
+        on startup so the "no Low positions held overnight" intent is honoured.
+        """
+        if not self.config.low_ticker_daily_closeout_enabled:
+            logger.info("lowticker.closeout_disabled")
+            return
+
+        _late_start_handled = False
+        while self._running:
+            await asyncio.sleep(30)
+            if not self._reconciliation_complete:
+                continue
+            try:
+                past, et_date = is_past_closeout_time_et(self.config)
+                if not past:
+                    continue
+                # Already ran for this ET day → skip.
+                if self._low_ticker_closeout_date == et_date:
+                    continue
+                # First iteration after crossing the threshold (or late start).
+                if not _late_start_handled and self._low_ticker_closeout_date is None:
+                    _late_start_handled = True
+                    if not self.config.low_ticker_closeout_on_late_start:
+                        # Skip the late-start run; record today so the next-day
+                        # check triggers normally.
+                        self._low_ticker_closeout_date = et_date
+                        logger.info(
+                            "lowticker.closeout_late_start_skipped",
+                            et_date=et_date.isoformat(),
+                            closeout_time_et=self.config.low_ticker_closeout_time_et,
+                        )
+                        continue
+                self._low_ticker_closeout_date = et_date
+                logger.info(
+                    "lowticker.closeout_triggered",
+                    et_date=et_date.isoformat(),
+                    closeout_time_et=self.config.low_ticker_closeout_time_et,
+                )
+                await self._run_low_ticker_closeout()
+            except Exception as e:
+                logger.error("lowticker.closeout_loop_error", error=str(e), exc_info=True)
 
     async def stop(self):
         self._running = False

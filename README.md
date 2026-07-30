@@ -120,6 +120,11 @@ Key variables:
 | `ENABLE_LOCAL_SETTLE_GATE` | `true` (default) / `false` — enable city-local-time entry gate; blocks new buys before the city's local rollover time |
 | `DEFAULT_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for all cities except Phoenix (default `01:00`) |
 | `PHOENIX_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for Phoenix (default `00:00`; Phoenix observes Mountain Standard Time year-round, no DST) |
+| `LOW_TICKER_DAILY_CLOSEOUT_ENABLED` | `true` (default) / `false` — automatically flatten all open `KXLOW*` positions at `LOW_TICKER_CLOSEOUT_TIME_ET` every day (Eastern, DST-aware). `KXHIGH*` positions are never touched. |
+| `LOW_TICKER_CLOSEOUT_TIME_ET` | Wall-clock time (Eastern, `HH:MM`) at which the daily Low-ticker close-out fires (default `22:00`). |
+| `LOW_TICKER_CLOSEOUT_ON_LATE_START` | `true` (default) / `false` — if the process starts **after** the configured close-out time on a given ET day, run the close-out once immediately so the "no Low positions held overnight" intent is honoured. |
+| `LOW_TICKER_ENTRY_HALT_ENABLED` | `true` (default) / `false` — block new `KXLOW*` entry orders from being placed at or after `LOW_TICKER_ENTRY_HALT_TIME_ET`. High tickers are unaffected. Does **not** affect stop-loss / exit paths. |
+| `LOW_TICKER_ENTRY_HALT_TIME_ET` | Wall-clock time (Eastern, `HH:MM`) after which new Low entries are blocked for the remainder of the ET trading day (default `22:00`). |
 
 ### City-local-time entry settle gate
 
@@ -205,7 +210,33 @@ With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` (the production config 
 
 The general formula: `max_allowed_qty = INITIAL_CONTRACT_COUNT * 2 ** (HEDGE_MAX_FACTOR - 1)`.
 
+**Multi-layer hard cap enforcement (choke-point fix):** Every buy path is subject to the same cap regardless of how it reaches the exchange:
+
+1. **`_evaluate_watchlist`** checks `is_allowed` from `hedge_policy` and skips entries where `count >= HEDGE_MAX_FACTOR` — no order is ever computed for a blocked count.
+2. **`_execute_entry`** re-validates `proposed_qty <= max_allowed_qty` as a final guard before calling the executor, and logs `hedge.cap_blocked` at CRITICAL if the check fails.
+3. **Executor layer** (`LiveTradeExecutor` / `PaperTradeExecutor`) enforces `max_buy_qty = INITIAL_CONTRACT_COUNT * 2**(HEDGE_MAX_FACTOR-1)` at `buy_yes` entry. Any path that bypasses the state machine still cannot exceed the cap.
+4. **`monitor.py`'s `_buy_hedge`** helper checks the same formula before POSTing to the Kalshi REST API. This path previously had no cap and was the primary leak path for the 16-contract order.
+5. **`stop_loss_count` clamp**: `_increment_stop_loss_count_for_market` now clamps the stored count to `hedge_max_factor` so a stale or corrupt ledger row can never produce an oversized quantity on the next sizing calculation. A `hedge.stop_loss_count_clamped` warning is logged when clamping fires.
+
+Root cause of the 16-contract order: `monitor.py`'s `_buy_hedge` computed `qty = pos.quantity` from a live position and POSTed directly to Kalshi with no cap check, bypassing all guards in the state machine. The fix adds an explicit cap check in `_buy_hedge` (step 4) and at the executor layer (step 3) so no order path can bypass the cap.
+
 High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
+
+### Low-ticker daily close-out (22:00 ET)
+
+A dedicated background loop (`_low_ticker_closeout_loop`) runs every 30 seconds and fires the close-out exactly once per Eastern-calendar day at/after the configured time (`LOW_TICKER_CLOSEOUT_TIME_ET`, default `22:00`).
+
+- Only `KXLOW*` tickers are affected; `KXHIGH*` positions are never touched.
+- Close-out is routed through the existing `_execute_stop_loss` path so ownership guards (`MANAGE_EXTERNAL_POSITIONS=false`) and idempotency records are fully respected.
+- When `LOW_TICKER_CLOSEOUT_ON_LATE_START=true` (default) and the process starts **after** the configured time, the close-out runs once on the first loop iteration so no Low positions are inadvertently held overnight.
+- Logs: `lowticker.daily_closeout_start`, per-ticker `lowticker.daily_closeout_ticker_done`, and `lowticker.daily_closeout_complete`.
+
+### Low-ticker entry halt (22:00 ET)
+
+`_evaluate_watchlist` applies an Eastern-time gate (after the `LOW_TRADES` toggle and before the city-local-time settle gate) that blocks new KXLOW entry orders from `LOW_TICKER_ENTRY_HALT_TIME_ET` (default `22:00`) until the end of that ET calendar day. `KXHIGH` entries are completely unaffected. Stop-loss / exit paths are never blocked.
+
+- Logs `entry.blocked_low_after_2200_et` with `ticker`, `now_et`, `halt_time_et`.
+- DST-aware via `ZoneInfo("America/New_York")`.
 
 ### Phase C — Position Management (Stop-Loss)
 Stop-loss is driven by the **WebSocket `StopLossWatcher`** inside `run.py`:

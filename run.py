@@ -77,6 +77,7 @@ async def main():
             api_key=config.kalshi_api_key,
             private_key_path=config.kalshi_private_key_path,
             dry_run=config.dry_run,
+            max_buy_qty=config.initial_contract_count * (2 ** (config.hedge_max_factor - 1)),
         )
         strategy = TemperatureStrategy(config=config, cache=cache, ws_manager=ws_manager, executor=executor, db=db)
         stop_loss_watcher = StopLossWatcher(
