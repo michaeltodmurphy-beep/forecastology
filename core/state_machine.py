@@ -939,6 +939,56 @@ class TemperatureStrategy:
 
         return 0, None
 
+    async def _seed_rest_price_for_ticker(self, ticker: str) -> bool:
+        """Fetch the current price for *ticker* via REST and populate TickerCache.
+
+        Called on startup for every restored/adopted position so the stop-loss
+        watcher has a live price from the moment the position is active, even
+        before the first WebSocket tick arrives for that ticker.
+
+        Returns True if a price was successfully seeded, False otherwise.
+        """
+        if self.cache.get_quote(ticker) is not None or self.cache.get_last_price(ticker) is not None:
+            # Already have a price — nothing to do.
+            return True
+        try:
+            rest_data = await self._fetch_market_data_via_rest(ticker)
+            if rest_data:
+                yes_bid = rest_data.get("yes_bid")
+                yes_ask = rest_data.get("yes_ask")
+                last_price = rest_data.get("price")
+                if yes_bid is not None and yes_ask is not None:
+                    self.cache.update_quote(ticker, yes_bid, yes_ask)
+                    logger.info(
+                        "strategy.restored_position_price_seeded",
+                        ticker=ticker,
+                        yes_bid=yes_bid,
+                        yes_ask=yes_ask,
+                        source="rest_startup",
+                    )
+                    return True
+                if last_price is not None and last_price > 0:
+                    self.cache.update_last_price(ticker, last_price)
+                    logger.info(
+                        "strategy.restored_position_price_seeded",
+                        ticker=ticker,
+                        last_price=last_price,
+                        source="rest_last_price_startup",
+                    )
+                    return True
+        except Exception as e:
+            logger.warning(
+                "strategy.restored_position_price_seed_failed",
+                ticker=ticker,
+                error=str(e),
+            )
+        logger.warning(
+            "strategy.restored_position_no_price",
+            ticker=ticker,
+            message="No REST price available at startup; stop-loss will wait for first WS tick",
+        )
+        return False
+
     async def start(self):
         """Register WebSocket handlers and start the strategy loop."""
         self._running = True
@@ -1139,6 +1189,7 @@ class TemperatureStrategy:
                     logger.info("strategy.restored_live_position", ticker=ticker,
                                 qty=qty, entry=bracket.avg_entry, entry_source=entry_source,
                                 app_owned_qty=app_owned_qty, external_qty=external_qty)
+                    await self._seed_rest_price_for_ticker(ticker)
             except Exception as e:
                 logger.error("strategy.restore_positions_error", error=str(e))
 
@@ -1194,6 +1245,7 @@ class TemperatureStrategy:
                         qty=total_qty, entry=bracket.avg_entry,
                         hedge_market=bracket.hedge_market,
                         app_owned_qty=app_owned_qty, external_qty=external_qty)
+            await self._seed_rest_price_for_ticker(ticker)
 
     async def _ensure_bracket(self, market_ticker: str, event_ticker: str = "", series_ticker: str = "", bracket_label: str = ""):
         """Create a new MarketBracket if the ticker is a temperature market and unknown."""
@@ -2246,6 +2298,67 @@ class TemperatureStrategy:
                         current_price = last_known_price
                         blind_below_stop = True
                         price_source = "blind_last_known"
+
+                    # ── Escalation path for persistently-blind positions ──────
+                    # When blind cycles exceed the configurable threshold, emit a
+                    # CRITICAL alert and (if configured) attempt a protective
+                    # panic-flatten of the app-owned quantity.
+                    unprotected_max = max(
+                        int(getattr(self.config, "sl_unprotected_max_blind_cycles", 30) or 30), 1
+                    )
+                    if bracket._consecutive_no_price_cycles >= unprotected_max:
+                        last_escalation = getattr(bracket, "_last_unprotected_escalation", 0)
+                        if not getattr(bracket, "_unprotected_escalated", False) or now_warn - last_escalation >= 300:
+                            bracket._last_unprotected_escalation = now_warn
+                            bracket._unprotected_escalated = True
+                            managed_qty_esc, app_owned_qty_esc, external_qty_esc = self._managed_exit_quantity(
+                                ticker,
+                                bracket.position_quantity,
+                            )
+                            logger.critical(
+                                "phase.c.unprotected_escalation",
+                                ticker=ticker,
+                                qty=bracket.position_quantity,
+                                app_owned_qty=app_owned_qty_esc,
+                                external_qty=external_qty_esc,
+                                blind_cycles=bracket._consecutive_no_price_cycles,
+                                seconds_blind=int(now_warn - getattr(bracket, "_no_price_since", now_warn)),
+                                last_known_price=last_known_price,
+                                threshold=unprotected_max,
+                                flatten_enabled=bool(getattr(self.config, "sl_flatten_unprotected_on_blind", False)),
+                                message=(
+                                    f"Position {ticker} has been blind for "
+                                    f"{bracket._consecutive_no_price_cycles} cycles "
+                                    f"(>= threshold {unprotected_max}): stop-loss CANNOT FIRE. "
+                                    "Manual intervention may be required."
+                                ),
+                            )
+                            flatten_on_blind = bool(getattr(self.config, "sl_flatten_unprotected_on_blind", False))
+                            if flatten_on_blind and current_price is None:
+                                if app_owned_qty_esc <= 0:
+                                    logger.critical(
+                                        "phase.c.unprotected_flatten_skipped_no_app_qty",
+                                        ticker=ticker,
+                                        app_owned_qty=app_owned_qty_esc,
+                                        external_qty=external_qty_esc,
+                                        message="SL_FLATTEN_UNPROTECTED_ON_BLIND=true but app_owned_qty=0; no sell attempted",
+                                    )
+                                else:
+                                    logger.critical(
+                                        "phase.c.unprotected_panic_flatten_attempt",
+                                        ticker=ticker,
+                                        app_owned_qty=app_owned_qty_esc,
+                                        message="Attempting protective panic-flatten of app-owned qty due to persistent price blindness",
+                                    )
+                                    # Use last_known_price as override; _execute_stop_loss
+                                    # will use PANIC_FLATTEN logic regardless.
+                                    override_px = last_known_price if last_known_price and last_known_price > 0 else self.config.stop_loss_price
+                                    await self._execute_stop_loss(
+                                        bracket,
+                                        override_price=override_px,
+                                        bypass_cooldown=True,
+                                    )
+
                 if current_price is None:
                     continue
 

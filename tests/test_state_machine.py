@@ -6359,3 +6359,275 @@ async def test_ticker_then_orderbook_trigger_fires_only_once(monkeypatch):
         f"Expected exactly 1 exit call, got {len(exit_calls)}. "
         "Double sell must be prevented by exit_in_progress guard."
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug A fix: Unprotected-position escalation and panic-flatten
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_unprotected_escalation_fires_after_threshold(monkeypatch):
+    """After sl_unprotected_max_blind_cycles consecutive no-price cycles,
+    a phase.c.unprotected_escalation CRITICAL must be emitted exactly once
+    (rate-limited per 300s), NOT before the threshold."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTLV-26JUL30-B110.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 24, "average_fill_cost_cents": 75}}
+    threshold = 5
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        max_no_price_cycles=1,
+        sl_unprotected_max_blind_cycles=threshold,
+        sl_flatten_unprotected_on_blind=False,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXHIGHTLV")
+    bracket.position_quantity = 24
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # Run cycles BELOW threshold — no escalation yet
+    for i in range(threshold - 1):
+        await strategy._evaluate_held_positions()
+    escalation_events_before = [ev for ev, _ in logged if ev == "phase.c.unprotected_escalation"]
+    assert escalation_events_before == [], (
+        f"CRITICAL escalation fired too early at cycle {i+1} < threshold {threshold}"
+    )
+
+    # One more cycle to reach the threshold
+    await strategy._evaluate_held_positions()
+    escalation_events = [ev for ev, _ in logged if ev == "phase.c.unprotected_escalation"]
+    assert len(escalation_events) >= 1, (
+        "Expected phase.c.unprotected_escalation to fire once threshold reached"
+    )
+
+    # With flatten_on_blind=False, no sell should have been attempted
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unprotected_escalation_not_before_threshold(monkeypatch):
+    """No escalation fires for a position with fewer blind cycles than
+    sl_unprotected_max_blind_cycles."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTLV-26JUL30-B110.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 4, "average_fill_cost_cents": 75}}
+    threshold = 20
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        max_no_price_cycles=1,
+        sl_unprotected_max_blind_cycles=threshold,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXHIGHTLV")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # Run fewer cycles than the threshold
+    for _ in range(threshold - 1):
+        await strategy._evaluate_held_positions()
+
+    assert not any(ev == "phase.c.unprotected_escalation" for ev, _ in logged), (
+        "CRITICAL escalation fired before reaching sl_unprotected_max_blind_cycles"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unprotected_panic_flatten_app_owned_qty_positive(monkeypatch):
+    """With SL_FLATTEN_UNPROTECTED_ON_BLIND=true and app_owned_qty > 0,
+    _execute_stop_loss is invoked once the threshold is exceeded."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTLV-26JUL30-B110.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 4, "average_fill_cost_cents": 75}}
+    threshold = 5
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        max_no_price_cycles=1,
+        sl_unprotected_max_blind_cycles=threshold,
+        sl_flatten_unprotected_on_blind=True,
+        manage_external_positions=False,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXHIGHTLV")
+    bracket.position_quantity = 4
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # app_owned_qty = 4 (all app-owned via _set_ownership)
+    strategy._app_owned_qty[ticker] = 4
+
+    for _ in range(threshold):
+        await strategy._evaluate_held_positions()
+
+    escalation_events = [ev for ev, _ in logged if ev == "phase.c.unprotected_escalation"]
+    assert escalation_events, "Expected phase.c.unprotected_escalation to fire"
+
+    # Panic-flatten must have been attempted for app-owned quantity
+    strategy._execute_stop_loss.assert_awaited()
+    call_args = strategy._execute_stop_loss.call_args
+    assert call_args.kwargs.get("bypass_cooldown") is True, (
+        "panic-flatten must bypass cooldown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unprotected_panic_flatten_skipped_when_app_owned_qty_zero(monkeypatch):
+    """With SL_FLATTEN_UNPROTECTED_ON_BLIND=true but app_owned_qty == 0,
+    no sell is attempted and a skip CRITICAL is logged."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTLV-26JUL30-B110.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 4, "average_fill_cost_cents": 75}}
+    threshold = 5
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        max_no_price_cycles=1,
+        sl_unprotected_max_blind_cycles=threshold,
+        sl_flatten_unprotected_on_blind=True,
+        manage_external_positions=False,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXHIGHTLV")
+    bracket.position_quantity = 4
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # app_owned_qty = 0 → external position, no sell allowed
+    strategy._app_owned_qty[ticker] = 0
+
+    for _ in range(threshold):
+        await strategy._evaluate_held_positions()
+
+    assert any(ev == "phase.c.unprotected_flatten_skipped_no_app_qty" for ev, _ in logged), (
+        "Expected phase.c.unprotected_flatten_skipped_no_app_qty when app_owned_qty=0"
+    )
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_default_conservative_behavior_alert_only_no_sell(monkeypatch):
+    """Default config (SL_FLATTEN_UNPROTECTED_ON_BLIND=false): CRITICAL escalation
+    is emitted but no sell attempt is made, preserving conservative behavior."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXHIGHTLV-26JUL30-B110.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 4, "average_fill_cost_cents": 75}}
+    threshold = 5
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        max_no_price_cycles=1,
+        sl_unprotected_max_blind_cycles=threshold,
+        # sl_flatten_unprotected_on_blind defaults to False
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXHIGHTLV")
+    bracket.position_quantity = 4
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 4
+
+    for _ in range(threshold):
+        await strategy._evaluate_held_positions()
+
+    # CRITICAL escalation must fire
+    assert any(ev == "phase.c.unprotected_escalation" for ev, _ in logged), (
+        "Expected phase.c.unprotected_escalation even with flatten disabled"
+    )
+    # No sell attempt — conservative behavior preserved
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_seed_rest_price_populates_cache_for_restored_position(monkeypatch):
+    """On restore, if no WS price is in cache, _seed_rest_price_for_ticker populates
+    the TickerCache from REST so the stop-loss watcher has a live price."""
+    logged = capture_logs(monkeypatch)
+    fixed_prefix = "26JAN15"
+    monkeypatch.setattr("core.state_machine.get_eastern_today_date_prefix", lambda days_offset=0: fixed_prefix)
+    ticker = f"KXHIGHTLV-{fixed_prefix}-B110.5"
+
+    executor = FakeExecutor()
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXHIGHTLV",
+            side="yes",
+            quantity=4,
+            avg_entry_price=75,
+            last_price=75,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="PAPER")
+
+    # Stub REST to return a price
+    async def fake_rest(ticker_arg):
+        return {"yes_bid": 72, "yes_ask": 76, "price": 72}
+
+    strategy._fetch_market_data_via_rest = fake_rest
+
+    await strategy._restore_positions()
+
+    # Cache must have been seeded with the REST price
+    quote = strategy.cache.get_quote(ticker)
+    assert quote is not None, "TickerCache should be seeded after restore"
+    yes_bid, yes_ask = quote
+    assert yes_bid == 72
+    assert yes_ask == 76
+
+    # The log event should be present
+    assert any(ev == "strategy.restored_position_price_seeded" for ev, _ in logged), (
+        "Expected strategy.restored_position_price_seeded to be logged"
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_rest_price_logs_warning_when_no_price_available(monkeypatch):
+    """When REST returns no price, a warning is logged but restore completes normally."""
+    logged = capture_logs(monkeypatch)
+    fixed_prefix = "26JAN15"
+    monkeypatch.setattr("core.state_machine.get_eastern_today_date_prefix", lambda days_offset=0: fixed_prefix)
+    ticker = f"KXHIGHTLV-{fixed_prefix}-B110.5"
+
+    executor = FakeExecutor()
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXHIGHTLV",
+            side="yes",
+            quantity=4,
+            avg_entry_price=75,
+            last_price=75,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, trading_mode="PAPER")
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    await strategy._restore_positions()
+
+    # Position should still be restored
+    assert ticker in strategy.active_positions
+
+    # Warning should be logged
+    assert any(ev == "strategy.restored_position_no_price" for ev, _ in logged), (
+        "Expected strategy.restored_position_no_price warning when REST has no data"
+    )

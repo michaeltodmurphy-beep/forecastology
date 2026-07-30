@@ -13,7 +13,7 @@ The primary runtime is a single always-on WebSocket daemon (`run.py`). It owns a
 | Process | File | Role |
 |---|---|---|
 | **WS Daemon** | `run.py` | ✅ **Primary executor.** Connects to Kalshi WebSocket, runs `TemperatureStrategy`, owns all entry/exit decisions, and runs WebSocket-driven stop-losses via `StopLossWatcher`. |
-| **Scanner** | `scanner.py` | ⚠️ **Legacy / standby only.** Fetches markets via REST and places buy orders. **Exits immediately if `run.py` is running** (lockfile guard). Only useful in environments where `run.py` is not deployed. |
+| **Scanner** | `scanner.py` | ⚠️ **Legacy / standby only.** Fetches markets via REST and places buy orders. **Exits immediately if `run.py` is running** (lockfile guard). Buy orders now route through the shared capped executor (V2 payload, `max_buy_qty` enforced). Only useful in environments where `run.py` is not deployed. |
 | **Monitor** | `monitor.py` | 🔧 **Reconciliation only.** Reads open positions from DB, reconciles prices via REST, handles optional hedge fallback, and cleans up expired positions. Does **not** execute stop-losses. |
 
 ### Critical architecture fixes applied
@@ -37,6 +37,31 @@ repeated ticks or reconnect bursts.  On startup, `_restore_positions()` loads
 all open positions from the DB (and from the Kalshi API in LIVE mode) and
 registers them with the watcher so stop-loss protection is active from the
 first WebSocket message.
+
+**Fix 4 — Restored/adopted positions are fully price-seeded:** On startup,
+`_restore_positions()` immediately fetches the current REST price for every
+restored or adopted position and seeds `TickerCache` before the first WebSocket
+tick arrives.  This ensures the stop-loss watcher has a live price from the
+moment the position is active, even for positions from series that were never
+in the active watchlist (e.g. positions inherited from a prior bot instance).
+
+**Fix 5 — Unprotected-position escalation:** When a held position goes blind
+(no price feed from either WebSocket or REST) for more than
+`SL_UNPROTECTED_MAX_BLIND_CYCLES` consecutive SL evaluation cycles, the bot
+now escalates to a `logger.critical` alert (`phase.c.unprotected_escalation`)
+instead of silently cycling `phase.c.held_position_unprotected` forever.  With
+`SL_FLATTEN_UNPROTECTED_ON_BLIND=true` (default `false`), the bot also
+attempts a protective panic-flatten of the app-owned quantity — only
+`app_owned_qty` is sold; `MANAGE_EXTERNAL_POSITIONS` semantics are always
+respected.
+
+**Fix 6 — Scanner routes through shared capped executor:** `scanner.py`'s
+`buy_market` now calls `create_executor(...).buy_yes(...)` instead of posting
+a raw `httpx` request.  This single change fixes the V2 payload (eliminating
+the HTTP 410 rejection from the V1-era format) and ensures the per-market
+martingale cap (`max_buy_qty = INITIAL_CONTRACT_COUNT * 2**(HEDGE_MAX_FACTOR-1)`)
+is enforced at the executor level — the same limit that applies to the
+state-machine buy path.
 
 ### Deployment / ops checklist
 
@@ -130,6 +155,8 @@ Key variables:
 | `LOW_TICKER_CLOSEOUT_ON_LATE_START` | `true` (default) / `false` — if the process starts **after** the configured close-out time on a given ET day, run the close-out once immediately so the "no Low positions held overnight" intent is honoured. |
 | `LOW_TICKER_ENTRY_HALT_ENABLED` | `true` (default) / `false` — block new `KXLOW*` entry orders from being placed at or after `LOW_TICKER_ENTRY_HALT_TIME_ET`. High tickers are unaffected. Does **not** affect stop-loss / exit paths. |
 | `LOW_TICKER_ENTRY_HALT_TIME_ET` | Wall-clock time (Eastern, `HH:MM`) after which new Low entries are blocked for the remainder of the ET trading day (default `22:00`). |
+| `SL_UNPROTECTED_MAX_BLIND_CYCLES` | Number of consecutive no-price SL evaluation cycles before a CRITICAL `phase.c.unprotected_escalation` alert fires for a blind position (default `30`; at 250 ms cadence ≈ 7.5 s). |
+| `SL_FLATTEN_UNPROTECTED_ON_BLIND` | `false` (default, conservative) / `true` — when `true`, attempt a protective panic-flatten exit of `app_owned_qty` once the blind-cycle threshold is exceeded. Only `app_owned_qty` is ever sold; `MANAGE_EXTERNAL_POSITIONS` semantics are fully respected. |
 
 ### City-local-time entry settle gate
 
@@ -287,8 +314,17 @@ Stop-loss is driven by the **WebSocket `StopLossWatcher`** inside `run.py`:
 - An `exit_in_progress` guard prevents duplicate exits on repeated ticks or reconnect bursts.
 - On failure, the guard is reset so the next tick can retry.
 - Startup reconciliation (`_restore_positions`) registers all open positions with the watcher so coverage begins from the first WebSocket message.
+- On restore, the bot immediately seeds `TickerCache` with a REST price for each restored/adopted position so the stop-loss watcher has a live price before the first WebSocket tick arrives.
 
 The `_evaluate_held_positions` loop in the strategy (runs ~every 1s) provides a secondary safety net for cases where the shared WebSocket price feed goes stale, reconnects, or is unavailable for extended periods by falling back to REST quotes for held positions.
+
+#### Unprotected-position remediation
+
+When a restored or adopted position receives no price feed (neither WebSocket nor REST) for an extended period, the bot escalates through a staged response:
+
+1. **Periodic warning** (`phase.c.held_position_unprotected`): logged at most once per 60 s while the position is blind and the no-price cycle count exceeds `max_no_price_cycles`.
+2. **CRITICAL escalation** (`phase.c.unprotected_escalation`): once `_consecutive_no_price_cycles >= SL_UNPROTECTED_MAX_BLIND_CYCLES` (default 30, ≈ 7.5 s at 250 ms cadence), a `logger.critical` event is emitted. This fires once on threshold crossing and then re-fires at most once per 300 s if the position remains blind.
+3. **Config-gated panic-flatten** (default off): set `SL_FLATTEN_UNPROTECTED_ON_BLIND=true` to attempt a protective panic-flatten exit of `app_owned_qty` when the escalation threshold is crossed. Only app-owned contracts are sold — `MANAGE_EXTERNAL_POSITIONS=false` semantics are always respected. If `app_owned_qty == 0`, no sell is attempted and `phase.c.unprotected_flatten_skipped_no_app_qty` is logged at CRITICAL instead.
 
 ### StopLossLedger
 `stop_loss_ledger` stores the persistent per-day martingale counter:
