@@ -2008,6 +2008,72 @@ class TemperatureStrategy:
         Execute the initial buy order.
         Buy INITIAL_CONTRACT_COUNT at the lowest ask (fetched live from Kalshi API).
         """
+        # ── NWS gate enforcement — final order-submission boundary ──────────
+        # This check runs unconditionally at the narrowest execution point so
+        # that no upstream path (watchlist logic, caches, or future callers)
+        # can bypass it.  Applies only to weather entry orders; exits, SL, and
+        # panic-flatten paths never call _execute_entry.
+        _gate_station = get_series_station_code(bracket.market_ticker)
+        if _gate_station is not None:
+            _ticker_upper = bracket.market_ticker.upper()
+            _is_high = "KXHIGH" in _ticker_upper
+            _is_low = "KXLOW" in _ticker_upper
+            _gate_now_utc = datetime.datetime.now(datetime.timezone.utc)
+            _gate_market_date = None
+            _gate_parsed = parse_series_and_date(bracket.market_ticker)
+            if _gate_parsed is not None:
+                _, _gate_date_prefix = _gate_parsed
+                _gate_market_date = _parse_date_prefix(_gate_date_prefix)
+            try:
+                import nws.gate as _nws_gate_mod
+                _gate_open = await asyncio.to_thread(
+                    _nws_gate_mod.is_trading_gate_open,
+                    _gate_station, _gate_now_utc, _gate_market_date,
+                )
+                if _gate_open:
+                    logger.info(
+                        "entry.allowed_nws_gate_final",
+                        ticker=bracket.market_ticker,
+                        station_code=_gate_station,
+                        is_high=_is_high,
+                        is_low=_is_low,
+                        now_utc=_gate_now_utc.isoformat(),
+                        gate_open=True,
+                        decision_reason="gate_open",
+                        market_date=_gate_market_date.isoformat() if _gate_market_date else None,
+                    )
+                else:
+                    logger.info(
+                        "entry.blocked_nws_gate_final",
+                        ticker=bracket.market_ticker,
+                        station_code=_gate_station,
+                        is_high=_is_high,
+                        is_low=_is_low,
+                        now_utc=_gate_now_utc.isoformat(),
+                        gate_open=False,
+                        decision_reason="gate_closed",
+                        market_date=_gate_market_date.isoformat() if _gate_market_date else None,
+                    )
+                    bracket.phase = Phase.MONITORING
+                    return
+            except Exception as _gate_exc:  # noqa: BLE001
+                logger.warning(
+                    "entry.blocked_nws_gate_final",
+                    ticker=bracket.market_ticker,
+                    station_code=_gate_station,
+                    is_high=_is_high,
+                    is_low=_is_low,
+                    now_utc=_gate_now_utc.isoformat(),
+                    gate_open=False,
+                    decision_reason="gate_error",
+                    error_class=type(_gate_exc).__name__,
+                    error_message=str(_gate_exc),
+                    market_date=_gate_market_date.isoformat() if _gate_market_date else None,
+                )
+                bracket.phase = Phase.MONITORING
+                return
+        # ────────────────────────────────────────────────────────────────────
+
         if ob is None:
             prices = await self._fetch_live_prices([bracket.market_ticker])
             ob = prices.get(bracket.market_ticker)
