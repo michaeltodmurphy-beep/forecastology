@@ -761,3 +761,226 @@ class TestMarketDateAwareGate:
              patch("nws.gate.GATE_HIGH_BEFORE", 60), \
              patch("nws.gate.GATE_HIGH_AFTER", 30):
             assert self._gate_open_with_date("KLAX", now, self.session, market_date) is False
+
+
+
+# ---------------------------------------------------------------------------
+# Tests for cold-cache behavior and boundary correctness
+# ---------------------------------------------------------------------------
+
+class TestColdCacheBehavior:
+    """Tests for gate correctness when _station_cache is cold on startup.
+
+    Covers three root-cause scenarios:
+
+    1. Cache cold + NWS API resolves tz  → gate evaluates and opens correctly.
+    2. Cache cold + NWS API also fails   → UTC fallback → gate stays closed
+       (documented safe behavior for non-UTC stations in the 01:00-05:00 UTC
+       "false-negative zone" for America/New_York).
+    3. Exact open/close boundary inclusiveness with prod GATE_HIGH_BEFORE=15
+       and GATE_HIGH_AFTER=5 config values.
+    4. Missing expected-day row → gate closed; stale latest row not substituted.
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_mock_session(self):
+        """Return a context manager that always yields self.session."""
+        from contextlib import contextmanager
+        session = self.session
+
+        @contextmanager
+        def _ctx():
+            yield session
+
+        return _ctx
+
+    def setup_method(self):
+        from nws.client import _station_cache
+
+        _station_cache.clear()
+        self.engine = _make_sqlite_engine()
+        self.Session = _make_session_factory(self.engine)
+        self.session = self.Session()
+
+    def teardown_method(self):
+        self.session.close()
+
+    # ------------------------------------------------------------------
+    # 1. Cold cache + API resolves timezone → gate opens correctly
+    # ------------------------------------------------------------------
+
+    def test_cold_cache_non_utc_station_false_negative_zone_gate_opens(self):
+        """Cold cache: NWS API resolves tz → gate opens correctly in false-negative zone.
+
+        Scenario (KATL, America/New_York, EDT = UTC-4):
+          - now_utc = 2025-07-04T03:15Z  (in the 01:00–05:00 UTC zone where
+            UTC fallback computes the WRONG expected trading day for EDT stations)
+          - Local time = 2025-07-03T23:15 EDT  → active trading day = July 3.
+          - Stored forecast: forecast_date_utc = 2025-07-03T00:00Z (local July 3).
+          - high_time = 2025-07-04T03:20Z (= 2025-07-03T23:20 EDT, within window).
+          - Trading window (July 3 local):  [2025-07-03T05:00Z, 2025-07-04T05:00Z).
+          - GATE_HIGH_BEFORE=15 → high_open  = 2025-07-04T03:05Z.
+          - GATE_HIGH_AFTER=5  → high_close = 2025-07-04T03:25Z.
+          - 03:15Z is inside [03:05Z, 03:25Z] → gate OPEN.
+
+        Without fix (_fetch_station_tz_from_api also fails → UTC fallback):
+          - UTC trading day at 03:15Z: 03:15 > 01:00 → July 4.
+          - Expected = 2025-07-04T00:00Z → no July-4 row → gate CLOSED (false negative).
+
+        With fix (_fetch_station_tz_from_api returns "America/New_York"):
+          - Local July 3 → expected = 2025-07-03T00:00Z → row found → gate evaluates.
+        """
+        # Stored in the July-3 row; high falls in the July-3 local trading window
+        high_time = _utc(2025, 7, 4, 3, 20)   # 23:20 EDT on July 3
+        _insert_forecast(
+            self.session, "KATL",
+            _utc(2025, 7, 3, 0),               # forecast keyed to local July 3
+            high_time, None,
+        )
+        now = _utc(2025, 7, 4, 3, 15)          # 23:15 EDT July 3 — inside gate window
+
+        with patch("nws.gate.get_session", self._make_mock_session()), \
+             patch("nws.gate._fetch_station_tz_from_api", return_value="America/New_York"), \
+             patch("nws.gate.GATE_LOW_BEFORE", 150), \
+             patch("nws.gate.GATE_LOW_AFTER", 60), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 15), \
+             patch("nws.gate.GATE_HIGH_AFTER", 5):
+            from nws.gate import is_trading_gate_open
+            assert is_trading_gate_open("KATL", now) is True
+
+    # ------------------------------------------------------------------
+    # 2. Cold cache + API also fails → UTC fallback → documented false negative
+    # ------------------------------------------------------------------
+
+    def test_cold_cache_utc_fallback_causes_false_negative_in_false_negative_zone(self):
+        """Cold cache + failed API fetch → UTC fallback → gate correctly stays closed.
+
+        Same scenario as above, but _fetch_station_tz_from_api returns None, so
+        _resolve_station_tz falls back to "UTC".  At 03:15 UTC the UTC-day logic
+        maps the time to July-4 trading day (03:15 > 01:00 UTC), but the row is
+        keyed to July 3.
+
+        The gate logs a warning and returns False — the safe fail-closed behavior
+        when both the cache and the NWS API are unavailable.
+        """
+        high_time = _utc(2025, 7, 4, 3, 20)
+        _insert_forecast(
+            self.session, "KATL",
+            _utc(2025, 7, 3, 0),
+            high_time, None,
+        )
+        now = _utc(2025, 7, 4, 3, 15)
+
+        with patch("nws.gate.get_session", self._make_mock_session()), \
+             patch("nws.gate._fetch_station_tz_from_api", return_value=None), \
+             patch("nws.gate.GATE_LOW_BEFORE", 150), \
+             patch("nws.gate.GATE_LOW_AFTER", 60), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 15), \
+             patch("nws.gate.GATE_HIGH_AFTER", 5):
+            from nws.gate import is_trading_gate_open
+            # UTC fallback → expected = July-4 → no July-4 row → gate CLOSED
+            assert is_trading_gate_open("KATL", now) is False
+
+    # ------------------------------------------------------------------
+    # 3. Exact boundary inclusiveness with prod GATE_HIGH_BEFORE=15/GATE_HIGH_AFTER=5
+    # ------------------------------------------------------------------
+
+    def test_high_window_exact_open_boundary_is_inclusive(self):
+        """GATE_HIGH_BEFORE=15: gate opens exactly at high_time − 15 min (inclusive).
+
+        Scenario: KATL (America/New_York), high at 18:00 UTC = 14:00 EDT (midday).
+        high_open  = 18:00Z − 15 min = 17:45Z.
+        At exactly 17:45Z the gate must be OPEN; at 17:44Z it must be CLOSED.
+        """
+        high_time = _utc(2025, 7, 4, 18, 0)    # 14:00 EDT July 4 (well inside window)
+        _insert_forecast(
+            self.session, "KATL",
+            _utc(2025, 7, 4, 0),
+            high_time, None,
+        )
+        now_open   = high_time - timedelta(minutes=15)  # 17:45Z — exactly at open boundary
+        now_before = now_open  - timedelta(minutes=1)   # 17:44Z — just before open
+
+        with patch("nws.gate.get_session", self._make_mock_session()), \
+             patch.dict(
+                 "nws.gate._station_cache",
+                 {"KATL": (33.6, -84.4, "https://example.test/hourly", "America/New_York")},
+                 clear=False,
+             ), \
+             patch("nws.gate.GATE_LOW_BEFORE", 150), \
+             patch("nws.gate.GATE_LOW_AFTER", 60), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 15), \
+             patch("nws.gate.GATE_HIGH_AFTER", 5):
+            from nws.gate import is_trading_gate_open
+            assert is_trading_gate_open("KATL", now_open)   is True   # inclusive open
+            assert is_trading_gate_open("KATL", now_before) is False  # before open
+
+    def test_high_window_exact_close_boundary_is_inclusive(self):
+        """GATE_HIGH_AFTER=5: gate closes exactly at high_time + 5 min (inclusive).
+
+        high_close = 18:00Z + 5 min = 18:05Z.
+        At exactly 18:05Z the gate must be OPEN; at 18:06Z it must be CLOSED.
+        """
+        high_time = _utc(2025, 7, 4, 18, 0)    # 14:00 EDT July 4
+        _insert_forecast(
+            self.session, "KATL",
+            _utc(2025, 7, 4, 0),
+            high_time, None,
+        )
+        now_close = high_time + timedelta(minutes=5)   # 18:05Z — exactly at close boundary
+        now_after = now_close + timedelta(minutes=1)   # 18:06Z — just after close
+
+        with patch("nws.gate.get_session", self._make_mock_session()), \
+             patch.dict(
+                 "nws.gate._station_cache",
+                 {"KATL": (33.6, -84.4, "https://example.test/hourly", "America/New_York")},
+                 clear=False,
+             ), \
+             patch("nws.gate.GATE_LOW_BEFORE", 150), \
+             patch("nws.gate.GATE_LOW_AFTER", 60), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 15), \
+             patch("nws.gate.GATE_HIGH_AFTER", 5):
+            from nws.gate import is_trading_gate_open
+            assert is_trading_gate_open("KATL", now_close) is True    # inclusive close
+            assert is_trading_gate_open("KATL", now_after) is False   # after close
+
+    # ------------------------------------------------------------------
+    # 4. Missing expected-day row → closed; stale latest row not substituted
+    # ------------------------------------------------------------------
+
+    def test_missing_expected_day_row_stale_latest_not_substituted(self):
+        """gate.expected_day_not_found: stale July-3 row must not open gate on July 4.
+
+        A July-3 KATL row has high_time = 2025-07-04T14:00Z.
+        At 2025-07-04T13:55Z (inside GATE_HIGH_BEFORE=15 window from high_time),
+        the gate must be CLOSED because no July-4 row exists for KATL.
+
+        The new exact-day query ensures the stale row is never silently used —
+        only a diagnostic log entry (gate.expected_day_not_found) is emitted.
+        """
+        # July-3 row; high_time is well inside the July-4 UTC day
+        high_time = _utc(2025, 7, 4, 14, 0)
+        _insert_forecast(
+            self.session, "KATL",
+            _utc(2025, 7, 3, 0),           # row keyed to local July 3
+            high_time, None,
+        )
+        # now = 13:55Z July 4 → inside [13:45Z, 14:05Z] IF stale row were used
+        now = _utc(2025, 7, 4, 13, 55)
+
+        with patch("nws.gate.get_session", self._make_mock_session()), \
+             patch.dict(
+                 "nws.gate._station_cache",
+                 {"KATL": (33.6, -84.4, "https://example.test/hourly", "America/New_York")},
+                 clear=False,
+             ), \
+             patch("nws.gate.GATE_LOW_BEFORE", 150), \
+             patch("nws.gate.GATE_LOW_AFTER", 60), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 15), \
+             patch("nws.gate.GATE_HIGH_AFTER", 5):
+            from nws.gate import is_trading_gate_open
+            # Must be CLOSED — no July-4 row for KATL; July-3 row must not be substituted
+            assert is_trading_gate_open("KATL", now) is False
