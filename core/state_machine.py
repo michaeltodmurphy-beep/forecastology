@@ -1819,17 +1819,22 @@ class TemperatureStrategy:
                         continue
                 # -----------------------------------------------------------
 
-                # --- City-local-time settle gate ---
+                # --- City-local-time settle gate (Low tickers only) ---
+                # KXHIGH* tickers are never subject to this gate.
+                # KXLOW* tickers must wait until their city's local resume time
+                # (01:00 local standard; 00:00 for Phoenix) before new entries
+                # are allowed, providing the RESUME half of the STOP/RESUME rule.
                 _market_date = None
                 parsed = parse_series_and_date(ticker)
                 if parsed is not None:
                     _, _date_prefix = parsed
                     _market_date = _parse_date_prefix(_date_prefix)
-                gate_ok, gate_ctx = is_entry_allowed(ticker, self.config, market_date=_market_date)
-                if not gate_ok:
-                    logger.info("entry.blocked_local_settle_gate", **gate_ctx)
-                    continue
-                # -----------------------------------
+                if is_low:
+                    gate_ok, gate_ctx = is_entry_allowed(ticker, self.config, market_date=_market_date)
+                    if not gate_ok:
+                        logger.info("entry.blocked_local_settle_gate", **gate_ctx)
+                        continue
+                # -------------------------------------------------------
 
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)

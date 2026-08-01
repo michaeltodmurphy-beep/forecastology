@@ -147,7 +147,7 @@ Key variables:
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `LOW_TRADES` | `yes` (default) / `no` — set to `no` to disable new **Low** ticker entries (existing positions still managed) |
 | `HIGH_TRADES` | `yes` (default) / `no` — set to `no` to disable new **High** ticker entries (existing positions still managed) |
-| `ENABLE_LOCAL_SETTLE_GATE` | `true` (default) / `false` — enable city-local-time entry gate; blocks new buys before the city's local rollover time |
+| `ENABLE_LOCAL_SETTLE_GATE` | `true` (default) / `false` — enable city-local-time entry gate; blocks new `KXLOW*` buys before the city's local rollover time (RESUME half of the STOP/RESUME rule). `KXHIGH*` tickers are never affected. |
 | `DEFAULT_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for all cities except Phoenix (default `01:00`) |
 | `PHOENIX_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for Phoenix (default `00:00`; Phoenix observes Mountain Standard Time year-round, no DST) |
 | `LOW_TICKER_DAILY_CLOSEOUT_ENABLED` | `true` (default) / `false` — automatically flatten all open `KXLOW*` positions at `LOW_TICKER_CLOSEOUT_TIME_ET` every day (Eastern, DST-aware). `KXHIGH*` positions are never touched. |
@@ -158,24 +158,28 @@ Key variables:
 | `SL_UNPROTECTED_MAX_BLIND_CYCLES` | Number of consecutive no-price SL evaluation cycles before a CRITICAL `phase.c.unprotected_escalation` alert fires for a blind position (default `30`; at 250 ms cadence ≈ 7.5 s). |
 | `SL_FLATTEN_UNPROTECTED_ON_BLIND` | `false` (default, conservative) / `true` — when `true`, attempt a protective panic-flatten exit of `app_owned_qty` once the blind-cycle threshold is exceeded. Only `app_owned_qty` is ever sold; `MANAGE_EXTERNAL_POSITIONS` semantics are fully respected. |
 
-### City-local-time entry settle gate
+### City-local-time entry settle gate (KXLOW* only)
 
-Kalshi settles temperature markets overnight.  By default (`ENABLE_LOCAL_SETTLE_GATE=true`) the bot will **not** open new positions until the city's local clock has passed the configured rollover threshold:
+**This gate applies to `KXLOW*` (Low) tickers only.  `KXHIGH*` tickers are never subject to this gate.**
 
-| City group | Example cities | Threshold |
-|---|---|---|
-| Eastern Time | Atlanta, Boston, Miami, New York City, Philadelphia, Washington DC | 01:00 ET |
-| Central Time | Austin, Chicago, Dallas, Houston, Minneapolis, New Orleans, Oklahoma City, San Antonio | 01:00 CT |
-| Mountain Time | Denver | 01:00 MT |
-| Mountain Standard Time (no DST) | **Phoenix** | **00:00 MST** |
-| Pacific Time | Las Vegas, Los Angeles, San Francisco, Seattle | 01:00 PT |
+Kalshi settles temperature markets overnight.  By default (`ENABLE_LOCAL_SETTLE_GATE=true`) the bot will **not** open new Low-ticker positions until the city's local clock has passed the configured rollover threshold.  This is the **RESUME** half of the Low-ticker STOP/RESUME rule (see also "Low-ticker entry halt" below):
 
-**Behavior examples**:
+| City group | Example cities | Resume threshold (local) | Equivalent ET (summer) |
+|---|---|---|---|
+| Eastern Time | Atlanta, Boston, Miami, New York City, Philadelphia, Washington DC | 01:00 ET | 01:00 ET |
+| Central Time | Austin, Chicago, Dallas, Houston, Minneapolis, New Orleans, Oklahoma City, San Antonio | 01:00 CT | 02:00 ET |
+| Mountain Time | Denver | 01:00 MT | 03:00 ET |
+| Mountain Standard Time (no DST) | **Phoenix** | **00:00 MST** | 02:00 ET |
+| Pacific Time | Las Vegas, Los Angeles, San Francisco, Seattle | 01:00 PT | 04:00 ET |
 
-- NYC at 12:59 AM ET → new buys **blocked** (logs `entry.blocked_local_settle_gate`)
-- NYC at 01:00 AM ET → new buys **allowed**
-- Phoenix at 11:59 PM MST → new buys **blocked**
-- Phoenix at 00:00 AM MST → new buys **allowed**
+**Behavior examples** (Low tickers only):
+
+- NYC KXLOW at 12:59 AM ET → new buys **blocked** (logs `entry.blocked_local_settle_gate`)
+- NYC KXLOW at 01:00 AM ET → new buys **allowed**
+- LA KXLOW at 00:30 ET (= 21:30 PT) → new buys **blocked** (ET halt lifted at midnight, but local gate blocks until 01:00 PT)
+- LA KXLOW at 01:00 PT (= 04:00 ET) → new buys **allowed**
+- Phoenix KXLOW at 11:59 PM MST → new buys **blocked**
+- Phoenix KXLOW at 00:00 AM MST → new buys **allowed**
 
 **This gate applies to new entry orders only.**  Stop-loss execution, panic exits, sell paths, and all position management continue 24/7 regardless of this setting.
 
@@ -298,6 +302,32 @@ A dedicated background loop (`_low_ticker_closeout_loop`) runs every 30 seconds 
 - Close-out is routed through the existing `_execute_stop_loss` path so ownership guards (`MANAGE_EXTERNAL_POSITIONS=false`) and idempotency records are fully respected.
 - When `LOW_TICKER_CLOSEOUT_ON_LATE_START=true` (default) and the process starts **after** the configured time, the close-out runs once on the first loop iteration so no Low positions are inadvertently held overnight.
 - Logs: `lowticker.daily_closeout_start`, per-ticker `lowticker.daily_closeout_ticker_done`, and `lowticker.daily_closeout_complete`.
+- This close-out is driven **entirely by Eastern Time** — the ticker's own city timezone plays no role.  A Pacific-time KXLOW ticker is closed out at 22:00 ET (= 19:00 PT).
+
+### Low-ticker STOP/RESUME rule (combined)
+
+Low-ticker trading is controlled by two complementary gates that together form the daily STOP/RESUME cycle:
+
+1. **STOP — global ET halt (22:00 ET)**
+   At 22:00 Eastern Time, **all** new Low-ticker entry orders are blocked universally, regardless of the ticker's home city.  Implemented via `is_low_entry_halted_et` in `_evaluate_watchlist` and the `_low_ticker_closeout_loop` that simultaneously flattens open positions.  `KXHIGH*` entries are completely unaffected.
+
+2. **RESUME — per-city local time**
+   New Low-ticker entries resume once the ticker's **own** city local clock reaches the resume threshold.  Implemented via `is_entry_allowed` in `core/local_time_gate.py`, called **only for `KXLOW*` tickers** (the `_evaluate_watchlist` call is guarded by `if is_low:`):
+   - Standard: 01:00 local time (Eastern, Central, Mountain/Denver, Pacific).
+   - Exception: 00:00 local time for Phoenix (`America/Phoenix`, no DST).
+
+   This means a Pacific-time Low ticker remains blocked from 22:00 ET through 01:00 PT (= 04:00 ET), even though the ET halt window technically ended at midnight ET.  The local-time gate covers that 4-hour gap.
+
+| Timezone | Resume (local) | Resume (ET, summer) |
+|---|---|---|
+| Eastern (`America/New_York`) | 01:00 | 01:00 |
+| Central (`America/Chicago`) | 01:00 | 02:00 |
+| Mountain (`America/Denver`) | 01:00 | 03:00 |
+| Mountain/Phoenix (`America/Phoenix`, no DST) | 00:00 | 02:00 |
+| Pacific (`America/Los_Angeles`) | 01:00 | 04:00 |
+
+- Logs: `entry.blocked_low_after_2200_et` (ET halt), `entry.blocked_local_settle_gate` (local resume gate).
+- DST-aware via `zoneinfo` / `ZoneInfo`.
 
 ### Low-ticker entry halt (22:00 ET)
 

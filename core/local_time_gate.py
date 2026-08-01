@@ -1,9 +1,14 @@
 # core/local_time_gate.py
 """City-local-time entry gate for Kalshi temperature markets.
 
+**This gate applies to KXLOW* (Low) tickers only.**  KXHIGH* tickers are
+never subject to this gate; the scoping is enforced at the call site in
+``core/state_machine._evaluate_watchlist``.
+
 Kalshi settles its temperature markets overnight.  To avoid opening new
-positions before the market "day" has rolled over in the city's own
-timezone, this module enforces a configurable local-time threshold:
+Low-ticker positions before the market "day" has rolled over in the
+city's own timezone, this module enforces a configurable local-time
+threshold (the RESUME half of the global STOP/RESUME rule):
 
     - All listed cities except Phoenix: allow new entries only at/after
       DEFAULT_ENTRY_START_LOCAL (default 01:00 local).
@@ -176,7 +181,13 @@ def is_entry_allowed(
     now_utc: Optional[datetime.datetime] = None,
     market_date: Optional[datetime.date] = None,
 ) -> tuple[bool, dict]:
-    """Determine whether a new entry order is allowed right now for *ticker*.
+    """Determine whether a new Low-ticker entry order is allowed right now for *ticker*.
+
+    This function implements the RESUME half of the Low-ticker STOP/RESUME rule.
+    It must only be called for ``KXLOW*`` tickers; ``KXHIGH*`` tickers must
+    never be passed to this function (the caller in
+    ``core/state_machine._evaluate_watchlist`` gates on ``is_low`` before
+    calling this function).
 
     Parameters
     ----------

@@ -865,3 +865,125 @@ async def test_low_ticker_closeout_loop_idempotent(monkeypatch):
     assert len(run_count) == 1, (
         f"Expected 1 close-out run but got {len(run_count)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Part 2 — Close-out loop is ET-based and unaffected by local timezone
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_low_ticker_closeout_loop_fires_at_et_time_only(monkeypatch):
+    """Close-out fires based on ET time regardless of the ticker's local timezone.
+
+    A Pacific-time KXLOW ticker (22:00 ET = 19:00 PT) must be included in the
+    close-out that fires at 22:00 ET — the local-time gate for that ticker's
+    city (01:00 PT = 04:00 ET) plays no role in the close-out timing.
+
+    Sequence: before 22:00 ET → not fired; at 22:01 ET → fires exactly once;
+    same ET day → idempotent, does not fire again.
+    """
+    import core.state_machine as sm
+
+    strategy = make_strategy(monkeypatch)
+    strategy._running = True
+    strategy._reconciliation_complete = True
+    strategy.config.low_ticker_daily_closeout_enabled = True
+    strategy.config.low_ticker_closeout_time_et = "22:00"
+    # Use True so the close-out fires on the first crossing (not treated as a skip).
+    strategy.config.low_ticker_closeout_on_late_start = True
+
+    run_count = []
+
+    async def _fake_run_closeout():
+        run_count.append(1)
+
+    monkeypatch.setattr(strategy, "_run_low_ticker_closeout", _fake_run_closeout)
+
+    sleep_calls = []
+
+    # Sequence: before 22:00 ET → NOT fired; at 22:01 ET → FIRED; same day → idempotent.
+    _before_22 = _et(2025, 7, 4, 21, 59)
+    _after_22  = _et(2025, 7, 4, 22, 1)
+    _still_22  = _et(2025, 7, 4, 23, 0)
+
+    _et_times_iter = iter([_before_22, _after_22, _still_22])
+
+    def _fake_past_closeout(cfg, now_utc=None):
+        t = next(_et_times_iter, _still_22)
+        et_tz = ZoneInfo("America/New_York")
+        now_et = t.astimezone(et_tz)
+        closeout_wall = datetime.time(22, 0)
+        past = now_et.time() >= closeout_wall
+        return past, now_et.date()
+
+    monkeypatch.setattr(sm, "is_past_closeout_time_et", _fake_past_closeout)
+
+    async def _fast_sleep(n):
+        sleep_calls.append(n)
+        if len(sleep_calls) >= 3:
+            strategy._running = False
+
+    monkeypatch.setattr(sm.asyncio, "sleep", _fast_sleep)
+
+    await strategy._low_ticker_closeout_loop()
+
+    assert len(run_count) == 1, (
+        f"Close-out should fire exactly once at/after 22:00 ET, got {len(run_count)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_watchlist_high_ticker_not_blocked_by_local_gate(monkeypatch):
+    """KXHIGH* tickers must proceed through _evaluate_watchlist even when the
+    city-local-time settle gate would have blocked them (if applied).
+
+    The local settle gate is only called for is_low=True tickers; KXHIGH tickers
+    bypass it entirely.
+    """
+    import core.state_machine as sm
+    from core.local_time_gate import is_entry_allowed
+
+    info_logged = []
+    monkeypatch.setattr(sm.logger, "info",
+                        lambda ev, **kw: info_logged.append((ev, kw)))
+
+    strategy = make_strategy(
+        monkeypatch,
+        initial_contract_count=4,
+        hedge_max_factor=2,
+    )
+    strategy.config.low_ticker_entry_halt_enabled = False
+    strategy.config.enable_local_settle_gate = True
+    strategy.config.default_entry_start_local = "01:00"
+    strategy.executor.buy_success = True
+
+    ticker = "KXHIGHNY-26JUL30-T95"
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="KXHIGHNY-26JUL30",
+        series_ticker="KXHIGHNY",
+        bracket_label="T95",
+        phase=Phase.MONITORING,
+        falling_knife_guard=False,
+        crossed_buy=False,
+    )
+    strategy.brackets[ticker] = bracket
+
+    # Confirm is_entry_allowed itself would block at this UTC time
+    # (00:30 ET = 04:30 UTC summer, below 01:00 threshold).
+    now_utc = _et(2025, 7, 4, 0, 30)  # 00:30 ET summer
+    gate_ok, _ = is_entry_allowed(ticker, strategy.config, now_utc=now_utc)
+    assert gate_ok is False, "Precondition: function itself would block at this time"
+
+    # Feed a qualifying price and evaluate; the settle gate must NOT fire for HIGH.
+    strategy.cache.update_quote(ticker, yes_bid=80, yes_ask=83)
+
+    await strategy._evaluate_watchlist()
+
+    # entry.blocked_local_settle_gate must NOT appear for a KXHIGH ticker.
+    blocked_settle = [ev for ev, kw in info_logged
+                      if ev == "entry.blocked_local_settle_gate"
+                      and "KXHIGH" in kw.get("ticker", "")]
+    assert not blocked_settle, (
+        "KXHIGH ticker must never be blocked by the local settle gate"
+    )
