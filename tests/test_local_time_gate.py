@@ -513,3 +513,252 @@ class TestMarketDateAwareness:
         market_date = _dt.date(2026, 7, 17)
         allowed, ctx = is_entry_allowed(self.PHX_TICKER_TODAY, cfg, now_utc=now, market_date=market_date)
         assert allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Low-ticker gate scoping: per-city resume times and the ET-halt gap
+# ---------------------------------------------------------------------------
+
+class TestLowTickerResumePerCity:
+    """Verify the local resume threshold for each timezone group (KXLOW* tickers).
+
+    These tests confirm the RESUME half of the global STOP/RESUME rule.
+
+    The STOP is applied by ``is_low_entry_halted_et`` (22:00 ET, universal).
+    The RESUME is applied by ``is_entry_allowed`` (called only for KXLOW*):
+      - Eastern / Central / Mountain (Denver) / Pacific → 01:00 local
+      - Phoenix (no DST, America/Phoenix) → 00:00 local
+    """
+
+    def _cfg(self):
+        return _make_config(
+            enable_local_settle_gate=True,
+            default_entry_start_local="01:00",
+            phoenix_entry_start_local="00:00",
+        )
+
+    # ── Eastern (America/New_York) ────────────────────────────────────────
+
+    def test_eastern_low_blocked_before_0100_local(self):
+        """00:59 ET → KXLOW eastern ticker blocked."""
+        cfg = self._cfg()
+        # Summer (EDT=UTC-4): 04:59 UTC = 00:59 ET
+        now = _utc(2025, 7, 4, 4, 59)
+        allowed, ctx = is_entry_allowed("KXLOWTNYC-25JUL04-B72", cfg, now_utc=now)
+        assert allowed is False
+
+    def test_eastern_low_allowed_at_0100_local(self):
+        """01:00 ET → KXLOW eastern ticker allowed."""
+        cfg = self._cfg()
+        # Summer (EDT=UTC-4): 05:00 UTC = 01:00 ET
+        now = _utc(2025, 7, 4, 5, 0)
+        allowed, _ = is_entry_allowed("KXLOWTNYC-25JUL04-B72", cfg, now_utc=now)
+        assert allowed is True
+
+    # ── Central (America/Chicago) ─────────────────────────────────────────
+
+    def test_central_low_blocked_before_0100_local(self):
+        """00:59 CT → KXLOW central ticker blocked (= 01:59 ET summer)."""
+        cfg = self._cfg()
+        # Summer (CDT=UTC-5): 05:59 UTC = 00:59 CDT
+        now = _utc(2025, 7, 4, 5, 59)
+        allowed, ctx = is_entry_allowed("KXLOWTCHI-25JUL04-B72", cfg, now_utc=now)
+        assert allowed is False
+        assert ctx["timezone"] == "America/Chicago"
+
+    def test_central_low_allowed_at_0100_local(self):
+        """01:00 CT → KXLOW central ticker allowed (= 02:00 ET summer)."""
+        cfg = self._cfg()
+        # Summer (CDT=UTC-5): 06:00 UTC = 01:00 CDT
+        now = _utc(2025, 7, 4, 6, 0)
+        allowed, _ = is_entry_allowed("KXLOWTCHI-25JUL04-B72", cfg, now_utc=now)
+        assert allowed is True
+
+    # ── Mountain / Denver (America/Denver, DST) ───────────────────────────
+
+    def test_denver_low_blocked_before_0100_local(self):
+        """00:59 MT → KXLOW denver ticker blocked (= 02:59 ET summer)."""
+        cfg = self._cfg()
+        # Summer (MDT=UTC-6): 06:59 UTC = 00:59 MDT
+        now = _utc(2025, 7, 4, 6, 59)
+        allowed, ctx = is_entry_allowed("KXLOWTDEN-25JUL04-B72", cfg, now_utc=now)
+        assert allowed is False
+        assert ctx["timezone"] == "America/Denver"
+
+    def test_denver_low_allowed_at_0100_local(self):
+        """01:00 MT → KXLOW denver ticker allowed (= 03:00 ET summer)."""
+        cfg = self._cfg()
+        # Summer (MDT=UTC-6): 07:00 UTC = 01:00 MDT
+        now = _utc(2025, 7, 4, 7, 0)
+        allowed, _ = is_entry_allowed("KXLOWTDEN-25JUL04-B72", cfg, now_utc=now)
+        assert allowed is True
+
+    # ── Phoenix (America/Phoenix, no DST) ─────────────────────────────────
+
+    def test_phoenix_low_allowed_at_midnight_local(self):
+        """00:00 MST → KXLOW phoenix ticker allowed (Phoenix exception)."""
+        cfg = self._cfg()
+        # Phoenix is always UTC-7: 07:00 UTC = 00:00 MST
+        now = _utc(2025, 7, 4, 7, 0)
+        allowed, ctx = is_entry_allowed("KXLOWTPHX-25JUL04-B80", cfg, now_utc=now)
+        assert allowed is True
+        assert ctx["threshold"] == "00:00"
+        assert ctx["timezone"] == "America/Phoenix"
+
+    def test_phoenix_low_resume_earlier_than_denver(self):
+        """Phoenix resumes at 00:00 local while Denver still blocks until 01:00."""
+        cfg = self._cfg()
+        # Winter, both UTC-7: 07:30 UTC = 00:30 for both Denver and Phoenix.
+        now = _utc(2025, 1, 15, 7, 30)
+        phx_ok, _ = is_entry_allowed("KXLOWTPHX-25JAN15-B80", cfg, now_utc=now)
+        den_ok, _ = is_entry_allowed("KXLOWTDEN-25JAN15-B70", cfg, now_utc=now)
+        assert phx_ok is True, "Phoenix (00:00 threshold) should resume at 00:30"
+        assert den_ok is False, "Denver (01:00 threshold) should still block at 00:30"
+
+    # ── Pacific (America/Los_Angeles) ─────────────────────────────────────
+
+    def test_pacific_low_blocked_before_0100_local(self):
+        """00:59 PT → KXLOW pacific ticker blocked (= 03:59 ET summer)."""
+        cfg = self._cfg()
+        # Summer (PDT=UTC-7): 07:59 UTC = 00:59 PDT
+        now = _utc(2025, 7, 4, 7, 59)
+        allowed, ctx = is_entry_allowed("KXLOWTLAX-25JUL04-B60", cfg, now_utc=now)
+        assert allowed is False
+        assert ctx["timezone"] == "America/Los_Angeles"
+
+    def test_pacific_low_allowed_at_0100_local(self):
+        """01:00 PT → KXLOW pacific ticker allowed (= 04:00 ET summer)."""
+        cfg = self._cfg()
+        # Summer (PDT=UTC-7): 08:00 UTC = 01:00 PDT
+        now = _utc(2025, 7, 4, 8, 0)
+        allowed, _ = is_entry_allowed("KXLOWTLAX-25JUL04-B60", cfg, now_utc=now)
+        assert allowed is True
+
+
+class TestLowTickerGapScenario:
+    """A Pacific Low ticker must remain blocked between 00:00 ET and 01:00 PT.
+
+    The ET halt lifts at midnight ET, but the local-time gate must keep blocking
+    until 01:00 PT (= 04:00 ET summer).  Without the local gate this window
+    would be a 4-hour gap during which the ticker should not be tradeable.
+    """
+
+    def _cfg(self):
+        return _make_config(
+            enable_local_settle_gate=True,
+            default_entry_start_local="01:00",
+            phoenix_entry_start_local="00:00",
+            low_ticker_entry_halt_enabled=True,
+            low_ticker_entry_halt_time_et="22:00",
+        )
+
+    def test_la_low_blocked_at_midnight_et(self):
+        """00:00 ET (= 21:00 PT on prior evening) → ET halt lifted BUT local gate blocks.
+
+        At midnight ET, the ET halt is no longer active (halted=False).  However,
+        it is still 21:00 PT on the previous calendar day, so the Jul-5 market
+        ticker's trading date has not yet arrived locally — the date-aware gate
+        blocks it because market_date (Jul 5) ≠ current_local_trading_date (Jul 4).
+        """
+        from core.state_machine import is_low_entry_halted_et
+        import datetime as _dt
+        cfg = self._cfg()
+        # Summer: midnight ET = 04:00 UTC (EDT=UTC-4); that's 21:00 PDT (UTC-7).
+        now = _utc(2025, 7, 5, 4, 0)  # 00:00 ET summer = 21:00 PT Jul 4
+        market_date = _dt.date(2025, 7, 5)  # The next-day ticker's market date
+
+        et_halted, _ = is_low_entry_halted_et(cfg, now_utc=now)
+        gate_ok, gate_ctx = is_entry_allowed(
+            "KXLOWTLAX-25JUL05-B60", cfg, now_utc=now, market_date=market_date
+        )
+
+        assert et_halted is False, "ET halt should be lifted at midnight ET"
+        assert gate_ok is False, "Local gate must block: Jul-5 ticker not yet current locally (still Jul-4 21:00 PT)"
+        assert gate_ctx.get("reason") == "market_date_not_current_trading_day"
+        assert gate_ctx["timezone"] == "America/Los_Angeles"
+
+    def test_la_low_blocked_at_0030_et(self):
+        """00:30 ET (= 21:30 PT on prior evening) → ET halt lifted BUT local gate still blocks."""
+        from core.state_machine import is_low_entry_halted_et
+        import datetime as _dt
+        cfg = self._cfg()
+        # Summer: 00:30 ET = 04:30 UTC
+        now = _utc(2025, 7, 5, 4, 30)  # 00:30 ET = 21:30 PT Jul 4
+        market_date = _dt.date(2025, 7, 5)
+
+        et_halted, _ = is_low_entry_halted_et(cfg, now_utc=now)
+        gate_ok, _ = is_entry_allowed(
+            "KXLOWTLAX-25JUL05-B60", cfg, now_utc=now, market_date=market_date
+        )
+
+        assert et_halted is False
+        assert gate_ok is False, "21:30 PT still on Jul-4 local day; Jul-5 ticker not current"
+
+    def test_la_low_blocked_just_before_0100_pt(self):
+        """00:59 PT (= 03:59 ET) → still blocked by local gate."""
+        from core.state_machine import is_low_entry_halted_et
+        cfg = self._cfg()
+        # Summer: 03:59 ET = 07:59 UTC
+        now = _utc(2025, 7, 5, 7, 59)
+
+        et_halted, _ = is_low_entry_halted_et(cfg, now_utc=now)
+        gate_ok, _ = is_entry_allowed("KXLOWTLAX-25JUL05-B60", cfg, now_utc=now)
+
+        assert et_halted is False
+        assert gate_ok is False
+
+    def test_la_low_allowed_at_0100_pt(self):
+        """01:00 PT (= 04:00 ET) → both gates pass → Low entry allowed."""
+        from core.state_machine import is_low_entry_halted_et
+        import datetime as _dt
+        cfg = self._cfg()
+        # Summer: 04:00 ET = 08:00 UTC
+        now = _utc(2025, 7, 5, 8, 0)  # 01:00 PT Jul 5
+        market_date = _dt.date(2025, 7, 5)
+
+        et_halted, _ = is_low_entry_halted_et(cfg, now_utc=now)
+        gate_ok, _ = is_entry_allowed(
+            "KXLOWTLAX-25JUL05-B60", cfg, now_utc=now, market_date=market_date
+        )
+
+        assert et_halted is False
+        assert gate_ok is True, "01:00 PT meets the local threshold and date matches"
+
+
+class TestHighTickerNeverBlockedByGate:
+    """KXHIGH* tickers still return False from is_entry_allowed before threshold.
+
+    is_entry_allowed does not itself discriminate HIGH vs LOW — it gates purely
+    on local time.  The scoping to Low-only is enforced by the call site
+    (_evaluate_watchlist wraps the call in ``if is_low:``).  These tests
+    document the function's own behaviour so it is clear why the call-site
+    guard is required.
+    """
+
+    def _cfg(self):
+        return _make_config(
+            enable_local_settle_gate=True,
+            default_entry_start_local="01:00",
+        )
+
+    def test_high_ticker_before_threshold_returns_false(self):
+        """is_entry_allowed returns False for a KXHIGH ticker before 01:00 local.
+
+        The scoping guard in _evaluate_watchlist prevents this from blocking
+        the actual KXHIGH entry; this test merely confirms the function's
+        time-only logic is consistent for any series prefix.
+        """
+        cfg = self._cfg()
+        # 00:30 ET (summer) = 04:30 UTC: before 01:00 threshold
+        now = _utc(2025, 7, 4, 4, 30)
+        allowed, ctx = is_entry_allowed("KXHIGHNY-25JUL04-T95", cfg, now_utc=now)
+        assert allowed is False
+        assert ctx["timezone"] == "America/New_York"
+
+    def test_high_ticker_after_threshold_returns_true(self):
+        """is_entry_allowed returns True for a KXHIGH ticker after 01:00 local."""
+        cfg = self._cfg()
+        # 02:00 ET (summer) = 06:00 UTC: after 01:00 threshold
+        now = _utc(2025, 7, 4, 6, 0)
+        allowed, _ = is_entry_allowed("KXHIGHNY-25JUL04-T95", cfg, now_utc=now)
+        assert allowed is True
