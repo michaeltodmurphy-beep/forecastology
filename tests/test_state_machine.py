@@ -6764,3 +6764,212 @@ async def test_seed_rest_price_logs_warning_when_no_price_available(monkeypatch)
     assert any(ev == "strategy.restored_position_no_price" for ev, _ in logged), (
         "Expected strategy.restored_position_no_price warning when REST has no data"
     )
+
+
+# ---------------------------------------------------------------------------
+# NWS gate enforcement at final order-submission boundary (_execute_entry)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_execute_entry_blocks_high_when_final_gate_closed(monkeypatch):
+    """HIGH entry is blocked at _execute_entry when NWS gate is closed even if
+    upstream watchlist logic would otherwise allow it."""
+    import nws.gate as nws_gate
+    logged = capture_logs(monkeypatch)
+    executor = FakeExecutor()
+    executor.buy_success = True
+
+    strategy = make_strategy(monkeypatch, executor=executor)
+    # Override gate AFTER make_strategy so our patch is the active one.
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_a, **_kw: False)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTLV-26AUG01-B114.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTLV",
+        bracket_label="lv high",
+        phase=Phase.MONITORING,
+    )
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=73, quantity=5, order_count=1)]),
+    )
+
+    # No order should have been submitted.
+    assert executor.orders == [], "buy_yes must not be called when final gate is closed"
+    # Phase should be reset so the bracket can be re-evaluated next cycle.
+    assert bracket.phase == Phase.MONITORING
+    # A structured block log event must be emitted.
+    block_events = [ev for ev, ctx in logged if ev == "entry.blocked_nws_gate_final"]
+    assert block_events, "entry.blocked_nws_gate_final must be logged"
+    block_ctx = next(ctx for ev, ctx in logged if ev == "entry.blocked_nws_gate_final")
+    assert block_ctx["ticker"] == "KXHIGHTLV-26AUG01-B114.5"
+    assert block_ctx["station_code"] == "KLAS"
+    assert block_ctx["decision_reason"] in {"gate_closed", "gate_error"}
+    assert block_ctx["is_high"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_allows_when_final_gate_open(monkeypatch):
+    """Entry proceeds when the final NWS gate check returns open."""
+    import nws.gate as nws_gate
+    logged = capture_logs(monkeypatch)
+    executor = FakeExecutor()
+    executor.buy_success = True
+
+    strategy = make_strategy(monkeypatch, executor=executor)
+    # make_strategy already sets is_trading_gate_open → True; patch again to be explicit.
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_a, **_kw: True)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTLV-26AUG01-B114.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTLV",
+        bracket_label="lv high open",
+        phase=Phase.MONITORING,
+    )
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=73, quantity=5, order_count=1)]),
+    )
+
+    # Order should have been submitted.
+    assert len(executor.orders) == 1, "buy_yes must be called when final gate is open"
+    assert bracket.phase == Phase.HOLDING
+    # Allow log event must be emitted.
+    allow_events = [ev for ev, ctx in logged if ev == "entry.allowed_nws_gate_final"]
+    assert allow_events, "entry.allowed_nws_gate_final must be logged"
+    allow_ctx = next(ctx for ev, ctx in logged if ev == "entry.allowed_nws_gate_final")
+    assert allow_ctx["ticker"] == "KXHIGHTLV-26AUG01-B114.5"
+    assert allow_ctx["station_code"] == "KLAS"
+    assert allow_ctx["gate_open"] is True
+    assert allow_ctx["decision_reason"] == "gate_open"
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_blocks_on_gate_evaluation_exception(monkeypatch):
+    """If is_trading_gate_open raises any exception, entry is blocked (fail closed)."""
+    import nws.gate as nws_gate
+    logged = capture_logs(monkeypatch)
+    executor = FakeExecutor()
+    executor.buy_success = True
+
+    strategy = make_strategy(monkeypatch, executor=executor)
+    # Override AFTER make_strategy so exception-raising version is active.
+    def _raise_exc(*_a, **_kw):
+        raise RuntimeError("DB connection lost")
+
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", _raise_exc)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTLV-26AUG01-B114.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTLV",
+        bracket_label="lv high error",
+        phase=Phase.MONITORING,
+    )
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=73, quantity=5, order_count=1)]),
+    )
+
+    assert executor.orders == [], "buy_yes must not be called when gate raises"
+    assert bracket.phase == Phase.MONITORING
+    block_events = [ev for ev, ctx in logged if ev == "entry.blocked_nws_gate_final"]
+    assert block_events, "entry.blocked_nws_gate_final must be logged on error"
+    block_ctx = next(ctx for ev, ctx in logged if ev == "entry.blocked_nws_gate_final")
+    assert block_ctx["decision_reason"] == "gate_error"
+    assert block_ctx["error_class"] == "RuntimeError"
+    assert "DB connection lost" in block_ctx["error_message"]
+    assert block_ctx["ticker"] == "KXHIGHTLV-26AUG01-B114.5"
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_final_gate_does_not_affect_exits(monkeypatch):
+    """Sell (exit) orders go through sell_yes, not _execute_entry, so the
+    NWS gate at the entry boundary never blocks position management."""
+    import nws.gate as nws_gate
+
+    executor = FakeExecutor()
+    executor.sell_success = True
+    strategy = make_strategy(monkeypatch, executor=executor)
+    # Even with gate always closed, sell paths must not be affected.
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_a, **_kw: False)
+
+    # Directly call sell_yes — this is the exit path used by SL and panic-flatten.
+    from core.types import OrderRequest, OrderSide
+    order = OrderRequest(
+        market_ticker="KXHIGHTLV-26AUG01-B114.5",
+        side=OrderSide.BUY_YES,
+        price=50,
+        quantity=5,
+    )
+    result = await executor.sell_yes(order)
+
+    assert result.success is True, "sell_yes must not be blocked by the NWS entry gate"
+    assert len(executor.orders) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_gate_log_includes_ticker_and_reason_block(monkeypatch):
+    """Block log event includes ticker and decision_reason fields."""
+    import nws.gate as nws_gate
+    logged = capture_logs(monkeypatch)
+
+    strategy = make_strategy(monkeypatch)
+    # Override AFTER make_strategy.
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_a, **_kw: False)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTLV-26AUG01-B75.5",
+        event_ticker="EVT1",
+        series_ticker="KXLOWTLV",
+        bracket_label="lv low block",
+        phase=Phase.MONITORING,
+    )
+
+    await strategy._execute_entry(bracket)
+
+    block_ctx = next(
+        (ctx for ev, ctx in logged if ev == "entry.blocked_nws_gate_final"),
+        None,
+    )
+    assert block_ctx is not None
+    assert "ticker" in block_ctx
+    assert "decision_reason" in block_ctx
+    assert block_ctx["ticker"] == "KXLOWTLV-26AUG01-B75.5"
+    assert block_ctx["station_code"] == "KLAS"
+    assert block_ctx["is_low"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_gate_log_includes_ticker_and_reason_allow(monkeypatch):
+    """Allow log event includes ticker and decision_reason fields."""
+    import nws.gate as nws_gate
+    logged = capture_logs(monkeypatch)
+    executor = FakeExecutor()
+    executor.buy_success = True
+
+    strategy = make_strategy(monkeypatch, executor=executor)
+    # make_strategy sets is_trading_gate_open → True; patch again to be explicit.
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_a, **_kw: True)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTLV-26AUG01-B75.5",
+        event_ticker="EVT1",
+        series_ticker="KXLOWTLV",
+        bracket_label="lv low allow",
+        phase=Phase.MONITORING,
+    )
+
+    await strategy._execute_entry(
+        bracket,
+        ob=OrderBook(yes_asks=[OrderBookLevel(price=60, quantity=5, order_count=1)]),
+    )
+
+    allow_ctx = next(
+        (ctx for ev, ctx in logged if ev == "entry.allowed_nws_gate_final"),
+        None,
+    )
+    assert allow_ctx is not None
+    assert allow_ctx["ticker"] == "KXLOWTLV-26AUG01-B75.5"
+    assert allow_ctx["decision_reason"] == "gate_open"
+    assert len(executor.orders) == 1

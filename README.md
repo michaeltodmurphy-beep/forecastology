@@ -657,7 +657,26 @@ from nws.scheduler import run_forecast_update_job
 run_forecast_update_job()
 ```
 
-### NWS API Flow
+### NWS Gate Enforcement Architecture
+
+The NWS temperature-window gate is enforced at **two complementary layers**:
+
+1. **Watchlist screening** (`_evaluate_watchlist` in `core/state_machine.py`) — evaluates the gate for each candidate entry during every watchlist cycle using a 30-second in-memory cache to reduce DB load.  Entries that fail the gate here are skipped for that cycle.
+
+2. **Final order-submission boundary** (`_execute_entry` in `core/state_machine.py`) — **the authoritative, non-bypassable layer**.  Immediately before calling `executor.buy_yes`, `_execute_entry` performs a fresh, uncached `is_trading_gate_open` check for every new weather entry order regardless of what upstream logic decided.  If the gate is closed, or if the check raises any exception, the order is blocked and the bracket phase is reset to `MONITORING` so it can be re-evaluated next cycle.  This layer applies to both `KXHIGH*` and `KXLOW*` entries.
+
+**Exit paths are unaffected**: stop-loss execution, panic-flatten, reconciliation, and all sell paths use `_execute_stop_loss` / `sell_yes` directly and never call `_execute_entry`.
+
+**Log events emitted at the final boundary:**
+
+| Event | When |
+|---|---|
+| `entry.allowed_nws_gate_final` | Gate is open — order proceeds |
+| `entry.blocked_nws_gate_final` | Gate is closed or evaluation error — order blocked |
+
+Both events include: `ticker`, `station_code`, `is_high`, `is_low`, `now_utc`, `gate_open`, `decision_reason`, `market_date`.  Error events additionally include `error_class` and `error_message`.
+
+
 
 1. `GET /stations/{ICAO}` → lat/lon coordinates (cached per process)
 2. `GET /points/{lat},{lon}` → `forecastHourly` URL **and `timeZone`** (IANA name, cached per process)
