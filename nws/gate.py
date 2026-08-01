@@ -24,7 +24,7 @@ from nws.config import (
     GATE_LOW_AFTER,
     GATE_LOW_BEFORE,
 )
-from nws.client import _station_cache, get_trading_day_window
+from nws.client import NWSClient, _station_cache, get_trading_day_window
 from nws.db import get_session
 
 logger = logging.getLogger("forecastology.nws.gate")
@@ -47,6 +47,25 @@ def _latest_forecast(session, station_code: str) -> Optional[StationForecast]:
     )
 
 
+def _forecast_for_day(
+    session, station_code: str, forecast_date_utc: datetime
+) -> Optional[StationForecast]:
+    """Return the forecast row keyed to *forecast_date_utc* for *station_code*.
+
+    Queries by the exact ``(station_code, forecast_date_utc)`` key rather than
+    selecting the latest row.  This avoids silently substituting a mismatched
+    trading-day row.
+    """
+    return (
+        session.query(StationForecast)
+        .filter(
+            StationForecast.station_code == station_code,
+            StationForecast.forecast_date_utc == forecast_date_utc,
+        )
+        .first()
+    )
+
+
 def _forecast_date_utc_for_local_date(trading_date_local: date) -> datetime:
     """Return UTC midnight used to key a station-local trading date in storage."""
     return datetime(
@@ -57,59 +76,122 @@ def _forecast_date_utc_for_local_date(trading_date_local: date) -> datetime:
     )
 
 
+def _fetch_station_tz_from_api(station_code: str) -> Optional[str]:
+    """Best-effort NWS API call to resolve station timezone.
+
+    Uses a fast-fail configuration (no retries, 2 s socket timeout) so the
+    gate evaluation loop is not blocked by a slow or unreachable NWS endpoint.
+    Populates ``_station_cache`` as a side-effect on success.
+
+    Returns the IANA timezone name, or ``None`` on any failure.
+    """
+    try:
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        client = NWSClient(timeout=2)
+        fast_adapter = HTTPAdapter(
+            max_retries=Retry(total=0, raise_on_status=False)
+        )
+        client.session.mount("https://", fast_adapter)
+        client.session.mount("http://", fast_adapter)
+        _lat, _lon, _hourly_url, tz_name = client._get_station_metadata(station_code)
+        return tz_name
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "gate.tz_fetch_failed station=%s error=%r", station_code, exc
+        )
+        return None
+
+
+def _resolve_station_tz(station_code: str) -> tuple[str, str]:
+    """Resolve the IANA timezone name for *station_code*.
+
+    Resolution order:
+
+    1. ``_station_cache`` — populated by the NWS scheduler during normal
+       operation; fastest path and preferred.
+    2. Live NWS API fetch via :func:`_fetch_station_tz_from_api` — used when
+       the cache is cold (e.g., process just started).  Fails fast so it does
+       not block gate evaluation.
+    3. ``"UTC"`` as last resort — an explicit warning is logged so operators
+       can diagnose cold-cache false negatives.
+
+    Returns:
+        ``(tz_name, source)`` where *source* is one of ``"cache"``,
+        ``"fetched"``, or ``"fallback_utc"``.
+    """
+    cached = _station_cache.get(station_code)
+    if cached is not None:
+        _lat, _lon, _hourly_url, tz_name = cached
+        return tz_name, "cache"
+
+    tz_name = _fetch_station_tz_from_api(station_code)
+    if tz_name is not None:
+        logger.info(
+            "gate.tz_resolved station=%s tz=%s source=fetched",
+            station_code,
+            tz_name,
+        )
+        return tz_name, "fetched"
+
+    logger.warning(
+        "gate.tz_resolve_failed station=%s — cache cold and NWS fetch failed; "
+        "falling back to UTC-day assumption (may cause false negatives for "
+        "non-UTC stations near UTC midnight)",
+        station_code,
+    )
+    return "UTC", "fallback_utc"
+
+
 def _expected_forecast_date_utc(
     station_code: str, now_utc: datetime
 ) -> tuple[datetime, str]:
-    """Return the expected stored forecast_date_utc for the active trading day."""
-    cached_station = _station_cache.get(station_code)
-    if cached_station is not None:
-        _lat, _lon, _hourly_url, tz_name = cached_station
-        try:
-            station_tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
-            logger.warning(
-                "gate.invalid_station_timezone station=%s tz=%s — falling back to UTC day",
-                station_code,
-                tz_name,
-            )
-        else:
-            window = get_trading_day_window(station_code, station_tz, now_utc)
-            return _forecast_date_utc_for_local_date(window.trading_date_local), tz_name
-    return datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc), "UTC"
+    """Return the expected stored ``forecast_date_utc`` for the active trading day.
 
+    Uses :func:`_resolve_station_tz` so the result is correct even when
+    ``_station_cache`` is cold.
 
-def _forecast_day_matches(
-    forecast_date_utc: datetime, station_code: str, now_utc: datetime
-) -> tuple[bool, datetime, datetime, str]:
-    """Return whether *forecast_date_utc* matches the station's current trading day."""
-    forecast_date_utc = _ensure_utc(forecast_date_utc)
-    expected_forecast_date_utc, expected_tz = _expected_forecast_date_utc(
-        station_code, now_utc
-    )
+    Returns:
+        ``(forecast_date_utc, tz_description)`` where *tz_description* includes
+        both the timezone name and the resolution source.
+    """
+    tz_name, tz_source = _resolve_station_tz(station_code)
+    try:
+        station_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "gate.invalid_station_timezone station=%s tz=%s source=%s — falling back to UTC day",
+            station_code,
+            tz_name,
+            tz_source,
+        )
+        return (
+            datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc),
+            f"UTC (invalid_tz/{tz_source})",
+        )
+    window = get_trading_day_window(station_code, station_tz, now_utc)
     return (
-        forecast_date_utc == expected_forecast_date_utc,
-        forecast_date_utc,
-        expected_forecast_date_utc,
-        expected_tz,
+        _forecast_date_utc_for_local_date(window.trading_date_local),
+        f"{tz_name} ({tz_source})",
     )
 
 
 def _trading_day_window_bounds(station_code: str, now_utc: datetime) -> tuple[datetime, datetime]:
-    """Return UTC [start, end) bounds for the station's active trading day."""
-    cached_station = _station_cache.get(station_code)
-    if cached_station is not None:
-        _lat, _lon, _hourly_url, tz_name = cached_station
-        try:
-            station_tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
-            logger.warning(
-                "gate.invalid_station_timezone station=%s tz=%s — using UTC-day window",
-                station_code,
-                tz_name,
-            )
-        else:
-            window = get_trading_day_window(station_code, station_tz, now_utc)
-            return window.utc_start, window.utc_end_exclusive
+    """Return UTC ``[start, end)`` bounds for the station's active trading day."""
+    tz_name, tz_source = _resolve_station_tz(station_code)
+    try:
+        station_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "gate.invalid_station_timezone station=%s tz=%s source=%s — using UTC-day window",
+            station_code,
+            tz_name,
+            tz_source,
+        )
+    else:
+        window = get_trading_day_window(station_code, station_tz, now_utc)
+        return window.utc_start, window.utc_end_exclusive
 
     utc_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
     return utc_start, utc_start + timedelta(days=1)
@@ -118,31 +200,30 @@ def _trading_day_window_bounds(station_code: str, now_utc: datetime) -> tuple[da
 def _trading_day_window_for_date(
     station_code: str, market_date: date
 ) -> tuple[datetime, datetime]:
-    """Return UTC [start, end) bounds for *market_date*'s trading window.
+    """Return UTC ``[start, end)`` bounds for *market_date*'s trading window.
 
-    Unlike ``_trading_day_window_bounds`` (which derives the trading day from
-    the current time), this helper is keyed to a specific *market_date* so
-    that the gate can verify a ticker's own trading window regardless of
-    the current wall-clock time.
+    Unlike :func:`_trading_day_window_bounds` (which derives the trading day
+    from the current time), this helper is keyed to a specific *market_date*
+    so the gate can verify a ticker's own trading window regardless of the
+    current wall-clock time.
     """
-    cached_station = _station_cache.get(station_code)
-    if cached_station is not None:
-        _lat, _lon, _hourly_url, tz_name = cached_station
-        try:
-            station_tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
-            logger.warning(
-                "gate.invalid_station_timezone station=%s tz=%s — using UTC-day window",
-                station_code,
-                tz_name,
-            )
+    tz_name, tz_source = _resolve_station_tz(station_code)
+    try:
+        station_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "gate.invalid_station_timezone station=%s tz=%s source=%s — using UTC-day window",
+            station_code,
+            tz_name,
+            tz_source,
+        )
+    else:
+        if station_code == "KPHX":
+            local_start = datetime.combine(market_date, time(0, 0), tzinfo=station_tz)
         else:
-            if station_code == "KPHX":
-                local_start = datetime.combine(market_date, time(0, 0), tzinfo=station_tz)
-            else:
-                local_start = datetime.combine(market_date, time(1, 0), tzinfo=station_tz)
-            local_end = local_start + timedelta(days=1)
-            return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+            local_start = datetime.combine(market_date, time(1, 0), tzinfo=station_tz)
+        local_end = local_start + timedelta(days=1)
+        return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
     utc_start = datetime(market_date.year, market_date.month, market_date.day, tzinfo=timezone.utc)
     return utc_start, utc_start + timedelta(days=1)
@@ -165,12 +246,27 @@ def has_forecast(
     Returns ``False`` on any DB error (treating it the same as no data).
     """
     now = _ensure_utc(current_utc_time or datetime.now(timezone.utc))
+
+    if market_date is not None:
+        expected_forecast_date_utc = _forecast_date_utc_for_local_date(market_date)
+        expected_tz = "market_date"
+    else:
+        expected_forecast_date_utc, expected_tz = _expected_forecast_date_utc(station_code, now)
+
     try:
         with get_session() as session:
-            forecast = _latest_forecast(session, station_code)
+            forecast = _forecast_for_day(session, station_code, expected_forecast_date_utc)
             if forecast is None:
+                logger.debug(
+                    "gate.has_forecast_check station=%s tz=%s expected_forecast_date_utc=%s "
+                    "now_utc=%s has_current_forecast=False (row not found for expected day)",
+                    station_code,
+                    expected_tz,
+                    expected_forecast_date_utc.isoformat(),
+                    now.isoformat(),
+                )
                 return False
-            forecast_date_utc = forecast.forecast_date_utc
+            forecast_date_utc = _ensure_utc(forecast.forecast_date_utc)
             high_time_utc = forecast.high_time_utc
             low_time_utc = forecast.low_time_utc
     except SQLAlchemyError:
@@ -179,30 +275,19 @@ def has_forecast(
         )
         return False
 
-    if market_date is not None:
-        expected_forecast_date_utc = _forecast_date_utc_for_local_date(market_date)
-        forecast_date_utc_aware = _ensure_utc(forecast_date_utc)
-        matches = forecast_date_utc_aware == expected_forecast_date_utc
-        expected_tz = "market_date"
-        forecast_date_utc_log = forecast_date_utc_aware
-    else:
-        matches, forecast_date_utc_log, expected_forecast_date_utc, expected_tz = (
-            _forecast_day_matches(forecast_date_utc, station_code, now)
-        )
     logger.debug(
         "gate.has_forecast_check station=%s tz=%s forecast_date_utc=%s "
         "expected_forecast_date_utc=%s high_time_utc=%s low_time_utc=%s now_utc=%s "
-        "has_current_forecast=%s",
+        "has_current_forecast=True",
         station_code,
         expected_tz,
-        forecast_date_utc_log.isoformat(),
+        forecast_date_utc.isoformat(),
         expected_forecast_date_utc.isoformat(),
         high_time_utc.isoformat() if high_time_utc else None,
         low_time_utc.isoformat() if low_time_utc else None,
         now.isoformat(),
-        matches,
     )
-    return matches
+    return True
 
 
 def is_trading_gate_open(
@@ -237,46 +322,44 @@ def is_trading_gate_open(
     """
     now = _ensure_utc(current_utc_time)
 
+    # Determine the expected forecast-day key deterministically.
+    if market_date is not None:
+        expected_forecast_date_utc = _forecast_date_utc_for_local_date(market_date)
+        expected_tz = "market_date"
+    else:
+        expected_forecast_date_utc, expected_tz = _expected_forecast_date_utc(station_code, now)
+
     try:
         with get_session() as session:
-            forecast = _latest_forecast(session, station_code)
+            # Query by the exact expected day; do not silently substitute a
+            # mismatched trading-day row.
+            forecast = _forecast_for_day(session, station_code, expected_forecast_date_utc)
             if forecast is None:
-                logger.warning(
-                    "gate.no_forecast station=%s — gate closed (no data)", station_code
-                )
+                # Diagnostic: log the latest available row so operators can
+                # tell whether this is a stale-data or cold-cache problem.
+                latest = _latest_forecast(session, station_code)
+                if latest is not None:
+                    logger.info(
+                        "gate.expected_day_not_found station=%s tz=%s "
+                        "expected_forecast_date_utc=%s latest_forecast_date_utc=%s "
+                        "now_utc=%s — gate closed (no row for expected trading day)",
+                        station_code,
+                        expected_tz,
+                        expected_forecast_date_utc.isoformat(),
+                        _ensure_utc(latest.forecast_date_utc).isoformat(),
+                        now.isoformat(),
+                    )
+                else:
+                    logger.warning(
+                        "gate.no_forecast station=%s — gate closed (no data)", station_code
+                    )
                 return False
-            forecast_date_utc = forecast.forecast_date_utc
+            forecast_date_utc = _ensure_utc(forecast.forecast_date_utc)
             high_time_utc = forecast.high_time_utc
             low_time_utc = forecast.low_time_utc
     except SQLAlchemyError:
         logger.exception(
             "gate.db_error station=%s — gate closed (fail-safe)", station_code
-        )
-        return False
-
-    if market_date is not None:
-        expected_forecast_date_utc = _forecast_date_utc_for_local_date(market_date)
-        forecast_date_utc_aware = _ensure_utc(forecast_date_utc)
-        matches = forecast_date_utc_aware == expected_forecast_date_utc
-        expected_tz = "market_date"
-        forecast_date_utc = forecast_date_utc_aware
-    else:
-        matches, forecast_date_utc, expected_forecast_date_utc, expected_tz = (
-            _forecast_day_matches(forecast_date_utc, station_code, now)
-        )
-
-    if not matches:
-        logger.info(
-            "gate.stale_forecast station=%s tz=%s forecast_date_utc=%s "
-            "expected_forecast_date_utc=%s high_time_utc=%s low_time_utc=%s now_utc=%s "
-            "— gate closed (stale forecast)",
-            station_code,
-            expected_tz,
-            forecast_date_utc.isoformat(),
-            expected_forecast_date_utc.isoformat(),
-            high_time_utc.isoformat() if high_time_utc else None,
-            low_time_utc.isoformat() if low_time_utc else None,
-            now.isoformat(),
         )
         return False
 
