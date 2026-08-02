@@ -198,8 +198,8 @@ class TemperatureStrategy:
         # multiple brackets in the same series/day from all entering at the same count.
         self._entry_step_seen: set[tuple[str, str, int]] = set()
         # Per-station NWS entry-gate cache:
-        # station -> (computed_monotonic_ts, has_data, gate_open)
-        self._nws_gate_cache: dict[str, tuple[float, bool, bool]] = {}
+        # (station, ticker_type) -> (computed_monotonic_ts, has_data, gate_open)
+        self._nws_gate_cache: dict[tuple[str, str | None], tuple[float, bool, bool]] = {}
         self._nws_gate_cache_refresh_seconds = 30
 
         # Bounded queue for non-blocking trade-log persistence (Change B).
@@ -1843,7 +1843,9 @@ class TemperatureStrategy:
                         from nws.gate import has_forecast, is_trading_gate_open
                         now_utc = datetime.datetime.now(datetime.timezone.utc)
                         cache_now = time.monotonic()
-                        cache_entry = self._nws_gate_cache.get(_station)
+                        _ticker_type = "HIGH" if is_high else ("LOW" if is_low else None)
+                        _cache_key = (_station, _ticker_type)
+                        cache_entry = self._nws_gate_cache.get(_cache_key)
                         if (
                             cache_entry is None
                             or cache_now - cache_entry[0] >= self._nws_gate_cache_refresh_seconds
@@ -1858,8 +1860,9 @@ class TemperatureStrategy:
                                     _station,
                                     now_utc,
                                     _market_date,
+                                    _ticker_type,
                                 )
-                            self._nws_gate_cache[_station] = (cache_now, _has_data, _gate_open)
+                            self._nws_gate_cache[_cache_key] = (cache_now, _has_data, _gate_open)
                         else:
                             _, _has_data, _gate_open = cache_entry
                         if not _has_data:
@@ -2026,9 +2029,11 @@ class TemperatureStrategy:
                 _gate_market_date = _parse_date_prefix(_gate_date_prefix)
             try:
                 import nws.gate as _nws_gate_mod
+                _gate_ticker_type = "HIGH" if _is_high else ("LOW" if _is_low else None)
                 _gate_open = await asyncio.to_thread(
                     _nws_gate_mod.is_trading_gate_open,
                     _gate_station, _gate_now_utc, _gate_market_date,
+                    _gate_ticker_type,
                 )
                 if _gate_open:
                     logger.info(
@@ -2055,6 +2060,7 @@ class TemperatureStrategy:
                         market_date=_gate_market_date.isoformat() if _gate_market_date else None,
                     )
                     bracket.phase = Phase.MONITORING
+                    bracket.crossed_buy = False
                     return
             except Exception as _gate_exc:  # noqa: BLE001
                 logger.warning(
@@ -2071,6 +2077,7 @@ class TemperatureStrategy:
                     market_date=_gate_market_date.isoformat() if _gate_market_date else None,
                 )
                 bracket.phase = Phase.MONITORING
+                bracket.crossed_buy = False
                 return
         # ────────────────────────────────────────────────────────────────────
 

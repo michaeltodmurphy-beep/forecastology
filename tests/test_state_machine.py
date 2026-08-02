@@ -5918,7 +5918,7 @@ async def test_nws_temp_gate_uses_to_thread_and_blocks_entry(monkeypatch):
         assert now_utc.tzinfo is not None
         return True
 
-    def fake_is_gate_open(station, now_utc, market_date=None):
+    def fake_is_gate_open(station, now_utc, market_date=None, ticker_type=None):
         gate_calls["count"] += 1
         assert station == "KBOS"
         assert now_utc.tzinfo is not None
@@ -5968,7 +5968,7 @@ async def test_nws_temp_gate_cache_reuses_station_result_within_ttl(monkeypatch)
         has_calls["count"] += 1
         return True
 
-    def fake_is_gate_open(_station, _now_utc, _market_date=None):
+    def fake_is_gate_open(_station, _now_utc, _market_date=None, _ticker_type=None):
         gate_calls["count"] += 1
         return True
 
@@ -5987,8 +5987,10 @@ async def test_nws_temp_gate_cache_reuses_station_result_within_ttl(monkeypatch)
     strategy.brackets[t2].phase = Phase.MONITORING
     await strategy._evaluate_watchlist()
 
-    assert has_calls["count"] == 1
-    assert gate_calls["count"] == 1
+    # t1 (LOW) and t2 (HIGH) now use separate cache keys (station, ticker_type),
+    # so each direction is cached independently: 2 calls on first run, 0 on second.
+    assert has_calls["count"] == 2
+    assert gate_calls["count"] == 2
 
 
 @pytest.mark.asyncio
@@ -6973,3 +6975,66 @@ async def test_execute_entry_gate_log_includes_ticker_and_reason_allow(monkeypat
     assert allow_ctx["ticker"] == "KXLOWTLV-26AUG01-B75.5"
     assert allow_ctx["decision_reason"] == "gate_open"
     assert len(executor.orders) == 1
+
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_final_gate_block_resets_crossed_buy(monkeypatch):
+    """When final NWS gate blocks, crossed_buy must be reset to False.
+
+    This ensures the bracket is eligible for re-evaluation in the next cycle
+    rather than staying stuck with crossed_buy=True.
+    """
+    import nws.gate as nws_gate
+
+    strategy = make_strategy(monkeypatch)
+    # Force gate CLOSED after make_strategy (which sets it True).
+    monkeypatch.setattr(nws_gate, "is_trading_gate_open", lambda *_a, **_kw: False)
+
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTLV-26AUG01-B114.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTLV",
+        bracket_label="lv high gate block",
+        phase=Phase.MONITORING,
+        crossed_buy=True,
+    )
+
+    await strategy._execute_entry(bracket)
+
+    assert bracket.phase == Phase.MONITORING
+    assert bracket.crossed_buy is False, (
+        "crossed_buy must be reset to False when final gate blocks"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_entry_final_gate_exception_resets_crossed_buy(monkeypatch):
+    """When final NWS gate raises, crossed_buy must be reset to False.
+
+    Ensures fail-closed behavior also clears crossed_buy for re-evaluation.
+    """
+    import nws.gate as nws_gate
+
+    strategy = make_strategy(monkeypatch)
+    monkeypatch.setattr(
+        nws_gate,
+        "is_trading_gate_open",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("gate exploded")),
+    )
+
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTLV-26AUG01-B114.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTLV",
+        bracket_label="lv high gate error",
+        phase=Phase.MONITORING,
+        crossed_buy=True,
+    )
+
+    await strategy._execute_entry(bracket)
+
+    assert bracket.phase == Phase.MONITORING
+    assert bracket.crossed_buy is False, (
+        "crossed_buy must be reset to False when final gate raises"
+    )

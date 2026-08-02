@@ -294,10 +294,17 @@ def is_trading_gate_open(
     station_code: str,
     current_utc_time: datetime,
     market_date: date | None = None,
+    ticker_type: str | None = None,
 ) -> bool:
     """Return ``True`` if trading is currently allowed for *station_code*.
 
-    The gate is open when *current_utc_time* falls within either:
+    When *ticker_type* is supplied the gate is direction-aware:
+
+    - ``"HIGH"`` → gate open only when inside the high-temperature window.
+    - ``"LOW"``  → gate open only when inside the low-temperature window.
+    - ``None``   → backward-compatible: open when inside *either* window.
+
+    The windows are:
 
     - ``[low_time − GATE_LOW_BEFORE, low_time + GATE_LOW_AFTER]``
     - ``[high_time − GATE_HIGH_BEFORE, high_time + GATE_HIGH_AFTER]``
@@ -316,6 +323,8 @@ def is_trading_gate_open(
         market_date: Optional ticker market date.  When supplied the gate
             uses this date's trading window instead of deriving it from
             *current_utc_time*.
+        ticker_type: Optional direction hint — ``"HIGH"``, ``"LOW"``, or
+            ``None`` for the backward-compatible combined check.
 
     Returns:
         ``True`` if the gate is open, ``False`` otherwise.
@@ -424,12 +433,17 @@ def is_trading_gate_open(
         )
         return False
 
-    gate_open = in_low_window or in_high_window
+    if ticker_type == "HIGH":
+        gate_open = in_high_window
+    elif ticker_type == "LOW":
+        gate_open = in_low_window
+    else:
+        gate_open = in_low_window or in_high_window
     logger.debug(
         "gate.window_eval station=%s tz=%s forecast_date_utc=%s "
         "expected_forecast_date_utc=%s high_time_utc=%s low_time_utc=%s "
         "high_open=%s high_close=%s low_open=%s low_close=%s now_utc=%s "
-        "in_low=%s in_high=%s open=%s",
+        "ticker_type=%s in_low=%s in_high=%s open=%s",
         station_code,
         expected_tz,
         forecast_date_utc.isoformat(),
@@ -441,6 +455,7 @@ def is_trading_gate_open(
         low_open.isoformat() if low_open else None,
         low_close.isoformat() if low_close else None,
         now.isoformat(),
+        ticker_type,
         in_low_window,
         in_high_window,
         gate_open,
