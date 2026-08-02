@@ -122,6 +122,14 @@ def is_low_entry_halted_et(config: "AppConfig", now_utc: Optional[datetime.datet
     return halted, ctx
 
 
+def is_low_10pm_ask_eligible(config: "AppConfig", yes_ask: Optional[int]) -> bool:
+    """Return True when the Low 10 PM rule should apply for the current ask."""
+    if yes_ask is None:
+        return False
+    threshold = int(getattr(config, "low_ticker_10pm_max_ask", 93))
+    return yes_ask < threshold
+
+
 def is_past_closeout_time_et(config: "AppConfig", now_utc: Optional[datetime.datetime] = None) -> tuple[bool, datetime.date]:
     """Return (past_closeout_time, et_date) for the Low-ticker 22:00 ET close-out gate."""
     if now_utc is None:
@@ -1818,10 +1826,12 @@ class TemperatureStrategy:
                 # --- Low-ticker Eastern-time entry halt gate (22:00 ET) ---
                 if is_low:
                     _halted, _halt_ctx = is_low_entry_halted_et(self.config)
-                    if _halted:
+                    if _halted and is_low_10pm_ask_eligible(self.config, yes_ask):
                         logger.info(
                             "entry.blocked_low_after_2200_et",
                             ticker=ticker,
+                            yes_ask=yes_ask,
+                            low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
                             **_halt_ctx,
                         )
                         continue
@@ -3484,10 +3494,40 @@ class TemperatureStrategy:
                         reason="no_open_low_positions")
             return
 
-        logger.info("lowticker.daily_closeout_start", tickers=low_tickers,
-                    count=len(low_tickers))
-        closed = 0
+        eligible_low_tickers = []
         for ticker in low_tickers:
+            yes_ask = None
+            quote = self.cache.get_quote(ticker)
+            if quote is not None:
+                _, yes_ask = quote
+            if yes_ask is None:
+                rest_data = await self._fetch_market_data_via_rest(ticker)
+                if rest_data:
+                    yes_ask = rest_data.get("yes_ask")
+
+            if is_low_10pm_ask_eligible(self.config, yes_ask):
+                eligible_low_tickers.append(ticker)
+            else:
+                logger.info(
+                    "lowticker.daily_closeout_ticker_skipped_threshold",
+                    ticker=ticker,
+                    yes_ask=yes_ask,
+                    low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
+                )
+
+        if not eligible_low_tickers:
+            logger.info(
+                "lowticker.daily_closeout_complete",
+                closed=0,
+                reason="no_open_low_positions_below_ask_threshold",
+                low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
+            )
+            return
+
+        logger.info("lowticker.daily_closeout_start", tickers=eligible_low_tickers,
+                    count=len(eligible_low_tickers))
+        closed = 0
+        for ticker in eligible_low_tickers:
             bracket = self.active_positions.get(ticker)
             if bracket is None:
                 continue
@@ -3499,7 +3539,7 @@ class TemperatureStrategy:
                 logger.error("lowticker.daily_closeout_ticker_error",
                              ticker=ticker, error=str(e), exc_info=True)
         logger.info("lowticker.daily_closeout_complete", closed=closed,
-                    total=len(low_tickers))
+                    total=len(eligible_low_tickers))
 
     async def _low_ticker_closeout_loop(self) -> None:
         """Scheduled loop that triggers the 22:00 ET Low-ticker close-out once per ET day.

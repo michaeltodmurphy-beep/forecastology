@@ -606,8 +606,13 @@ def test_low_entry_halted_et_dst_transition_fall_back():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_evaluate_watchlist_blocks_low_entry_after_2200_et(monkeypatch):
-    """After 22:00 ET, a KXLOW bracket meeting all other conditions is NOT entered."""
+@pytest.mark.parametrize("yes_ask, expected_blocked", [
+    (92, True),
+    (93, False),
+    (94, False),
+])
+async def test_evaluate_watchlist_low_entry_halt_threshold_after_2200_et(monkeypatch, yes_ask, expected_blocked):
+    """After 22:00 ET, Low halt applies only when ask is strictly below threshold."""
     import core.state_machine as sm
 
     info_logged = []
@@ -619,8 +624,11 @@ async def test_evaluate_watchlist_blocks_low_entry_after_2200_et(monkeypatch):
         initial_contract_count=4,
         hedge_max_factor=2,
     )
+    strategy.executor.buy_success = True
     strategy.config.low_ticker_entry_halt_enabled = True
     strategy.config.low_ticker_entry_halt_time_et = "22:00"
+    strategy.config.low_ticker_10pm_max_ask = 93
+    strategy.config.spread_monitor_price = 99
 
     ticker = "KXLOWTLAX-26JUL30-B60.5"
     bracket = MarketBracket(
@@ -639,16 +647,18 @@ async def test_evaluate_watchlist_blocks_low_entry_after_2200_et(monkeypatch):
                         lambda cfg, **__: (True, {"now_et": "22:01:00", "halt_time_et": "22:00"}))
 
     # Feed a price that would normally trigger a buy.
-    strategy.cache.update_quote(ticker, yes_bid=80, yes_ask=83)
+    strategy.cache.update_quote(ticker, yes_bid=90, yes_ask=yes_ask)
 
     await strategy._evaluate_watchlist()
 
-    # No buy orders placed.
-    assert strategy.executor.orders == []
-    # Must log the ET halt event.
-    assert any(ev == "entry.blocked_low_after_2200_et" for ev, _ in info_logged), (
-        "Expected entry.blocked_low_after_2200_et to be logged"
-    )
+    if expected_blocked:
+        assert strategy.executor.orders == []
+        assert any(ev == "entry.blocked_low_after_2200_et" for ev, _ in info_logged), (
+            "Expected entry.blocked_low_after_2200_et to be logged"
+        )
+    else:
+        assert len(strategy.executor.orders) == 1
+        assert not any(ev == "entry.blocked_low_after_2200_et" for ev, _ in info_logged)
 
 
 @pytest.mark.asyncio
@@ -761,6 +771,8 @@ async def test_run_low_ticker_closeout_flattens_only_low(monkeypatch):
     strategy.brackets[high_ticker] = high_bracket
     strategy._app_owned_qty[low_ticker] = 4
     strategy._app_owned_qty[high_ticker] = 4
+    strategy.cache.update_quote(low_ticker, yes_bid=80, yes_ask=92)
+    strategy.cache.update_quote(high_ticker, yes_bid=80, yes_ask=95)
 
     stop_loss_calls = []
 
@@ -802,6 +814,7 @@ async def test_run_low_ticker_closeout_respects_manage_external_false(monkeypatc
     strategy.brackets[low_ticker] = low_bracket
     # No app-owned qty — ownership guard in _execute_stop_loss will skip it.
     strategy._app_owned_qty[low_ticker] = 0
+    strategy.cache.update_quote(low_ticker, yes_bid=80, yes_ask=92)
 
     stop_loss_calls = []
 
@@ -815,6 +828,49 @@ async def test_run_low_ticker_closeout_respects_manage_external_false(monkeypatc
 
     # _execute_stop_loss is invoked; it will skip internally due to manage_external=False.
     assert low_ticker in stop_loss_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yes_ask, expected_closed", [
+    (92, True),
+    (93, False),
+    (94, False),
+])
+async def test_run_low_ticker_closeout_applies_only_below_ask_threshold(monkeypatch, yes_ask, expected_closed):
+    strategy = make_strategy(monkeypatch)
+    strategy._reconciliation_complete = True
+    strategy.config.low_ticker_10pm_max_ask = 93
+
+    low_ticker = "KXLOWTLAX-26JUL30-B60.5"
+    low_bracket = MarketBracket(
+        market_ticker=low_ticker,
+        event_ticker="KXLOWTLAX-26JUL30",
+        series_ticker="KXLOWTLAX",
+        bracket_label="B60.5",
+        phase=Phase.HOLDING,
+        falling_knife_guard=False,
+        crossed_buy=True,
+        position_quantity=4,
+    )
+    strategy.active_positions[low_ticker] = low_bracket
+    strategy.brackets[low_ticker] = low_bracket
+    strategy._app_owned_qty[low_ticker] = 4
+    strategy.cache.update_quote(low_ticker, yes_bid=80, yes_ask=yes_ask)
+
+    stop_loss_calls = []
+
+    async def _fake_execute_stop_loss(bracket, **kw):
+        stop_loss_calls.append(bracket.market_ticker)
+        return False
+
+    monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
+
+    await strategy._run_low_ticker_closeout()
+
+    if expected_closed:
+        assert low_ticker in stop_loss_calls
+    else:
+        assert low_ticker not in stop_loss_calls
 
 
 # ---------------------------------------------------------------------------

@@ -255,10 +255,14 @@ class AppConfig(BaseSettings):
     #
     # LOW_TICKER_ENTRY_HALT_ENABLED=true|false  (default: true)
     # LOW_TICKER_ENTRY_HALT_TIME_ET=HH:MM       (default: 22:00)
+    # LOW_TICKER_10PM_MAX_ASK=0.93             (default: 93¢)
+    #   At/after LOW_TICKER_ENTRY_HALT_TIME_ET, apply Low 10 PM halt/closeout
+    #   behavior only when YES ask is STRICTLY below this threshold.
     #
     # Parsed by from_env().  Does NOT affect stop-loss / exit paths.
     low_ticker_entry_halt_enabled: bool = True
     low_ticker_entry_halt_time_et: str = "22:00"
+    low_ticker_10pm_max_ask: int = 93
     instance_lock_enabled: bool = True
     instance_lock_file: str = "/tmp/forecastology.lock"
     instance_id: str = ""
@@ -284,7 +288,7 @@ class AppConfig(BaseSettings):
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
-        'max_sl_spread', 'sl_exit_max_slippage',
+        'max_sl_spread', 'sl_exit_max_slippage', 'low_ticker_10pm_max_ask',
         mode='before'
     )
     @classmethod
@@ -357,6 +361,7 @@ class AppConfig(BaseSettings):
             default=True,
         )
         low_ticker_entry_halt_time_et = os.getenv("LOW_TICKER_ENTRY_HALT_TIME_ET", "22:00")
+        low_ticker_10pm_max_ask = os.getenv("LOW_TICKER_10PM_MAX_ASK", "0.93")
         instance_lock_enabled = _parse_trade_toggle(
             os.getenv("INSTANCE_LOCK_ENABLED"),
             "INSTANCE_LOCK_ENABLED",
@@ -403,6 +408,7 @@ class AppConfig(BaseSettings):
             low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,
             low_ticker_entry_halt_enabled=low_ticker_entry_halt_enabled,
             low_ticker_entry_halt_time_et=low_ticker_entry_halt_time_et,
+            low_ticker_10pm_max_ask=low_ticker_10pm_max_ask,
             instance_lock_enabled=instance_lock_enabled,
             instance_lock_file=instance_lock_file,
             instance_id=instance_id,

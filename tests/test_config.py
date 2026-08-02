@@ -35,6 +35,17 @@ class TestAppConfig:
         assert cfg.dry_run is True
         assert cfg.enable_fast_sl_exit is False
 
+    def test_low_ticker_10pm_max_ask_parses_dollar_value(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        os.environ["LOW_TICKER_10PM_MAX_ASK"] = "0.93"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.low_ticker_10pm_max_ask == 93
+        finally:
+            os.environ.pop("LOW_TICKER_10PM_MAX_ASK", None)
+
     def test_hedge_max_factor_loaded_as_int(self):
         """HEDGE_MAX_FACTOR=5 in env must produce int hedge_max_factor == 5 via from_env()."""
         import pytest
