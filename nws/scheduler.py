@@ -135,6 +135,12 @@ def start_scheduler() -> None:
     """Start the APScheduler ``BackgroundScheduler`` for periodic NWS updates.
 
     No-op if the scheduler is already running.
+
+    This scheduler is exclusively used for NWS weather forecast data refresh.
+    It contains ZERO sell, exit, or ask-price evaluation logic.  The only
+    registered job is ``nws_high_low_updater`` (forecast data fetch).
+    Any accidental introduction of sell/exit jobs will be caught by the
+    ``_ALLOWED_JOB_IDS`` assertion below.
     """
     global _scheduler
     if _scheduler is not None and _scheduler.running:
@@ -150,6 +156,20 @@ def start_scheduler() -> None:
         coalesce=True,
         misfire_grace_time=120,
     )
+
+    # Whitelist guard: assert only the forecast-update job is registered.
+    # This prevents accidental introduction of sell/exit scheduler jobs —
+    # especially any periodic ask-lowering sell trigger, which must not exist.
+    _ALLOWED_JOB_IDS = {"nws_high_low_updater"}
+    registered_ids = {j.id for j in _scheduler.get_jobs()}
+    unexpected = registered_ids - _ALLOWED_JOB_IDS
+    if unexpected:  # pragma: no cover
+        raise RuntimeError(
+            f"NWS scheduler has unexpected jobs: {unexpected}. "
+            "Only forecast-update jobs are permitted; sell/exit jobs must NOT "
+            "be registered in this scheduler."
+        )
+
     _scheduler.start()
     logger.info(
         "nws.scheduler.started interval_minutes=%s", HIGH_LOW_UPDATE
