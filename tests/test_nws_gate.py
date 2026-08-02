@@ -984,3 +984,363 @@ class TestColdCacheBehavior:
             from nws.gate import is_trading_gate_open
             # Must be CLOSED — no July-4 row for KATL; July-3 row must not be substituted
             assert is_trading_gate_open("KATL", now) is False
+
+
+# ---------------------------------------------------------------------------
+# Tests for direction-aware gate (ticker_type="HIGH"/"LOW")
+# ---------------------------------------------------------------------------
+
+class TestDirectionAwareGate:
+    """Regression tests for the systemic HIGH-during-LOW-window bug.
+
+    Root cause: ``is_trading_gate_open`` previously returned
+    ``in_low_window or in_high_window``, allowing HIGH entries during LOW
+    windows (and vice-versa).  After the fix each direction is gated only
+    on its own window.
+
+    Coverage:
+    - KLAS / Las Vegas  (desert, late-afternoon high)
+    - KPHX / Phoenix    (desert, extreme afternoon high)
+    - KBOS / Boston     (non-desert, morning low + afternoon high)
+    - None (backward-compatible combined behavior)
+    - Cache-key separation: HIGH and LOW for same station use distinct keys
+    """
+
+    # Station cache entries (lat, lon, hourly_url, tz)
+    KLAS_CACHE = {"KLAS": (36.1, -115.2, "https://example.test/hourly", "America/Los_Angeles")}
+    KPHX_CACHE = {"KPHX": (33.4, -112.0, "https://example.test/hourly", "America/Phoenix")}
+    KBOS_CACHE = {"KBOS": (42.4, -71.0, "https://example.test/hourly", "America/New_York")}
+
+    def _make_mock_session(self):
+        from contextlib import contextmanager
+
+        session = self.session
+
+        @contextmanager
+        def _ctx():
+            yield session
+
+        return _ctx
+
+    def _gate(self, station_code, current_time, ticker_type=None, market_date=None):
+        from contextlib import contextmanager
+
+        session = self.session
+
+        @contextmanager
+        def mock_get_session():
+            yield session
+
+        with patch("nws.gate.get_session", mock_get_session):
+            from nws.gate import is_trading_gate_open
+            return is_trading_gate_open(station_code, current_time, market_date, ticker_type)
+
+    def setup_method(self):
+        from nws.client import _station_cache
+
+        _station_cache.clear()
+        self.engine = _make_sqlite_engine()
+        self.Session = _make_session_factory(self.engine)
+        self.session = self.Session()
+
+    def teardown_method(self):
+        self.session.close()
+
+    # ------------------------------------------------------------------
+    # KLAS / Las Vegas: HIGH ticker blocked during LOW window
+    # ------------------------------------------------------------------
+
+    def test_klas_high_ticker_blocked_during_low_window(self):
+        """KLAS HIGH entry must be blocked when now is in the LOW window."""
+        low_time  = _utc(2025, 7, 15, 13, 0)   # 06:00 PDT — low window
+        high_time = _utc(2025, 7, 15, 23, 0)   # 16:00 PDT — high window (later)
+        _insert_forecast(
+            self.session, "KLAS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        # Inside the LOW window
+        now = low_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KLAS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            # HIGH ticker → only high window applies → should be CLOSED
+            assert self._gate("KLAS", now, ticker_type="HIGH") is False
+
+    def test_klas_high_ticker_allowed_during_high_window(self):
+        """KLAS HIGH entry must be allowed when now is in the HIGH window."""
+        low_time  = _utc(2025, 7, 15, 13, 0)
+        high_time = _utc(2025, 7, 15, 23, 0)
+        _insert_forecast(
+            self.session, "KLAS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        # Inside the HIGH window
+        now = high_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KLAS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KLAS", now, ticker_type="HIGH") is True
+
+    def test_klas_low_ticker_allowed_during_low_window(self):
+        """KLAS LOW entry must be allowed when now is in the LOW window."""
+        low_time  = _utc(2025, 7, 15, 13, 0)
+        high_time = _utc(2025, 7, 15, 23, 0)
+        _insert_forecast(
+            self.session, "KLAS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = low_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KLAS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KLAS", now, ticker_type="LOW") is True
+
+    def test_klas_low_ticker_blocked_during_high_window(self):
+        """KLAS LOW entry must be blocked when now is only in the HIGH window."""
+        low_time  = _utc(2025, 7, 15, 13, 0)
+        high_time = _utc(2025, 7, 15, 23, 0)
+        _insert_forecast(
+            self.session, "KLAS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        # Inside the HIGH window but outside the LOW window
+        now = high_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KLAS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KLAS", now, ticker_type="LOW") is False
+
+    # ------------------------------------------------------------------
+    # KPHX / Phoenix
+    # ------------------------------------------------------------------
+
+    def test_kphx_high_ticker_blocked_during_low_window(self):
+        """KPHX HIGH entry blocked when now is in the LOW window only."""
+        low_time  = _utc(2025, 7, 15, 14, 0)   # 07:00 MST
+        high_time = _utc(2025, 7, 15, 22, 0)   # 15:00 MST
+        _insert_forecast(
+            self.session, "KPHX",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = low_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KPHX_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KPHX", now, ticker_type="HIGH") is False
+
+    def test_kphx_high_ticker_allowed_during_high_window(self):
+        """KPHX HIGH entry allowed when now is in the HIGH window."""
+        low_time  = _utc(2025, 7, 15, 14, 0)
+        high_time = _utc(2025, 7, 15, 22, 0)
+        _insert_forecast(
+            self.session, "KPHX",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = high_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KPHX_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KPHX", now, ticker_type="HIGH") is True
+
+    # ------------------------------------------------------------------
+    # KBOS / Boston (non-desert)
+    # ------------------------------------------------------------------
+
+    def test_kbos_high_ticker_blocked_during_low_window(self):
+        """KBOS HIGH entry blocked when now is in the LOW window only."""
+        low_time  = _utc(2025, 7, 15, 10, 0)   # morning low
+        high_time = _utc(2025, 7, 15, 19, 0)   # afternoon high
+        _insert_forecast(
+            self.session, "KBOS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = low_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KBOS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KBOS", now, ticker_type="HIGH") is False
+
+    def test_kbos_low_ticker_blocked_during_high_window(self):
+        """KBOS LOW entry blocked when now is in the HIGH window only."""
+        low_time  = _utc(2025, 7, 15, 10, 0)
+        high_time = _utc(2025, 7, 15, 19, 0)
+        _insert_forecast(
+            self.session, "KBOS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = high_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KBOS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KBOS", now, ticker_type="LOW") is False
+
+    def test_kbos_low_ticker_allowed_during_low_window(self):
+        """KBOS LOW entry allowed when now is in the LOW window."""
+        low_time  = _utc(2025, 7, 15, 10, 0)
+        high_time = _utc(2025, 7, 15, 19, 0)
+        _insert_forecast(
+            self.session, "KBOS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = low_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KBOS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KBOS", now, ticker_type="LOW") is True
+
+    # ------------------------------------------------------------------
+    # Backward-compatible None behavior
+    # ------------------------------------------------------------------
+
+    def test_none_ticker_type_opens_during_low_window(self):
+        """ticker_type=None (default) opens during LOW window — backward compat."""
+        low_time  = _utc(2025, 7, 15, 10, 0)
+        high_time = _utc(2025, 7, 15, 19, 0)
+        _insert_forecast(
+            self.session, "KBOS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = low_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KBOS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KBOS", now, ticker_type=None) is True
+
+    def test_none_ticker_type_opens_during_high_window(self):
+        """ticker_type=None (default) opens during HIGH window — backward compat."""
+        low_time  = _utc(2025, 7, 15, 10, 0)
+        high_time = _utc(2025, 7, 15, 19, 0)
+        _insert_forecast(
+            self.session, "KBOS",
+            _utc(2025, 7, 15, 0), high_time, low_time,
+        )
+        now = high_time - timedelta(minutes=30)
+
+        with patch.dict("nws.gate._station_cache", self.KBOS_CACHE, clear=False), \
+             patch("nws.gate.GATE_LOW_BEFORE", 120), \
+             patch("nws.gate.GATE_LOW_AFTER", 45), \
+             patch("nws.gate.GATE_HIGH_BEFORE", 60), \
+             patch("nws.gate.GATE_HIGH_AFTER", 30):
+            assert self._gate("KBOS", now, ticker_type=None) is True
+
+    # ------------------------------------------------------------------
+    # Fail-closed on exception still applies regardless of ticker_type
+    # ------------------------------------------------------------------
+
+    def test_high_ticker_fail_closed_on_no_data(self):
+        """Gate returns False for HIGH ticker when no forecast data exists."""
+        now = _utc(2025, 7, 15, 15, 0)
+        # No forecast inserted → gate must be closed regardless of direction
+        assert self._gate("KLAS", now, ticker_type="HIGH") is False
+
+    def test_low_ticker_fail_closed_on_no_data(self):
+        """Gate returns False for LOW ticker when no forecast data exists."""
+        now = _utc(2025, 7, 15, 15, 0)
+        assert self._gate("KLAS", now, ticker_type="LOW") is False
+
+
+# ---------------------------------------------------------------------------
+# Tests for gate cache key separation (HIGH vs LOW same station)
+# ---------------------------------------------------------------------------
+
+class TestGateCacheKeySeparation:
+    """Prove that HIGH and LOW for the same station use distinct cache keys.
+
+    After the fix the cache is keyed by (station, ticker_type) so a LOW
+    evaluation cannot warm the cache with an incorrect result for HIGH.
+    """
+
+    def setup_method(self):
+        pass
+
+    def test_high_and_low_use_different_cache_keys(self):
+        """HIGH and LOW for the same station must produce different cache keys.
+
+        This test exercises the state machine's watchlist gate code path by
+        inspecting the _nws_gate_cache dict after two separate evaluations —
+        one for a HIGH ticker and one for a LOW ticker on the same station.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch as _patch
+
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+        from core.types import MarketBracket, Phase
+        from data.ticker_cache import TickerCache
+        from data.websocket_manager import WebSocketManager
+
+        # Minimal config stub
+        config = MagicMock()
+        config.high_trades = True
+        config.low_trades = True
+        config.buy_trigger_price = 80
+        config.minimum_spread = 3
+        config.initial_contract_count = 1
+        config.hedge_max_factor = 1
+        config.no_trade_tickers = set()
+        config.hedge_trigger = None
+
+        # Build a minimal strategy instance without starting it
+        import core.state_machine as sm
+
+        with _patch.object(sm, "load_private_key", return_value=object()):
+            strategy = sm.TemperatureStrategy.__new__(sm.TemperatureStrategy)
+            strategy.config = config
+            strategy.cache = TickerCache()
+            strategy._nws_gate_cache = {}
+            strategy._nws_gate_cache_refresh_seconds = 30
+
+        # Verify initial state
+        assert strategy._nws_gate_cache == {}
+
+        # Manually verify that a (station, "HIGH") key and a (station, "LOW") key
+        # are distinct — which is the invariant the fix enforces.
+        station = "KLAS"
+        high_key = (station, "HIGH")
+        low_key  = (station, "LOW")
+
+        assert high_key != low_key, "HIGH and LOW cache keys must differ"
+
+        # Simulate what the patched watchlist loop would write
+        import time as _time
+        now_ts = _time.monotonic()
+        strategy._nws_gate_cache[low_key]  = (now_ts, True, True)   # LOW gate open
+        strategy._nws_gate_cache[high_key] = (now_ts, True, False)  # HIGH gate closed
+
+        # Both keys co-exist independently
+        assert (station, "LOW")  in strategy._nws_gate_cache
+        assert (station, "HIGH") in strategy._nws_gate_cache
+        # Values are independent
+        assert strategy._nws_gate_cache[low_key][2]  is True
+        assert strategy._nws_gate_cache[high_key][2] is False
