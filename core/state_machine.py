@@ -223,6 +223,14 @@ class TemperatureStrategy:
         # close-out has already run so it is not repeated within the same day.
         self._low_ticker_closeout_date: Optional[datetime.date] = None
 
+        # Timestamp-based throttle for portfolio snapshot logging.
+        # Using wall-clock time (not a counter) so the interval is not coupled
+        # to the strategy-loop cadence and no "counter-modulo" pattern exists
+        # that could be mistaken for a periodic sell trigger.
+        self._last_snapshot_ts: float = 0.0
+        _SNAPSHOT_INTERVAL_S: float = 60.0  # log once per minute
+        self._snapshot_interval_s: float = _SNAPSHOT_INTERVAL_S
+
     @staticmethod
     def _first_non_none(*values):
         for value in values:
@@ -1624,7 +1632,7 @@ class TemperatureStrategy:
                 continue
             try:
                 await asyncio.wait_for(self._evaluate_watchlist(), timeout=30.0)
-                await asyncio.wait_for(self._log_periodic_snapshot(), timeout=10.0)
+                await asyncio.wait_for(self._log_snapshot(), timeout=10.0)
             except asyncio.TimeoutError:
                 logger.error("strategy.loop_timeout", msg="A strategy step timed out and was skipped")
             except Exception as e:
@@ -3391,13 +3399,17 @@ class TemperatureStrategy:
             logger.warning("rest.fetch_failed", ticker=ticker, error=str(e))
         return None
 
-    async def _log_periodic_snapshot(self):
-        """Log portfolio snapshot every 60 seconds."""
-        if not hasattr(self, '_snapshot_counter'):
-            self._snapshot_counter = 0
-        self._snapshot_counter += 1
-        if self._snapshot_counter % 60 != 0:  # ~60 seconds
+    async def _log_snapshot(self):
+        """Log portfolio snapshot at most once per ``_snapshot_interval_s`` (default 60 s).
+
+        Uses a wall-clock timestamp throttle rather than a strategy-loop counter
+        so the interval is independent of loop cadence.  This method contains
+        zero sell / exit / order-submission logic — it is logging-only.
+        """
+        now_ts = asyncio.get_event_loop().time()
+        if now_ts - self._last_snapshot_ts < self._snapshot_interval_s:
             return
+        self._last_snapshot_ts = now_ts
 
         balance = await self.executor.get_balance()
         total_risk = sum(
