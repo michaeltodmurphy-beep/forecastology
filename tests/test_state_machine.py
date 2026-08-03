@@ -230,10 +230,6 @@ class FakeExecutor:
 
 
 def make_config(**overrides):
-    if "max_sl_spread" not in overrides:
-        raw_max_sl = os.getenv("max_sl_spread")
-        if raw_max_sl is not None:
-            overrides["max_sl_spread"] = AppConfig.convert_dollars_to_cents(raw_max_sl)
     config = AppConfig(
         kalshi_api_key="test-key",
         kalshi_private_key_path="unused.pem",
@@ -253,6 +249,7 @@ def make_config(**overrides):
         sl_panic_retry_ms=0,
         sl_panic_max_retries=3,
         sl_panic_max_quote_age_ms=30000,
+        stop_loss_price_bid=0,
         no_trade_tickers=set(),
     )
     for key, value in overrides.items():
@@ -1452,7 +1449,7 @@ def test_config_loads_without_hedge_trigger_price(monkeypatch):
         "MYSQL_DATABASE_URL": "******localhost:3306/test",
         "TRADING_MODE": "PAPER",
         "BUY_TRIGGER_PRICE": "0.82",
-        "STOP_LOSS_PRICE": "0.35",
+        "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "2",
         "MINIMUM_SPREAD": "0.04",
         "MONITOR_START_PRICE": "0.80",
@@ -1769,7 +1766,7 @@ def test_hedge_max_factor_loaded_as_int_from_env(monkeypatch):
         "MYSQL_DATABASE_URL": "******localhost:3306/test",
         "TRADING_MODE": "PAPER",
         "BUY_TRIGGER_PRICE": "0.82",
-        "STOP_LOSS_PRICE": "0.35",
+        "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "1",
         "MINIMUM_SPREAD": "0.04",
         "MONITOR_START_PRICE": "0.80",
@@ -1834,7 +1831,7 @@ def test_initial_contract_count_loaded_from_env(monkeypatch):
         "MYSQL_DATABASE_URL": "******localhost:3306/test",
         "TRADING_MODE": "PAPER",
         "BUY_TRIGGER_PRICE": "0.82",
-        "STOP_LOSS_PRICE": "0.35",
+        "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "4",
         "MINIMUM_SPREAD": "0.04",
         "MONITOR_START_PRICE": "0.80",
@@ -2904,55 +2901,8 @@ def _make_held_bracket(ticker, series_ticker):
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_fires_when_spread_within_max(monkeypatch):
-    """Stop-loss fires when YES bid is below threshold and spread is tight (<= max_sl_spread)."""
-    logged = capture_logs(monkeypatch)
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50)
-    strategy._execute_stop_loss = AsyncMock()
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-    # bid=45 < 50 (stop threshold), ask=48, spread=3 <= 20
-    strategy.cache.update_quote(ticker, 45, 48)
-
-    await strategy._evaluate_held_positions()
-
-    strategy._execute_stop_loss.assert_awaited_once()
-    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert not getattr(bracket, "_sl_held_for_spread", False)
-
-
-@pytest.mark.asyncio
-async def test_stop_loss_held_when_spread_too_wide(monkeypatch):
-    """With PANIC_FLATTEN, wide spread alone does not trigger or hold stop-loss."""
-    logged = capture_logs(monkeypatch)
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50, sl_exit_mode="PANIC_FLATTEN")
-    strategy._execute_stop_loss = AsyncMock()
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-    # bid=45 < 50 (stop threshold), ask=75, spread=30 > 20
-    strategy.cache.update_quote(ticker, 45, 75)
-
-    await strategy._evaluate_held_positions()
-
-    strategy._execute_stop_loss.assert_not_awaited()
-    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert not any(event == "phase.c.sl_held_for_spread" for event, _ in logged)
-    assert not getattr(bracket, "_sl_held_for_spread", False)
-
-
-@pytest.mark.asyncio
-async def test_stop_loss_held_for_wide_spread_within_hold_window(monkeypatch):
-    """AGGRESSIVE_LIMIT holds briefly on wide spread before escalation window expires."""
+async def test_stop_loss_triggers_on_ask_threshold(monkeypatch):
+    """Ask-side threshold triggers stop-loss."""
     logged = capture_logs(monkeypatch)
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
@@ -2961,230 +2911,93 @@ async def test_stop_loss_held_for_wide_spread_within_hold_window(monkeypatch):
         monkeypatch,
         executor=executor,
         stop_loss_price=50,
-        sl_exit_mode="AGGRESSIVE_LIMIT",
-        sl_spread_hold_max_seconds=120,
+        stop_loss_price_bid=0,
     )
     strategy._execute_stop_loss = AsyncMock()
 
     bracket = _make_held_bracket(ticker, "KXLOWTBOS")
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    strategy.cache.update_quote(ticker, 45, 75)  # spread=30 > max 20
+    strategy.cache.update_quote(ticker, 70, 48)
 
     await strategy._evaluate_held_positions()
 
-    strategy._execute_stop_loss.assert_not_awaited()
-    assert any(event == "phase.c.sl_held_for_spread" for event, _ in logged)
-    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert getattr(bracket, "_sl_held_for_spread", False)
-    assert getattr(bracket, "_sl_held_for_spread_since", 0) > 0
+    strategy._execute_stop_loss.assert_awaited_once()
+    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_escalates_after_spread_hold_window(monkeypatch):
-    """AGGRESSIVE_LIMIT escalates and fires after spread hold max seconds."""
-    logged = capture_logs(monkeypatch)
+async def test_stop_loss_triggers_on_bid_threshold(monkeypatch):
+    """Bid-side threshold triggers stop-loss when ask is above ask threshold."""
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
     strategy = make_strategy(
         monkeypatch,
         executor=executor,
-        stop_loss_price=50,
-        sl_exit_mode="AGGRESSIVE_LIMIT",
-        sl_spread_hold_max_seconds=120,
+        stop_loss_price=64,
+        stop_loss_price_bid=45,
+        sl_exit_mode="PANIC_FLATTEN",
     )
     strategy._execute_stop_loss = AsyncMock()
 
     bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    bracket._sl_held_for_spread = True
-    bracket._sl_held_for_spread_since = asyncio.get_event_loop().time() - 121
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    strategy.cache.update_quote(ticker, 45, 75)  # spread still wide
+    strategy.cache.update_quote(ticker, 42, 66)
 
     await strategy._evaluate_held_positions()
 
     strategy._execute_stop_loss.assert_awaited_once()
-    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    escalations = [payload for event, payload in logged if event == "phase.c.sl_spread_hold_escalated"]
-    assert len(escalations) == 1
-    assert escalations[0]["seconds_held"] >= 120
-    assert not getattr(bracket, "_sl_held_for_spread", False)
-    assert getattr(bracket, "_sl_held_for_spread_since", 0) == 0
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_immediate_fire_when_spread_hold_window_zero(monkeypatch):
-    """SL_SPREAD_HOLD_MAX_SECONDS=0 bypasses hold and fires immediately on wide spread."""
-    logged = capture_logs(monkeypatch)
+async def test_stop_loss_does_not_trigger_when_both_prices_above_thresholds(monkeypatch):
+    """Neither threshold met => no stop-loss."""
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
     strategy = make_strategy(
         monkeypatch,
         executor=executor,
-        stop_loss_price=50,
-        sl_exit_mode="AGGRESSIVE_LIMIT",
-        sl_spread_hold_max_seconds=0,
+        stop_loss_price=40,
+        stop_loss_price_bid=45,
     )
     strategy._execute_stop_loss = AsyncMock()
 
     bracket = _make_held_bracket(ticker, "KXLOWTBOS")
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    strategy.cache.update_quote(ticker, 45, 75)  # spread=30 > max 20
+    strategy.cache.update_quote(ticker, 50, 66)
 
-    await strategy._evaluate_held_positions()
-
-    strategy._execute_stop_loss.assert_awaited_once()
-    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert any(event == "phase.c.sl_spread_hold_escalated" for event, _ in logged)
-    assert not any(event == "phase.c.sl_held_for_spread" for event, _ in logged)
-    assert not getattr(bracket, "_sl_held_for_spread", False)
-
-
-@pytest.mark.asyncio
-async def test_sl_held_for_spread_then_fires_when_spread_narrows(monkeypatch):
-    """With PANIC_FLATTEN, no hold on wide spread; trigger fires once ask <= stop."""
-    logged = capture_logs(monkeypatch)
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50, sl_exit_mode="PANIC_FLATTEN")
-    strategy._execute_stop_loss = AsyncMock()
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-
-    # Cycle 1: ask above stop -> no trigger
-    strategy.cache.update_quote(ticker, 45, 75)
-    await strategy._evaluate_held_positions()
-    strategy._execute_stop_loss.assert_not_awaited()
-
-    # Cycle 2: ask tightens to stop/below -> fires
-    strategy.cache.update_quote(ticker, 45, 48)
-    logged.clear()
-    await strategy._evaluate_held_positions()
-
-    strategy._execute_stop_loss.assert_awaited_once()
-    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert not getattr(bracket, "_sl_held_for_spread", False)
-
-
-@pytest.mark.asyncio
-async def test_sl_held_for_spread_resets_when_bid_recovers(monkeypatch):
-    """With PANIC_FLATTEN, ask above stop avoids stop-loss regardless of bid recovery."""
-    logged = capture_logs(monkeypatch)
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50, sl_exit_mode="PANIC_FLATTEN")
-    strategy._execute_stop_loss = AsyncMock()
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-
-    # Cycle 1: ask above stop -> no trigger
-    strategy.cache.update_quote(ticker, 45, 75)
-    await strategy._evaluate_held_positions()
-
-    # Cycle 2: bid recovers above stop -> still no sale
-    strategy.cache.update_quote(ticker, 60, 62)
-    logged.clear()
     await strategy._evaluate_held_positions()
 
     strategy._execute_stop_loss.assert_not_awaited()
-    assert not any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert not getattr(bracket, "_sl_held_for_spread", False)
 
 
 @pytest.mark.asyncio
-async def test_sl_held_for_spread_log_throttled_60s(monkeypatch):
-    """PANIC_FLATTEN does not emit spread-hold logs when ask is above stop."""
-    logged = capture_logs(monkeypatch)
+async def test_stop_loss_example_ask_above_bid_below_triggers(monkeypatch):
+    """Example case: ask=66, bid=42 with ask_stop=64 and bid_stop=45 must trigger."""
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50, sl_exit_mode="PANIC_FLATTEN")
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        stop_loss_price=64,
+        stop_loss_price_bid=45,
+        sl_exit_mode="PANIC_FLATTEN",
+    )
     strategy._execute_stop_loss = AsyncMock()
 
     bracket = _make_held_bracket(ticker, "KXLOWTBOS")
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
-    # bid=45, ask=75, spread=30 > 20 — persistently wide
-    strategy.cache.update_quote(ticker, 45, 75)
-
-    # Run 5 rapid cycles without advancing time
-    for _ in range(5):
-        await strategy._evaluate_held_positions()
-
-    held_logs = [event for event, _ in logged if event == "phase.c.sl_held_for_spread"]
-    assert len(held_logs) == 0
-
-
-@pytest.mark.asyncio
-async def test_one_sided_book_holds_spread_guard(monkeypatch):
-    """A one-sided-book ask encoded as 0 now triggers PANIC_FLATTEN (ask <= stop)."""
-    logged = capture_logs(monkeypatch)
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=50, sl_exit_mode="PANIC_FLATTEN")
-    strategy._execute_stop_loss = AsyncMock()
-    # REST fallback returns None so only the cache quote is used
-    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-    # One-sided: bid=1, ask=0 (no ask)
-    strategy.cache.update_quote(ticker, 1, 0)
+    strategy.cache.update_quote(ticker, 42, 66)
 
     await strategy._evaluate_held_positions()
 
-    # Ask=0 satisfies ask<=stop under current trigger semantics.
-    assert not getattr(bracket, "_sl_held_for_spread", False)
     strategy._execute_stop_loss.assert_awaited_once()
-    assert any(event == "phase.c.stop_loss_triggered" for event, _ in logged)
-    assert not any(event == "phase.c.sl_held_for_spread" for event, _ in logged)
-
-
-@pytest.mark.asyncio
-async def test_max_sl_spread_loaded_from_env(monkeypatch):
-    """max_sl_spread is read from env and converted dollars->cents (not hardcoded)."""
-    monkeypatch.setenv("max_sl_spread", "0.17")
-    cfg = make_config()
-    assert cfg.max_sl_spread == 17
-
-
-@pytest.mark.asyncio
-async def test_max_sl_spread_config_from_env(monkeypatch):
-    """MAX_SL_SPREAD env var '0.20' is converted to 20 cents by the validator."""
-    env = {
-        "KALSHI_API_KEY": "test-key",
-        "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
-        "MYSQL_DATABASE_URL": "******localhost:3306/test",
-        "TRADING_MODE": "PAPER",
-        "BUY_TRIGGER_PRICE": "0.82",
-        "STOP_LOSS_PRICE": "0.50",
-        "INITIAL_CONTRACT_COUNT": "1",
-        "MINIMUM_SPREAD": "0.04",
-        "MONITOR_START_PRICE": "0.80",
-        "SPREAD_MONITOR_PRICE": "0.90",
-        "MAX_SL_SPREAD": "0.15",
-        "SL_SPREAD_HOLD_MAX_SECONDS": "90",
-    }
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.delenv("HEDGE_TRIGGER_PRICE", raising=False)
-    monkeypatch.delenv("HEDGE_BUY", raising=False)
-
-    cfg = AppConfig.from_env()
-    assert cfg.max_sl_spread == 15
-    assert cfg.sl_spread_hold_max_seconds == 90
 
 
 # ---------------------------------------------------------------------------
@@ -5049,9 +4862,9 @@ async def test_panic_flatten_no_submit_when_ask_above_stop(monkeypatch):
     # Revalidation abort must be logged
     abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
     assert len(abort_logs) >= 1
-    assert abort_logs[0]["reason"] == "ask_above_stop"
+    assert abort_logs[0]["reason"] == "prices_above_stops"
     assert abort_logs[0]["best_ask_yes"] == 88
-    assert abort_logs[0]["stop_loss_price"] == 48
+    assert abort_logs[0]["stop_loss_price_ask"] == 48
 
 
 @pytest.mark.asyncio
@@ -5150,7 +4963,7 @@ async def test_panic_flatten_aborts_when_ask_rebounds_before_submit(monkeypatch)
     assert len(executor.orders) == 0
     abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
     assert len(abort_logs) >= 1
-    assert abort_logs[0]["reason"] == "ask_above_stop"
+    assert abort_logs[0]["reason"] == "prices_above_stops"
     assert abort_logs[0]["best_ask_yes"] == 80
 
 
@@ -5420,7 +5233,7 @@ async def test_panic_flatten_phase_c_triggers_when_ask_at_stop(monkeypatch):
     assert any(event == "sl.panic_trigger_evaluated" for event, _ in logged)
     trigger_log = next(kw for event, kw in logged if event == "sl.panic_trigger_evaluated")
     assert trigger_log["best_ask_yes"] == 48
-    assert trigger_log["stop_loss_price"] == 50
+    assert trigger_log["stop_loss_price_ask"] == 50
     assert trigger_log["units"] == "cents"
 
 
@@ -5521,10 +5334,10 @@ async def test_panic_flatten_unit_normalization_no_false_trigger(monkeypatch):
 
     assert len(executor.orders) == 0
     abort_logs = [kw for event, kw in logged if event == "sl.panic_revalidation_aborted"]
-    assert abort_logs[0]["reason"] == "ask_above_stop"
+    assert abort_logs[0]["reason"] == "prices_above_stops"
     # Confirm both values are in cents (not a mixed-unit compare of 88 vs 0.48)
     assert abort_logs[0]["best_ask_yes"] == 88
-    assert abort_logs[0]["stop_loss_price"] == 48
+    assert abort_logs[0]["stop_loss_price_ask"] == 48
 
 
 @pytest.mark.asyncio
@@ -6271,8 +6084,8 @@ async def test_handle_orderbook_snapshot_calls_watcher_with_derived_ask(monkeypa
     watcher_calls = []
 
     class FakeWatcher:
-        async def on_market_update(self, ticker, ask):
-            watcher_calls.append((ticker, ask))
+        async def on_market_update(self, ticker, ask=None, **kwargs):
+            watcher_calls.append((ticker, kwargs.get("best_ask", ask)))
             return True
 
     strategy.stop_loss_watcher = FakeWatcher()
@@ -6301,8 +6114,8 @@ async def test_handle_orderbook_delta_calls_watcher_with_derived_ask(monkeypatch
     watcher_calls = []
 
     class FakeWatcher:
-        async def on_market_update(self, ticker, ask):
-            watcher_calls.append((ticker, ask))
+        async def on_market_update(self, ticker, ask=None, **kwargs):
+            watcher_calls.append((ticker, kwargs.get("best_ask", ask)))
             return True
 
     strategy.stop_loss_watcher = FakeWatcher()
@@ -6340,8 +6153,8 @@ async def test_orderbook_watcher_call_skipped_when_ask_is_none(monkeypatch):
     watcher_calls = []
 
     class FakeWatcher:
-        async def on_market_update(self, ticker, ask):
-            watcher_calls.append((ticker, ask))
+        async def on_market_update(self, ticker, ask=None, **kwargs):
+            watcher_calls.append((ticker, kwargs.get("best_ask", ask)))
             return True
 
     strategy.stop_loss_watcher = FakeWatcher()
@@ -6367,8 +6180,8 @@ async def test_orderbook_watcher_call_skipped_when_ask_is_zero(monkeypatch):
     watcher_calls = []
 
     class FakeWatcher:
-        async def on_market_update(self, ticker, ask):
-            watcher_calls.append((ticker, ask))
+        async def on_market_update(self, ticker, ask=None, **kwargs):
+            watcher_calls.append((ticker, kwargs.get("best_ask", ask)))
             return True
 
     strategy.stop_loss_watcher = FakeWatcher()
