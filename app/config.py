@@ -154,7 +154,8 @@ class AppConfig(BaseSettings):
     buy_trigger_price: int
     spread_monitor_price: int
     minimum_spread: int
-    stop_loss_price: int
+    stop_loss_price_ask: int
+    stop_loss_price_bid: int = 0
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
@@ -209,13 +210,8 @@ class AppConfig(BaseSettings):
     sl_exit_max_attempts: int = 3
     sl_exit_aggressive_offset_ticks: int = 2
     sl_exit_max_slippage: int = 20
-    # Maximum bid-ask spread (in cents) at which the stop-loss is allowed to fire.
-    # When the YES spread exceeds this value the bot holds rather than selling into
-    # a wide, indecisive book. Set via `max_sl_spread` in dollar format
-    # (e.g. `max_sl_spread=0.15` -> 15¢); default 20 is fallback when env is absent.
-    max_sl_spread: int = 20
-    # Maximum seconds to hold a stop-loss trigger for wide/one-sided spread before
-    # escalating and forcing exit anyway. 0 means no hold window (fire immediately).
+    # Maximum seconds to hold a stop-loss trigger before escalation in legacy
+    # AGGRESSIVE_LIMIT paths. 0 means no hold window (fire immediately).
     sl_spread_hold_max_seconds: int = 120
     # Stop-loss exit mode.
     # PANIC_FLATTEN (default): immediately submit at SL_PANIC_SELL_PRICE (1¢ floor)
@@ -286,9 +282,9 @@ class AppConfig(BaseSettings):
 
     @field_validator(
         'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
-        'stop_loss_price', 'monitor_start_price',
+        'stop_loss_price_ask', 'stop_loss_price_bid', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
-        'max_sl_spread', 'sl_exit_max_slippage', 'low_ticker_10pm_max_ask',
+        'sl_exit_max_slippage', 'low_ticker_10pm_max_ask',
         mode='before'
     )
     @classmethod
@@ -315,6 +311,15 @@ class AppConfig(BaseSettings):
             return {str(t).strip().upper() for t in v if str(t).strip()}
         return {t.strip().upper() for t in str(v).split(',') if t.strip()}
 
+    @model_validator(mode='before')
+    @classmethod
+    def map_legacy_stop_loss_field(cls, values):
+        """Allow legacy constructor/tests using stop_loss_price keyword."""
+        if isinstance(values, dict):
+            if "stop_loss_price_ask" not in values and "stop_loss_price" in values:
+                values["stop_loss_price_ask"] = values["stop_loss_price"]
+        return values
+
     @model_validator(mode='after')
     def normalize_trading_mode(self):
         if self.trading_mode:
@@ -322,6 +327,15 @@ class AppConfig(BaseSettings):
         if self.enable_fast_sl_exit is None:
             self.enable_fast_sl_exit = self.trading_mode == "LIVE"
         return self
+
+    @property
+    def stop_loss_price(self) -> int:
+        """Compatibility alias for existing call sites/tests: ask-side SL threshold."""
+        return int(self.stop_loss_price_ask)
+
+    @stop_loss_price.setter
+    def stop_loss_price(self, value: int) -> None:
+        self.stop_loss_price_ask = int(value)
 
     @classmethod
     def from_env(cls) -> 'AppConfig':

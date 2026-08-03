@@ -8,7 +8,8 @@ os.environ['MYSQL_DATABASE_URL'] = '******localhost:3306/test'
 os.environ['TRADING_MODE'] = 'PAPER'
 os.environ['BUY_TRIGGER_PRICE'] = '0.82'
 os.environ['HEDGE_TRIGGER_PRICE'] = '0.48'
-os.environ['STOP_LOSS_PRICE'] = '0.35'
+os.environ['STOP_LOSS_PRICE_ASK'] = '0.35'
+os.environ['STOP_LOSS_PRICE_BID'] = '0.30'
 os.environ['INITIAL_CONTRACT_COUNT'] = '1'
 os.environ['MINIMUM_SPREAD'] = '0.04'
 os.environ['MONITOR_START_PRICE'] = '0.80'
@@ -27,7 +28,8 @@ class TestAppConfig:
         assert cfg.trading_mode == 'PAPER'
         assert cfg.buy_trigger_price == 82
         assert cfg.hedge_trigger_price == 48
-        assert cfg.stop_loss_price == 35
+        assert cfg.stop_loss_price_ask == 35
+        assert cfg.stop_loss_price_bid == 30
         assert cfg.initial_contract_count == 1
         assert cfg.minimum_spread == 4
         assert cfg.monitor_start_price == 80

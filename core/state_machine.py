@@ -714,7 +714,8 @@ class TemperatureStrategy:
         panic_price = max(1, int(self.config.sl_panic_sell_price or 1))
         max_retries = max(int(self.config.sl_panic_max_retries or 1), 1)
         retry_sleep_s = max(int(self.config.sl_panic_retry_ms or 0), 0) / 1000.0
-        stop_loss_cents = int(self.config.stop_loss_price)
+        stop_loss_ask_cents = int(self.config.stop_loss_price)
+        stop_loss_bid_cents = int(getattr(self.config, "stop_loss_price_bid", 0))
         max_quote_age_ms = int(self.config.sl_panic_max_quote_age_ms or 30000)
 
         logger.warning(
@@ -723,7 +724,8 @@ class TemperatureStrategy:
             action_key=action_key,
             trigger_source=trigger_source,
             trigger_price=trigger_price,
-            stop_loss_price=stop_loss_cents,
+            stop_loss_price_ask=stop_loss_ask_cents,
+            stop_loss_price_bid=stop_loss_bid_cents,
             panic_price=panic_price,
             qty=bracket.position_quantity,
             trigger_ts_ms=trigger_ts_ms,
@@ -781,12 +783,13 @@ class TemperatureStrategy:
                     action_key=action_key,
                     attempt=attempt,
                     reason="no_cached_quote",
-                    stop_loss_price=stop_loss_cents,
+                    stop_loss_price_ask=stop_loss_ask_cents,
+                    stop_loss_price_bid=stop_loss_bid_cents,
                     elapsed_ms=now_ms_rv - trigger_ts_ms,
                 )
                 _degraded_mode = True
             else:
-                best_ask_rv = quote_rv[1]
+                best_bid_rv, best_ask_rv = quote_rv
 
                 # Freshness check (skip if max_quote_age_ms=0 or no timestamp)
                 if max_quote_age_ms > 0 and quote_ts_rv is not None:
@@ -800,24 +803,35 @@ class TemperatureStrategy:
                             reason="stale_quote",
                             quote_age_ms=int(age_ms_rv),
                             max_quote_age_ms=max_quote_age_ms,
+                            best_bid_yes=best_bid_rv,
                             best_ask_yes=best_ask_rv,
-                            stop_loss_price=stop_loss_cents,
+                            stop_loss_price_ask=stop_loss_ask_cents,
+                            stop_loss_price_bid=stop_loss_bid_cents,
                             units="cents",
                             elapsed_ms=now_ms_rv - trigger_ts_ms,
                         )
                         _degraded_mode = True
 
                 if not _degraded_mode:
-                    # ASK-based revalidation: abort only if a fresh quote
-                    # confirms the ask has genuinely recovered above the stop.
-                    trigger_met_rv = best_ask_rv <= stop_loss_cents
+                    ask_trigger_rv = (
+                        best_ask_rv is not None
+                        and best_ask_rv <= stop_loss_ask_cents
+                    )
+                    bid_trigger_rv = (
+                        stop_loss_bid_cents > 0
+                        and best_bid_rv is not None
+                        and best_bid_rv <= stop_loss_bid_cents
+                    )
+                    trigger_met_rv = ask_trigger_rv or bid_trigger_rv
                     logger.info(
                         "sl.panic_revalidation",
                         ticker=ticker,
                         action_key=action_key,
                         attempt=attempt,
+                        best_bid_yes=best_bid_rv,
                         best_ask_yes=best_ask_rv,
-                        stop_loss_price=stop_loss_cents,
+                        stop_loss_price_ask=stop_loss_ask_cents,
+                        stop_loss_price_bid=stop_loss_bid_cents,
                         units="cents",
                         trigger_met=trigger_met_rv,
                         elapsed_ms=now_ms_rv - trigger_ts_ms,
@@ -830,9 +844,11 @@ class TemperatureStrategy:
                             ticker=ticker,
                             action_key=action_key,
                             attempt=attempt,
-                            reason="ask_above_stop",
+                            reason="prices_above_stops",
+                            best_bid_yes=best_bid_rv,
                             best_ask_yes=best_ask_rv,
-                            stop_loss_price=stop_loss_cents,
+                            stop_loss_price_ask=stop_loss_ask_cents,
+                            stop_loss_price_bid=stop_loss_bid_cents,
                             units="cents",
                             elapsed_ms=now_ms_rv - trigger_ts_ms,
                         )
@@ -842,7 +858,7 @@ class TemperatureStrategy:
                             action_key=action_key,
                             attempt=attempt,
                             elapsed_ms=now_ms_rv - trigger_ts_ms,
-                            reason="ask_above_stop",
+                            reason="prices_above_stops",
                         )
                         await self._rollback_stop_loss_count_if_counted(current)
                         return
@@ -991,6 +1007,7 @@ class TemperatureStrategy:
             side="yes",
             quantity=managed_qty,
             sl_price=self.config.stop_loss_price,
+            sl_price_bid=self.config.stop_loss_price_bid,
         )
 
     async def _unregister_stop_loss_watcher(self, ticker: str) -> None:
@@ -1424,8 +1441,12 @@ class TemperatureStrategy:
         # Cache YES bid/ask from ticker channel — this is the authoritative price source
         if yes_bid is not None and yes_ask is not None:
             self.cache.update_quote(market_ticker, yes_bid, yes_ask)
-            if self.stop_loss_watcher is not None:
-                await self.stop_loss_watcher.on_market_update(market_ticker, yes_ask)
+        if self.stop_loss_watcher is not None and (yes_ask is not None or yes_bid is not None):
+            await self.stop_loss_watcher.on_market_update(
+                market_ticker,
+                best_ask=yes_ask,
+                best_bid=yes_bid,
+            )
 
         # Update brackets in state
         if market_ticker in self.brackets:
@@ -1533,7 +1554,7 @@ class TemperatureStrategy:
             # book updates (which often arrive before the next ticker snapshot)
             # can trigger the SL earlier.  Skip invalid/zero asks.
             if self.stop_loss_watcher is not None and price > 0:
-                await self.stop_loss_watcher.on_market_update(market_ticker, price)
+                await self.stop_loss_watcher.on_market_update(market_ticker, best_ask=price)
 
     async def _handle_orderbook_delta(self, msg: dict):
         """Process orderbook delta - update cached price."""
@@ -1562,7 +1583,7 @@ class TemperatureStrategy:
             # book updates (which often arrive before the next ticker snapshot)
             # can trigger the SL earlier.  Skip invalid/zero asks.
             if self.stop_loss_watcher is not None and current_price > 0:
-                await self.stop_loss_watcher.on_market_update(market_ticker, current_price)
+                await self.stop_loss_watcher.on_market_update(market_ticker, best_ask=current_price)
 
     async def _handle_lifecycle(self, msg: dict):
         """Handle market lifecycle events (new markets, status changes)."""
@@ -2487,6 +2508,7 @@ class TemperatureStrategy:
                         pass
 
             current_price = None
+            yes_bid = None
             yes_ask = None
             rest_data = None
             zero_bid_collapse = False
@@ -2679,33 +2701,47 @@ class TemperatureStrategy:
                 # Discard ask=0 as invalid; keep a valid positive ask for PANIC check
                 yes_ask = yes_ask if yes_ask and yes_ask > 0 else None
 
-            bypass_spread_guard = zero_bid_collapse or blind_below_stop
+            stop_loss_ask = int(self.config.stop_loss_price)
+            stop_loss_bid = int(getattr(self.config, "stop_loss_price_bid", 0))
+            bid_trigger = (
+                stop_loss_bid > 0
+                and yes_bid is not None
+                and yes_bid <= stop_loss_bid
+            )
+            ask_trigger = yes_ask is not None and yes_ask <= stop_loss_ask
 
             # --- Compute stop_loss_reason (mode-specific) -------------------
             stop_loss_reason = None
             if is_panic_flatten:
-                # Strict ASK-only trigger: only fire when the YES ask is present
-                # and at or below the configured stop-loss threshold.
-                # Bid, last-trade, blind prices, and zero-bid-collapse do NOT
-                # trigger PANIC_FLATTEN on their own.
-                if yes_ask is not None and yes_ask <= self.config.stop_loss_price:
+                if ask_trigger and bid_trigger:
+                    stop_loss_reason = "ask_and_bid_at_or_below_stop"
+                elif ask_trigger:
                     stop_loss_reason = "ask_at_or_below_stop"
-                    bypass_spread_guard = True  # revalidation in _run_panic_flatten_exit
+                elif bid_trigger:
+                    stop_loss_reason = "bid_at_or_below_stop"
             else:
                 if zero_bid_collapse:
                     stop_loss_reason = "zero_bid_collapse"
                 elif blind_below_stop:
                     stop_loss_reason = "blind_last_known_below_stop"
-                elif current_price < self.config.stop_loss_price:
+                elif ask_trigger and bid_trigger:
+                    stop_loss_reason = "ask_and_bid_at_or_below_stop"
+                elif ask_trigger:
+                    stop_loss_reason = "ask_at_or_below_stop"
+                elif bid_trigger:
+                    stop_loss_reason = "bid_at_or_below_stop"
+                elif current_price < stop_loss_ask:
                     stop_loss_reason = "price_below_stop"
 
             logger.debug(
                 "phase.c.price_check",
                 ticker=ticker,
                 side="yes",
-                stop_loss=self.config.stop_loss_price,
+                stop_loss_ask=stop_loss_ask,
+                stop_loss_bid=stop_loss_bid,
                 price_source=price_source,
                 price=current_price,
+                yes_bid=yes_bid,
                 yes_ask=yes_ask,
                 sl_exit_mode=sl_exit_mode_upper,
                 trigger_met=stop_loss_reason is not None,
@@ -2720,7 +2756,7 @@ class TemperatureStrategy:
                 # For REST-fallback, last_price, or blind prices the watcher has
                 # no live tick and cannot act; Phase C is the only safety net.
                 # For PANIC_FLATTEN with websocket source: always defer to watcher
-                # because the watcher already uses yes_ask (ASK-based) correctly.
+                # because the watcher uses ask/bid stop-loss thresholds directly.
                 if self.stop_loss_watcher is not None and price_source == "websocket" and not zero_bid_collapse:
                     continue
                 if bracket.position_quantity <= 0:
@@ -2743,53 +2779,6 @@ class TemperatureStrategy:
                         action="stop_loss_not_executed",
                     )
                     continue
-                # Spread guard: only allow the stop-loss to fire when the YES
-                # bid-ask spread is tight, meaning the market agrees the position
-                # is a loser. A wide spread means the book is indecisive — the
-                # position may recover, so we hold rather than sell into thin air.
-                # (Bypassed for zero_bid_collapse, blind_below_stop, and PANIC_FLATTEN.)
-                if not bypass_spread_guard and yes_ask is not None and yes_ask > 0:
-                    sl_spread = yes_ask - current_price
-                    spread_wide = sl_spread > self.config.max_sl_spread
-                elif not bypass_spread_guard:
-                    # No ask (one-sided book) → treat as wide; PR #29 abandon
-                    # logic will take over after enough zero-fill attempts.
-                    sl_spread = None
-                    spread_wide = True
-                else:
-                    sl_spread = None
-                    spread_wide = False
-                if spread_wide:
-                    now_spread = asyncio.get_event_loop().time()
-                    hold_since = getattr(bracket, "_sl_held_for_spread_since", 0)
-                    if not hold_since:
-                        hold_since = now_spread
-                        bracket._sl_held_for_spread_since = hold_since
-                    seconds_held = now_spread - hold_since
-                    hold_max_seconds = max(0, int(getattr(self.config, "sl_spread_hold_max_seconds", 120)))
-                    if hold_max_seconds == 0 or seconds_held >= hold_max_seconds:
-                        bracket._sl_held_for_spread = False
-                        bracket._last_sl_held_log = 0
-                        bracket._sl_held_for_spread_since = 0
-                        logger.warning(
-                            "phase.c.sl_spread_hold_escalated",
-                            ticker=ticker,
-                            yes_bid=current_price,
-                            yes_ask=yes_ask,
-                            spread=sl_spread,
-                            max_spread=self.config.max_sl_spread,
-                            seconds_held=seconds_held,
-                        )
-                    else:
-                        bracket._sl_held_for_spread = True
-                        last_sl_held_log = getattr(bracket, "_last_sl_held_log", 0)
-                        if now_spread - last_sl_held_log >= 60:
-                            bracket._last_sl_held_log = now_spread
-                            logger.info("phase.c.sl_held_for_spread", ticker=ticker,
-                                        yes_bid=current_price, yes_ask=yes_ask,
-                                        spread=sl_spread, max_spread=self.config.max_sl_spread)
-                        continue
-                # Spread is tight — reset guard state and fire the stop-loss.
                 bracket._sl_held_for_spread = False
                 bracket._last_sl_held_log = 0
                 bracket._sl_held_for_spread_since = 0
@@ -2799,22 +2788,29 @@ class TemperatureStrategy:
                         "sl.panic_trigger_evaluated",
                         ticker=ticker,
                         side="yes",
+                        best_bid_yes=yes_bid,
                         best_ask_yes=yes_ask,
-                        stop_loss_price=self.config.stop_loss_price,
+                        stop_loss_price_ask=stop_loss_ask,
+                        stop_loss_price_bid=stop_loss_bid,
                         units="cents",
                         source=price_source,
                         trigger_met=True,
                     )
                 logger.warning("phase.c.stop_loss_triggered", ticker=ticker,
-                               last_price=current_price, stop_loss=self.config.stop_loss_price,
+                               last_price=current_price,
+                               stop_loss_ask=stop_loss_ask,
+                               stop_loss_bid=stop_loss_bid,
                                reason=stop_loss_reason)
                 if not getattr(bracket, "_stop_loss_counted", False):
                     await self._increment_stop_loss_count_for_market(bracket.market_ticker)
                     bracket._stop_loss_counted = True
                 if self.config.enable_fast_sl_exit:
-                    # For PANIC_FLATTEN pass yes_ask as trigger_price (the ASK
-                    # that actually met the threshold); other modes use current_price.
-                    trigger_px = yes_ask if is_panic_flatten else current_price
+                    if is_panic_flatten and ask_trigger and yes_ask is not None:
+                        trigger_px = yes_ask
+                    elif is_panic_flatten and bid_trigger and yes_bid is not None:
+                        trigger_px = yes_bid
+                    else:
+                        trigger_px = current_price
                     await self._dispatch_stop_loss_exit(
                         bracket,
                         trigger_price=trigger_px if trigger_px is not None else current_price,
