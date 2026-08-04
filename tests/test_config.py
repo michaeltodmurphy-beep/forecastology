@@ -6,7 +6,8 @@ os.environ['KALSHI_API_KEY'] = 'test_key'
 os.environ['KALSHI_PRIVATE_KEY_PATH'] = './test_key.pem'
 os.environ['MYSQL_DATABASE_URL'] = '******localhost:3306/test'
 os.environ['TRADING_MODE'] = 'PAPER'
-os.environ['BUY_TRIGGER_PRICE'] = '0.82'
+os.environ['BUY_TRIGGER_PRICE_LOW'] = '0.82'
+os.environ['BUY_TRIGGER_PRICE_HIGH'] = '0.83'
 os.environ['HEDGE_TRIGGER_PRICE'] = '0.48'
 os.environ['STOP_LOSS_PRICE_ASK'] = '0.35'
 os.environ['STOP_LOSS_PRICE_BID'] = '0.30'
@@ -26,7 +27,8 @@ class TestAppConfig:
         cfg = AppConfig.from_env()
         assert cfg.kalshi_api_key == 'test_key'
         assert cfg.trading_mode == 'PAPER'
-        assert cfg.buy_trigger_price == 82
+        assert cfg.buy_trigger_price_low == 82
+        assert cfg.buy_trigger_price_high == 83
         assert cfg.hedge_trigger_price == 48
         assert cfg.stop_loss_price_ask == 35
         assert cfg.stop_loss_price_bid == 30
@@ -36,6 +38,18 @@ class TestAppConfig:
         assert cfg.spread_monitor_price == 90
         assert cfg.dry_run is True
         assert cfg.enable_fast_sl_exit is False
+
+    def test_from_env_ignores_legacy_buy_trigger_price(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        os.environ["BUY_TRIGGER_PRICE"] = "0.99"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.buy_trigger_price_low == 82
+            assert cfg.buy_trigger_price_high == 83
+        finally:
+            os.environ.pop("BUY_TRIGGER_PRICE", None)
 
     def test_low_ticker_10pm_max_ask_parses_dollar_value(self):
         import pytest
@@ -105,7 +119,8 @@ class TestAppConfig:
             trading_mode='LIVE',
             initial_contract_count=1,
             monitor_start_price=80,
-            buy_trigger_price=82,
+            buy_trigger_price_low=82,
+            buy_trigger_price_high=82,
             spread_monitor_price=90,
             minimum_spread=4,
             stop_loss_price=35,
@@ -124,7 +139,8 @@ class TestAppConfig:
             trading_mode='PAPER',
             initial_contract_count=1,
             monitor_start_price=80,
-            buy_trigger_price=82,
+            buy_trigger_price_low=82,
+            buy_trigger_price_high=82,
             spread_monitor_price=90,
             minimum_spread=4,
             stop_loss_price=35,

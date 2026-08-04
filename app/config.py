@@ -151,7 +151,8 @@ class AppConfig(BaseSettings):
     trading_mode: Literal['PAPER', 'LIVE'] = 'PAPER'
     initial_contract_count: int = 1
     monitor_start_price: int
-    buy_trigger_price: int
+    buy_trigger_price_low: int
+    buy_trigger_price_high: int
     spread_monitor_price: int
     minimum_spread: int
     stop_loss_price_ask: int
@@ -281,7 +282,7 @@ class AppConfig(BaseSettings):
     sl_flatten_unprotected_on_blind: bool = False
 
     @field_validator(
-        'buy_trigger_price', 'spread_monitor_price', 'minimum_spread',
+        'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price_ask', 'stop_loss_price_bid', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask',
@@ -318,6 +319,10 @@ class AppConfig(BaseSettings):
         if isinstance(values, dict):
             if "stop_loss_price_ask" not in values and "stop_loss_price" in values:
                 values["stop_loss_price_ask"] = values["stop_loss_price"]
+            if "buy_trigger_price_low" not in values and "buy_trigger_price" in values:
+                values["buy_trigger_price_low"] = values["buy_trigger_price"]
+            if "buy_trigger_price_high" not in values and "buy_trigger_price" in values:
+                values["buy_trigger_price_high"] = values["buy_trigger_price"]
         return values
 
     @model_validator(mode='after')
@@ -336,6 +341,17 @@ class AppConfig(BaseSettings):
     @stop_loss_price.setter
     def stop_loss_price(self, value: int) -> None:
         self.stop_loss_price_ask = int(value)
+
+    @property
+    def buy_trigger_price(self) -> int:
+        """Compatibility alias for callers that still expect a single trigger."""
+        return int(self.buy_trigger_price_high)
+
+    @buy_trigger_price.setter
+    def buy_trigger_price(self, value: int) -> None:
+        parsed = int(value)
+        self.buy_trigger_price_low = parsed
+        self.buy_trigger_price_high = parsed
 
     @classmethod
     def from_env(cls) -> 'AppConfig':
@@ -417,6 +433,8 @@ class AppConfig(BaseSettings):
             phoenix_entry_start_local=phoenix_entry_start_local,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
+            buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
+            buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
             low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,
             low_ticker_closeout_time_et=low_ticker_closeout_time_et,
             low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,

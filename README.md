@@ -257,7 +257,11 @@ The hedge engine has been removed. The strategy is now a simple entry + stop-los
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢).
+**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢):
+- `KXLOW*` uses `BUY_TRIGGER_PRICE_LOW` (default 85¢)
+- `KXHIGH*` uses `BUY_TRIGGER_PRICE_HIGH` (default 85¢)
+
+Migration note: replace legacy `BUY_TRIGGER_PRICE` in `.env` with both `BUY_TRIGGER_PRICE_LOW` and `BUY_TRIGGER_PRICE_HIGH`. There is no fallback to the old single variable.
 
 Before each buy, the bot looks up `StopLossLedger(series_ticker, date_prefix)` using the market ticker's parsed `YYMMMDD` segment:
 
@@ -372,7 +376,7 @@ This means any bracket in the same series on the same day inherits the same reco
 This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is **three** buys at `2 + 4 + 8 = 14` contracts total before the strategy stops buying that series for the day. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3`, the sequence is `3 + 6 + 12 = 21` contracts (max single order = **12**).
 
 ### Watchlist Evaluation Floor (`EVAL_PRICE_FLOOR`)
-Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below `BUY_TRIGGER_PRICE` still emit `phase.b.below_trigger`.
+Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below their family-specific buy trigger still emit `phase.b.below_trigger`.
 
 ## Security
 
@@ -495,7 +499,11 @@ The hedge engine has been removed. The strategy is now a simple entry + stop-los
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ `BUY_TRIGGER_PRICE` (default 85¢) AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢).
+**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢):
+- `KXLOW*` uses `BUY_TRIGGER_PRICE_LOW` (default 85¢)
+- `KXHIGH*` uses `BUY_TRIGGER_PRICE_HIGH` (default 85¢)
+
+Migration note: replace legacy `BUY_TRIGGER_PRICE` in `.env` with both `BUY_TRIGGER_PRICE_LOW` and `BUY_TRIGGER_PRICE_HIGH`. There is no fallback to the old single variable.
 
 Before each buy, the bot looks up `StopLossLedger(series_ticker, date_prefix)` using the market ticker's parsed `YYMMMDD` segment:
 
@@ -581,7 +589,7 @@ This means any bracket in the same series on the same day inherits the same reco
 This is explicitly a martingale. With `INITIAL_CONTRACT_COUNT=2` and `HEDGE_MAX_FACTOR=3`, the maximum daily sequence for one series is **three** buys at `2 + 4 + 8 = 14` contracts total before the strategy stops buying that series for the day. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3`, the sequence is `3 + 6 + 12 = 21` contracts (max single order = **12**).
 
 ### Watchlist Evaluation Floor (`EVAL_PRICE_FLOOR`)
-Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below `BUY_TRIGGER_PRICE` still emit `phase.b.below_trigger`.
+Brackets priced at or below the floor are skipped early in `_evaluate_watchlist` without emitting a `phase.b.below_trigger` log. Brackets above the floor but below their family-specific buy trigger still emit `phase.b.below_trigger`.
 
 ## Security
 

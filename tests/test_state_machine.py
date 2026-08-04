@@ -237,7 +237,8 @@ def make_config(**overrides):
         trading_mode="PAPER",
         initial_contract_count=2,
         monitor_start_price=80,
-        buy_trigger_price=82,
+        buy_trigger_price_low=82,
+        buy_trigger_price_high=82,
         spread_monitor_price=90,
         minimum_spread=4,
         stop_loss_price=50,
@@ -470,6 +471,65 @@ async def test_eval_price_floor_boundary_logs_below_trigger_above_floor(monkeypa
     await strategy._evaluate_watchlist()
 
     assert "phase.b.below_trigger" in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_low_ticker_uses_low_buy_trigger_only(monkeypatch):
+    strategy = make_strategy(monkeypatch, buy_trigger_price_low=82, buy_trigger_price_high=95)
+    bracket = MarketBracket(
+        market_ticker="KXLOWTBOS-26JUN22-B52.5",
+        event_ticker="EVT1",
+        series_ticker="KXLOWTBOS",
+        bracket_label="low trigger",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 80, 83)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    strategy._execute_entry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_high_ticker_uses_high_buy_trigger_only(monkeypatch):
+    strategy = make_strategy(monkeypatch, buy_trigger_price_low=82, buy_trigger_price_high=84)
+    bracket = MarketBracket(
+        market_ticker="KXHIGHTBOS-26JUN22-B71.5",
+        event_ticker="EVT1",
+        series_ticker="KXHIGHTBOS",
+        bracket_label="high trigger",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 82, 85)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    strategy._execute_entry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unknown_ticker_family_is_not_bought(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    bracket = MarketBracket(
+        market_ticker="KXMIDTBOS-26JUN22-B52.5",
+        event_ticker="EVT1",
+        series_ticker="KXMIDTBOS",
+        bracket_label="unknown family",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 85, 86)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    strategy._execute_entry.assert_not_awaited()
+    assert "phase.b.entry_blocked_unknown_family" in [event for event, _ in logged]
 
 
 @pytest.mark.asyncio
@@ -1448,7 +1508,8 @@ def test_config_loads_without_hedge_trigger_price(monkeypatch):
         "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
         "MYSQL_DATABASE_URL": "******localhost:3306/test",
         "TRADING_MODE": "PAPER",
-        "BUY_TRIGGER_PRICE": "0.82",
+        "BUY_TRIGGER_PRICE_LOW": "0.82",
+        "BUY_TRIGGER_PRICE_HIGH": "0.84",
         "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "2",
         "MINIMUM_SPREAD": "0.04",
@@ -1465,6 +1526,8 @@ def test_config_loads_without_hedge_trigger_price(monkeypatch):
 
     assert cfg.hedge_trigger_price == 0
     assert cfg.hedge_buy == 0
+    assert cfg.buy_trigger_price_low == 82
+    assert cfg.buy_trigger_price_high == 84
     assert cfg.stop_loss_price == 35
     assert cfg.hedge_max_factor == 3
 
@@ -1765,7 +1828,8 @@ def test_hedge_max_factor_loaded_as_int_from_env(monkeypatch):
         "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
         "MYSQL_DATABASE_URL": "******localhost:3306/test",
         "TRADING_MODE": "PAPER",
-        "BUY_TRIGGER_PRICE": "0.82",
+        "BUY_TRIGGER_PRICE_LOW": "0.82",
+        "BUY_TRIGGER_PRICE_HIGH": "0.84",
         "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "1",
         "MINIMUM_SPREAD": "0.04",
@@ -1830,7 +1894,8 @@ def test_initial_contract_count_loaded_from_env(monkeypatch):
         "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
         "MYSQL_DATABASE_URL": "******localhost:3306/test",
         "TRADING_MODE": "PAPER",
-        "BUY_TRIGGER_PRICE": "0.82",
+        "BUY_TRIGGER_PRICE_LOW": "0.82",
+        "BUY_TRIGGER_PRICE_HIGH": "0.84",
         "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "4",
         "MINIMUM_SPREAD": "0.04",
@@ -4114,7 +4179,8 @@ async def test_monitor_run_cycle_does_not_submit_stop_loss(monkeypatch):
         trading_mode="PAPER",
         initial_contract_count=2,
         monitor_start_price=80,
-        buy_trigger_price=82,
+        buy_trigger_price_low=82,
+        buy_trigger_price_high=82,
         spread_monitor_price=90,
         minimum_spread=4,
         stop_loss_price=50,

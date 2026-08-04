@@ -33,7 +33,7 @@ from app.config import AppConfig
 from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
 from core.constants import SERIES_LIST, get_eastern_today_date_prefix
-from core.state_machine import hedge_policy
+from core.state_machine import hedge_policy, get_buy_trigger_price
 from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
 from data.ticker_cache import TickerCache
 from execution.factory import create_executor
@@ -242,7 +242,6 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
             )
             held_tickers = {row[0] for row in result.fetchall()}
 
-        buy_trigger = config.buy_trigger_price
         min_spread = config.minimum_spread
 
         max_buy_attempts = 3
@@ -251,6 +250,10 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
         markets_to_check = [t for t in all_markets if t in orderbooks and t not in held_tickers]
 
         for ticker in markets_to_check:
+            buy_trigger = get_buy_trigger_price(config, ticker)
+            if buy_trigger is None:
+                logger.info("scanner.entry_blocked_unknown_family", ticker=ticker)
+                continue
             ob = orderbooks[ticker]
             ask = ob.get("best_ask")
             bid = ob.get("best_bid")
