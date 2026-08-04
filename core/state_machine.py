@@ -64,6 +64,15 @@ def _parse_date_prefix(date_prefix: str) -> Optional[datetime.date]:
         return None
 
 
+def get_buy_trigger_price(config: "AppConfig", market_ticker: str) -> Optional[int]:
+    ticker_upper = market_ticker.upper()
+    if "KXLOW" in ticker_upper:
+        return int(config.buy_trigger_price_low)
+    if "KXHIGH" in ticker_upper:
+        return int(config.buy_trigger_price_high)
+    return None
+
+
 def hedge_policy(
     initial_qty: int,
     hedge_max_factor: int,
@@ -1175,7 +1184,8 @@ class TemperatureStrategy:
 
         logger.info("strategy.started",
                      monitor_start=self.config.monitor_start_price,
-                     buy_trigger=self.config.buy_trigger_price,
+                     buy_trigger_low=self.config.buy_trigger_price_low,
+                     buy_trigger_high=self.config.buy_trigger_price_high,
                      minimum_spread=self.config.minimum_spread,
                      spread_monitor=self.config.spread_monitor_price,
                      stop_loss=self.config.stop_loss_price,
@@ -1780,12 +1790,18 @@ class TemperatureStrategy:
 
             bracket.last_price = price
 
+            buy_trigger = get_buy_trigger_price(self.config, ticker)
+
             if price > self.config.spread_monitor_price:
                 bracket.falling_knife_guard = True
-            elif price < self.config.buy_trigger_price:
+            elif buy_trigger is not None and price < buy_trigger:
                 bracket.falling_knife_guard = False
 
             if not should_evaluate_entry:
+                continue
+
+            if buy_trigger is None:
+                logger.info("phase.b.entry_blocked_unknown_family", ticker=ticker)
                 continue
 
             # Skip if we don't have both price (yes_ask) and spread
@@ -1804,9 +1820,9 @@ class TemperatureStrategy:
             if price <= self.config.eval_price_floor:
                 continue
 
-            if price < self.config.buy_trigger_price:
+            if price < buy_trigger:
                 logger.debug("phase.b.below_trigger", ticker=ticker, price=price,
-                             buy_trigger=self.config.buy_trigger_price)
+                             buy_trigger=buy_trigger)
                 continue
 
             if price > self.config.spread_monitor_price:
@@ -2123,7 +2139,12 @@ class TemperatureStrategy:
         if ob is None:
             prices = await self._fetch_live_prices([bracket.market_ticker])
             ob = prices.get(bracket.market_ticker)
-        price = self.config.buy_trigger_price
+        price = get_buy_trigger_price(self.config, bracket.market_ticker)
+        if price is None:
+            bracket.phase = Phase.MONITORING
+            bracket.crossed_buy = False
+            logger.info("entry.blocked_unknown_family", ticker=bracket.market_ticker)
+            return
         if ob and ob.yes_asks:
             price = ob.yes_asks[0].price
 

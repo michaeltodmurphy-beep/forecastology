@@ -74,6 +74,78 @@ def test_main_exits_early_when_daemon_running(tmp_path, capfd):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_run_scan_cycle_uses_family_specific_buy_triggers(monkeypatch):
+    from app.config import AppConfig
+
+    config = AppConfig(
+        kalshi_api_key="test-key",
+        kalshi_private_key_path="unused.pem",
+        mysql_database_url="******localhost:3306/test",
+        trading_mode="PAPER",
+        initial_contract_count=1,
+        monitor_start_price=80,
+        buy_trigger_price_low=82,
+        buy_trigger_price_high=90,
+        spread_monitor_price=95,
+        minimum_spread=2,
+        stop_loss_price=25,
+        hedge_max_factor=2,
+    )
+
+    bought = []
+
+    async def fake_fetch(_config, _client):
+        return (
+            [
+                "KXLOWTLAX-26JUL30-B65.5",
+                "KXHIGHTLAX-26JUL30-B95",
+                "KXMIDTLAX-26JUL30-B70",
+            ],
+            {
+                "KXLOWTLAX-26JUL30-B65.5": {"best_ask": 83, "best_bid": 82, "spread": 1},
+                "KXHIGHTLAX-26JUL30-B95": {"best_ask": 89, "best_bid": 88, "spread": 1},
+                "KXMIDTLAX-26JUL30-B70": {"best_ask": 95, "best_bid": 94, "spread": 1},
+            },
+        )
+
+    class FakeResult:
+        def fetchall(self):
+            return []
+
+    class FakeSession:
+        def add(self, *_args, **_kwargs):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return FakeResult()
+
+    class FakeSessionCtx:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeDB:
+        async def get_session(self):
+            return FakeSessionCtx()
+
+    async def fake_buy_market(_config, ticker, ask, _client):
+        bought.append((ticker, ask))
+        return True
+
+    monkeypatch.setattr(scanner_module, "_fetch_markets_via_rest", fake_fetch)
+    monkeypatch.setattr(scanner_module, "buy_market", fake_buy_market)
+
+    await scanner_module.run_scan_cycle(config, FakeDB())
+
+    assert bought == [("KXLOWTLAX-26JUL30-B65.5", 83)]
+
+
+@pytest.mark.asyncio
 async def test_scanner_buy_executor_cap_blocks_oversized_order(monkeypatch):
     """Scanner buy_market must propagate executor-level hedge.cap_blocked rejections.
 
@@ -142,7 +214,8 @@ async def test_scanner_buy_executor_cap_blocks_oversized_order(monkeypatch):
         trading_mode="PAPER",
         initial_contract_count=16,
         monitor_start_price=80,
-        buy_trigger_price=72,
+        buy_trigger_price_low=72,
+        buy_trigger_price_high=72,
         spread_monitor_price=90,
         minimum_spread=2,
         stop_loss_price=25,
@@ -196,7 +269,8 @@ async def test_scanner_buy_uses_executor_buy_yes(monkeypatch):
         trading_mode="PAPER",
         initial_contract_count=4,
         monitor_start_price=80,
-        buy_trigger_price=72,
+        buy_trigger_price_low=72,
+        buy_trigger_price_high=72,
         spread_monitor_price=90,
         minimum_spread=2,
         stop_loss_price=25,
@@ -246,7 +320,8 @@ async def test_scanner_buy_logs_cap_blocked_not_buy_yes_when_qty_at_cap(monkeypa
         trading_mode="PAPER",
         initial_contract_count=4,
         monitor_start_price=80,
-        buy_trigger_price=72,
+        buy_trigger_price_low=72,
+        buy_trigger_price_high=72,
         spread_monitor_price=90,
         minimum_spread=2,
         stop_loss_price=25,
@@ -283,7 +358,8 @@ async def test_scanner_buy_blocks_when_existing_plus_proposed_exceeds_cap(monkey
         trading_mode="PAPER",
         initial_contract_count=5,
         monitor_start_price=80,
-        buy_trigger_price=72,
+        buy_trigger_price_low=72,
+        buy_trigger_price_high=72,
         spread_monitor_price=90,
         minimum_spread=2,
         stop_loss_price=25,
