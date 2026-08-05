@@ -717,3 +717,101 @@ Unique index on `(station_code, forecast_date_utc)` with upsert semantics.
 `forecast_date_utc` is UTC midnight of the station-local trading-day start date
 (for non-`KPHX`, local `00:00`–`00:59:59` still maps to the prior trading day),
 so it may differ from the UTC calendar date when the updater runs near rollovers.
+
+---
+
+## Trade Outcome Tracking & City P&L Analysis
+
+### Overview
+
+The bot now records a `TradeOutcome` row for every position.  These rows are
+used to compute per-city and per-entry-price-bucket realized P&L so that
+unprofitable cities or entry strategies can be identified and cut.
+
+### `trade_outcomes` Table
+
+One row per `(market_ticker, date_prefix)` position lifecycle.
+
+| Column | Type | Description |
+|---|---|---|
+| `series_ticker` | VARCHAR | Series prefix, e.g. `KXLOWTBOS` |
+| `date_prefix` | VARCHAR | Ticker date segment, e.g. `26JUL16` |
+| `market_ticker` | VARCHAR | Full market ticker |
+| `city` | VARCHAR | Human-readable city name from `SERIES_CITY` |
+| `family` | VARCHAR | `LOW` or `HIGH` |
+| `entry_price_avg` | INT | Average entry fill price in cents |
+| `entry_qty` | INT | Total entry quantity |
+| `exit_price_avg` | INT | Average exit price in cents (null while OPEN) |
+| `exit_qty` | INT | Exit quantity |
+| `outcome` | ENUM | `OPEN`, `STOPPED`, `CLOSED_OUT`, `SETTLED_WIN`, `SETTLED_LOSS` |
+| `realized_pnl_cents` | INT | Realized P&L in cents (negative = loss) |
+| `stop_loss_count_at_entry` | INT | `StopLossLedger` count at entry time |
+| `entry_ask_cents` | INT | Fill ask price at entry |
+| `entry_spread_cents` | INT | Bid-ask spread at entry |
+| `entry_price_bucket` | VARCHAR | Bucketed entry price: `<=71`, `72-75`, `76-80`, `81-86`, `87+` |
+| `minutes_to_forecast_low` | INT | Signed minutes between entry and NWS forecast low time |
+| `forecast_low_temp` | FLOAT | NWS forecast low temperature (if available) |
+| `bracket_temp` | FLOAT | Bracket temperature parsed from ticker (e.g. `B52.5` → 52.5) |
+| `forecast_vs_bracket_delta` | FLOAT | `forecast_low_temp − bracket_temp` |
+
+Unique constraint: `(market_ticker, date_prefix)`.
+
+### Lifecycle
+
+1. **Created at entry** (`outcome=OPEN`) with entry context captured
+   best-effort (spread, forecast timing, price bucket).
+2. **Updated on stop-loss / close-out** to `STOPPED` or `CLOSED_OUT` with
+   exit price and realized P&L.
+3. **Backfilled by the settlement reconciler** for positions held to
+   settlement (`SETTLED_WIN` or `SETTLED_LOSS`).
+
+### Settlement Reconciler
+
+A background async loop (`_settlement_reconciler_loop`) runs periodically and
+queries the Kalshi REST API (`GET /trade-api/v2/markets/{ticker}`) for settled
+market results.
+
+**Config flags** (`.env`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENABLE_SETTLEMENT_RECONCILER` | `true` | Enable/disable the reconciler |
+| `RECONCILER_INTERVAL_MINUTES` | `60` | Run interval in minutes |
+
+The reconciler is non-blocking: DB failures are logged and swallowed without
+affecting the WebSocket reader or stop-loss paths.
+
+### City P&L Report CLI
+
+```bash
+# Per-city breakdown for the last 60 days of LOW trades
+python -m reports.city_pnl --days 60 --family LOW
+
+# Per entry-price-bucket breakdown
+python -m reports.city_pnl --days 60 --family LOW --bucket
+
+# Per stop-loss-count (validates martingale recovery expectancy)
+python -m reports.city_pnl --days 60 --family LOW --count
+
+# CSV output
+python -m reports.city_pnl --days 60 --family LOW --csv > pnl.csv
+```
+
+**Output columns:**
+
+| Column | Description |
+|---|---|
+| group | City / bucket / count group |
+| trades | Number of resolved trades |
+| wins | Number of winning trades |
+| win% | Observed win rate |
+| W* | Breakeven win rate = (avg_entry − avg_loss_exit) / (100 − avg_loss_exit) |
+| avg_entry | Average entry price (¢) |
+| avg_loss_exit | Average exit price on losing trades (¢) |
+| EV/contract | Expected value per contract (¢) |
+| verdict | `KEEP`, `CUT?`, or `INSUFFICIENT` (< 25 trades) |
+
+**Verdict logic:**
+- `INSUFFICIENT` — fewer than 25 resolved trades (not enough data)
+- `KEEP` — observed win rate ≥ W* (edge is positive)
+- `CUT?` — observed win rate < W* (edge is negative; consider blocking city)
