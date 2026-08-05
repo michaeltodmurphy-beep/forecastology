@@ -280,6 +280,14 @@ class AppConfig(BaseSettings):
     #   are fully respected. Default: false (conservative; alert only).
     sl_unprotected_max_blind_cycles: int = 30
     sl_flatten_unprotected_on_blind: bool = False
+    # ── Settlement reconciler ────────────────────────────────────────────────
+    # Background loop that backfills TradeOutcome rows by querying Kalshi for
+    # settled market results.
+    #
+    # ENABLE_SETTLEMENT_RECONCILER=true|false  (default: true)
+    # RECONCILER_INTERVAL_MINUTES=<int>        (default: 60)
+    enable_settlement_reconciler: bool = True
+    reconciler_interval_minutes: int = 60
 
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
@@ -422,6 +430,16 @@ class AppConfig(BaseSettings):
             "SL_FLATTEN_UNPROTECTED_ON_BLIND",
             default=False,
         )
+        enable_settlement_reconciler = _parse_trade_toggle(
+            os.getenv("ENABLE_SETTLEMENT_RECONCILER"),
+            "ENABLE_SETTLEMENT_RECONCILER",
+            default=True,
+        )
+        reconciler_interval_minutes = _parse_positive_int(
+            os.getenv("RECONCILER_INTERVAL_MINUTES"),
+            "RECONCILER_INTERVAL_MINUTES",
+            default=60,
+        )
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -449,4 +467,6 @@ class AppConfig(BaseSettings):
             log_backup_count=log_backup_count,
             sl_unprotected_max_blind_cycles=sl_unprotected_max_blind_cycles,
             sl_flatten_unprotected_on_blind=sl_flatten_unprotected_on_blind,
+            enable_settlement_reconciler=enable_settlement_reconciler,
+            reconciler_interval_minutes=reconciler_interval_minutes,
         )

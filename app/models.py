@@ -196,6 +196,67 @@ class OrderAction(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class TradeOutcomeStatus(str, enum.Enum):
+    OPEN = "OPEN"
+    STOPPED = "STOPPED"
+    CLOSED_OUT = "CLOSED_OUT"
+    SETTLED_WIN = "SETTLED_WIN"
+    SETTLED_LOSS = "SETTLED_LOSS"
+
+
+class TradeOutcome(Base):
+    """Per-market trade outcome row for P&L analysis.
+
+    One row per (market_ticker, date_prefix) position lifecycle.  Created at
+    entry time with outcome=OPEN and updated by the settlement reconciler or
+    on exit.  All price columns are integer cents consistent with ExecutedTrade.
+    """
+    __tablename__ = "trade_outcomes"
+    __table_args__ = (
+        UniqueConstraint("market_ticker", "date_prefix", name="uq_outcome_ticker_date"),
+        Index("idx_to_series_ticker", "series_ticker"),
+        Index("idx_to_market_ticker", "market_ticker"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    series_ticker = Column(String(200), nullable=False)
+    date_prefix = Column(String(20), nullable=False)
+    market_ticker = Column(String(200), nullable=False)
+    city = Column(String(100), nullable=True)
+    # "LOW" or "HIGH", derived from ticker prefix
+    family = Column(String(10), nullable=True)
+
+    # Entry fill data
+    entry_price_avg = Column(Integer, nullable=True, comment="Average entry fill price in cents")
+    entry_qty = Column(Integer, nullable=True)
+
+    # Exit fill data (null while OPEN)
+    exit_price_avg = Column(Integer, nullable=True, comment="Average exit fill price in cents")
+    exit_qty = Column(Integer, nullable=True)
+
+    outcome = Column(Enum(TradeOutcomeStatus), nullable=False, default=TradeOutcomeStatus.OPEN)
+    realized_pnl_cents = Column(Integer, nullable=True)
+
+    # Martingale context: StopLossLedger count at the time of entry
+    stop_loss_count_at_entry = Column(Integer, nullable=True)
+
+    # Entry-context columns for later analysis
+    entry_ask_cents = Column(Integer, nullable=True)
+    entry_spread_cents = Column(Integer, nullable=True)
+    # e.g. "<=71", "72-75", "76-80", "81-86", "87+"
+    entry_price_bucket = Column(String(20), nullable=True)
+
+    # Forecast-timing context (signed minutes: negative = before forecast low)
+    minutes_to_forecast_low = Column(Integer, nullable=True)
+    forecast_low_temp = Column(Float, nullable=True)
+    # Bracket temperature parsed from ticker segment (B52.5 → 52.5, T68 → 68.0)
+    bracket_temp = Column(Float, nullable=True)
+    forecast_vs_bracket_delta = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class StationForecast(Base):
     """Stores the forecasted time of daily high and low temperatures per station.
 

@@ -24,6 +24,7 @@ from app.models import (
     StreamedTicker, StreamedTrade, ExecutedTrade, TradeAction, TradeStatus,
     Position as PositionModel, PortfolioSnapshot, StopLossLedger,
     OrderAction, OrderActionStatus,
+    TradeOutcome, TradeOutcomeStatus,
 )
 from sqlalchemy import select, delete, update
 
@@ -1218,6 +1219,9 @@ class TemperatureStrategy:
         # Start Low-ticker 22:00 ET daily close-out loop
         asyncio.create_task(self._low_ticker_closeout_loop())
 
+        # Start settlement reconciler loop
+        asyncio.create_task(self._settlement_reconciler_loop())
+
     async def _restore_positions(self):
         """
         On startup, re-populate active_positions from the database
@@ -2315,6 +2319,16 @@ class TemperatureStrategy:
                 except Exception as e:
                     await session.rollback()
                     logger.error("phase.b.entry_db_error", ticker=bracket.market_ticker, error=str(e))
+
+            # ── Non-blocking TradeOutcome creation (best-effort) ─────────────
+            asyncio.create_task(
+                self._create_entry_outcome(
+                    bracket=bracket,
+                    fill_price=reconciled_fill_price,
+                    fill_qty=result.fill_quantity,
+                    ob=ob,
+                )
+            )
         else:
             bracket.phase = Phase.MONITORING
             logger.warning("phase.b.entry_failed", ticker=bracket.market_ticker,
@@ -2335,6 +2349,204 @@ class TemperatureStrategy:
             )
             row = result.scalar_one_or_none()
         return row.stop_loss_count if row else 0
+
+    async def _create_entry_outcome(
+        self,
+        bracket,
+        fill_price: int,
+        fill_qty: int,
+        ob: Optional[OrderBook],
+    ) -> None:
+        """Create an initial OPEN TradeOutcome row for a new entry.
+
+        Best-effort: wrapped in a top-level try/except so any failure is logged
+        and swallowed without affecting the position lifecycle.
+        """
+        from core.trade_outcome_utils import (
+            entry_price_bucket as _bucket,
+            parse_bracket_temp,
+            detect_family,
+        )
+        from core.local_time_gate import SERIES_CITY, get_series_prefix
+        try:
+            parsed = parse_series_and_date(bracket.market_ticker)
+            if parsed is None:
+                return
+            series_ticker, date_prefix = parsed
+            prefix = get_series_prefix(bracket.market_ticker)
+            city = SERIES_CITY.get(prefix)
+            family = detect_family(bracket.market_ticker)
+            bracket_temp_val = parse_bracket_temp(bracket.market_ticker)
+            price_bucket = _bucket(fill_price) if fill_price else None
+
+            # Spread at entry
+            entry_spread: Optional[int] = None
+            entry_ask: Optional[int] = fill_price
+            if ob is not None and ob.yes_bids and ob.yes_asks:
+                try:
+                    entry_spread = ob.yes_asks[0].price - ob.yes_bids[0].price
+                except Exception:
+                    pass
+
+            # StopLossLedger count at entry
+            sl_count_at_entry: Optional[int] = None
+            try:
+                sl_count_at_entry = await self._get_stop_loss_count_for_market(bracket.market_ticker)
+            except Exception:
+                pass
+
+            # NWS forecast context (best-effort)
+            forecast_low_temp: Optional[float] = None
+            minutes_to_forecast_low: Optional[int] = None
+            forecast_vs_bracket_delta: Optional[float] = None
+            try:
+                station = get_series_station_code(bracket.market_ticker)
+                if station is not None:
+                    import nws.gate as _nws_gate
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    fcast = await asyncio.to_thread(
+                        _nws_gate.get_station_forecast_context,
+                        station,
+                        now_utc,
+                    )
+                    if fcast is not None:
+                        forecast_low_temp = fcast.get("forecast_low_temp")
+                        minutes_to_forecast_low = fcast.get("minutes_to_forecast_low")
+                        if forecast_low_temp is not None and bracket_temp_val is not None:
+                            forecast_vs_bracket_delta = forecast_low_temp - bracket_temp_val
+            except Exception as exc:
+                logger.warning(
+                    "entry.outcome_forecast_context_failed",
+                    ticker=bracket.market_ticker,
+                    error=str(exc),
+                )
+
+            async with await self.db.get_session() as session:
+                # Upsert — if a row already exists (e.g. recovery re-entry) update it
+                existing_q = await session.execute(
+                    select(TradeOutcome).where(
+                        TradeOutcome.market_ticker == bracket.market_ticker,
+                        TradeOutcome.date_prefix == date_prefix,
+                    )
+                )
+                existing = existing_q.scalar_one_or_none()
+                if existing is None:
+                    row = TradeOutcome(
+                        series_ticker=series_ticker,
+                        date_prefix=date_prefix,
+                        market_ticker=bracket.market_ticker,
+                        city=city,
+                        family=family,
+                        entry_price_avg=fill_price,
+                        entry_qty=fill_qty,
+                        outcome=TradeOutcomeStatus.OPEN,
+                        stop_loss_count_at_entry=sl_count_at_entry,
+                        entry_ask_cents=entry_ask,
+                        entry_spread_cents=entry_spread,
+                        entry_price_bucket=price_bucket,
+                        bracket_temp=bracket_temp_val,
+                        forecast_low_temp=forecast_low_temp,
+                        minutes_to_forecast_low=minutes_to_forecast_low,
+                        forecast_vs_bracket_delta=forecast_vs_bracket_delta,
+                    )
+                    session.add(row)
+                else:
+                    # Recovery buy: update entry averages
+                    if existing.entry_qty and existing.entry_price_avg:
+                        old_cost = existing.entry_price_avg * existing.entry_qty
+                        new_cost = fill_price * fill_qty
+                        new_qty = existing.entry_qty + fill_qty
+                        existing.entry_price_avg = (old_cost + new_cost) // new_qty if new_qty else fill_price
+                        existing.entry_qty = new_qty
+                    existing.outcome = TradeOutcomeStatus.OPEN
+                try:
+                    await session.commit()
+                    logger.info(
+                        "entry.outcome_created",
+                        ticker=bracket.market_ticker,
+                        fill_price=fill_price,
+                        sl_count_at_entry=sl_count_at_entry,
+                        price_bucket=price_bucket,
+                    )
+                except Exception as exc:
+                    await session.rollback()
+                    logger.warning(
+                        "entry.outcome_db_failed",
+                        ticker=bracket.market_ticker,
+                        error=str(exc),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "entry.outcome_context_failed",
+                ticker=bracket.market_ticker,
+                error=str(exc),
+            )
+
+    async def _update_exit_outcome(
+        self,
+        market_ticker: str,
+        exit_price: int,
+        exit_qty: int,
+        outcome: TradeOutcomeStatus,
+    ) -> None:
+        """Update an existing TradeOutcome row with exit data.
+
+        Best-effort: never raises.  Called from a non-blocking asyncio.create_task.
+        """
+        try:
+            parsed = parse_series_and_date(market_ticker)
+            if parsed is None:
+                return
+            _, date_prefix = parsed
+
+            async with await self.db.get_session() as session:
+                q = await session.execute(
+                    select(TradeOutcome).where(
+                        TradeOutcome.market_ticker == market_ticker,
+                        TradeOutcome.date_prefix == date_prefix,
+                    )
+                )
+                row: Optional[TradeOutcome] = q.scalar_one_or_none()
+                if row is None:
+                    logger.warning(
+                        "exit.outcome_row_not_found",
+                        market_ticker=market_ticker,
+                        date_prefix=date_prefix,
+                    )
+                    return
+
+                # Compute realized P&L if we have entry data
+                pnl: Optional[int] = None
+                if row.entry_price_avg is not None and exit_price is not None and exit_qty:
+                    entry_qty_used = min(row.entry_qty or exit_qty, exit_qty)
+                    pnl = (exit_price - row.entry_price_avg) * entry_qty_used
+
+                row.exit_price_avg = exit_price
+                row.exit_qty = exit_qty
+                row.outcome = outcome
+                row.realized_pnl_cents = pnl
+
+                try:
+                    await session.commit()
+                    logger.info(
+                        "exit.outcome_updated",
+                        market_ticker=market_ticker,
+                        outcome=str(outcome),
+                        realized_pnl_cents=pnl,
+                    )
+                except Exception as exc:
+                    await session.rollback()
+                    logger.warning(
+                        "exit.outcome_update_db_failed",
+                        market_ticker=market_ticker,
+                        error=str(exc),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "exit.outcome_update_failed",
+                market_ticker=market_ticker,
+                error=str(exc),
+            )
 
     async def _increment_stop_loss_count_for_market(self, market_ticker: str) -> None:
         parsed = parse_series_and_date(market_ticker)
@@ -3229,6 +3441,15 @@ class TemperatureStrategy:
                         price=result.fill_price, proceeds=-result.total_cost_cents,
                         remaining_total_qty=live_count,
                         remaining_app_owned_qty=remaining_managed_qty)
+            # Non-blocking TradeOutcome update (best-effort)
+            asyncio.create_task(
+                self._update_exit_outcome(
+                    market_ticker=bracket.market_ticker,
+                    exit_price=result.fill_price,
+                    exit_qty=result.fill_quantity,
+                    outcome=TradeOutcomeStatus.STOPPED,
+                )
+            )
             if trigger_ts_ms is not None:
                 logger.info(
                     "sl.exit_fill_observed",
@@ -3605,6 +3826,29 @@ class TemperatureStrategy:
                 await self._run_low_ticker_closeout()
             except Exception as e:
                 logger.error("lowticker.closeout_loop_error", error=str(e), exc_info=True)
+
+    async def _settlement_reconciler_loop(self) -> None:
+        """Periodic background loop that reconciles TradeOutcome rows.
+
+        Runs at ``reconciler_interval_minutes`` cadence (default 60 min).
+        Config-gated by ``enable_settlement_reconciler`` (default true).
+        Never blocks or raises outside its own try/except.
+        """
+        if not self.config.enable_settlement_reconciler:
+            logger.info("reconciler.disabled")
+            return
+
+        from core.settlement_reconciler import run_reconciliation_cycle
+
+        interval_s = max(int(self.config.reconciler_interval_minutes), 1) * 60
+        while self._running:
+            await asyncio.sleep(interval_s)
+            if not self._reconciliation_complete:
+                continue
+            try:
+                await run_reconciliation_cycle(self.db, self.config)
+            except Exception as exc:
+                logger.error("reconciler.loop_error", error=str(exc), exc_info=True)
 
     async def stop(self):
         self._running = False

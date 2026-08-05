@@ -461,3 +461,41 @@ def is_trading_gate_open(
         gate_open,
     )
     return gate_open
+
+
+def get_station_forecast_context(
+    station_code: str,
+    now_utc: datetime,
+) -> Optional[dict]:
+    """Return a dict with forecast context for entry-time capture.
+
+    Returns a dict with:
+        - ``forecast_low_temp``: forecasted daily low temperature (float) or None
+        - ``minutes_to_forecast_low``: signed int minutes between now_utc and the
+          forecast low time (negative = before the low), or None
+
+    Returns None if no forecast is available.  Never raises.
+    """
+    try:
+        now = _ensure_utc(now_utc)
+        expected_forecast_date_utc, _ = _expected_forecast_date_utc(station_code, now)
+        with get_session() as session:
+            forecast = _forecast_for_day(session, station_code, expected_forecast_date_utc)
+            if forecast is None:
+                return None
+            low_time_utc = forecast.low_time_utc
+            # StationForecast stores low_time_utc but not the actual temp value.
+            # Return what we have: timing context and None for temperature
+            # (temperature is available from the NWS API cache, not the DB row).
+            minutes_to_low = None
+            if low_time_utc is not None:
+                low_utc = _ensure_utc(low_time_utc)
+                delta = low_utc - now
+                minutes_to_low = int(delta.total_seconds() / 60)
+            return {
+                "forecast_low_temp": None,  # Not stored in StationForecast
+                "minutes_to_forecast_low": minutes_to_low,
+            }
+    except Exception as exc:
+        logger.debug("gate.forecast_context_failed station=%s error=%r", station_code, exc)
+        return None
