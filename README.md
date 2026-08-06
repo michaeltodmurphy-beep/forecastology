@@ -151,12 +151,15 @@ Key variables:
 | `ENABLE_LOCAL_SETTLE_GATE` | `true` (default) / `false` — enable city-local-time entry gate; blocks new `KXLOW*` buys before the city's local rollover time (RESUME half of the STOP/RESUME rule). `KXHIGH*` tickers are never affected. |
 | `DEFAULT_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for all cities except Phoenix (default `01:00`) |
 | `PHOENIX_ENTRY_START_LOCAL` | Local time (`HH:MM`) at/after which new entries are allowed for Phoenix (default `00:00`; Phoenix observes Mountain Standard Time year-round, no DST) |
-| `LOW_TICKER_DAILY_CLOSEOUT_ENABLED` | `true` (default) / `false` — automatically flatten all open `KXLOW*` positions at `LOW_TICKER_CLOSEOUT_TIME_ET` every day (Eastern, DST-aware). `KXHIGH*` positions are never touched. |
-| `LOW_TICKER_CLOSEOUT_TIME_ET` | Wall-clock time (Eastern, `HH:MM`) at which the daily Low-ticker close-out fires (default `22:00`). |
-| `LOW_TICKER_CLOSEOUT_ON_LATE_START` | `true` (default) / `false` — if the process starts **after** the configured close-out time on a given ET day, run the close-out once immediately so the "no Low positions held overnight" intent is honoured. |
+| `LOW_TICKER_DAILY_CLOSEOUT_ENABLED` | `true` (default) / `false` — enable Low PM close evaluation for open `KXLOW*` positions. `KXHIGH*` positions are never touched. |
+| `LOW_PM_CLOSE_TIME` | Local wall-clock time (`HH:MM`) used for PM close evaluation **in each ticker’s own timezone** (default `22:00`). |
+| `LOW_PM_CLOSE_AMOUNT` | Ask-price threshold in integer cents for non-override tickers. PM close triggers only when `yes_ask < LOW_PM_CLOSE_AMOUNT` (strict). Default `93`. |
+| `PM_TICKERS_CLOSE` | Comma-separated ticker/series prefixes that should PM-close regardless of ask (e.g. `kxlowtchi,kxlowtbos`). Parsing is case-insensitive and whitespace-tolerant. |
+| `LOW_TICKER_CLOSEOUT_ON_LATE_START` | `true` (default) / `false` — when `false`, skips PM close for already-past local close times on the first loop after startup. |
+| `LOW_TICKER_CLOSEOUT_TIME_ET` | Legacy env var retained for backward compatibility; PM close timing is now driven by `LOW_PM_CLOSE_TIME` in ticker-local time. |
 | `LOW_TICKER_ENTRY_HALT_ENABLED` | `true` (default) / `false` — block new `KXLOW*` entry orders from being placed at or after `LOW_TICKER_ENTRY_HALT_TIME_ET` **only when YES ask is below `LOW_TICKER_10PM_MAX_ASK`**. High tickers are unaffected. |
 | `LOW_TICKER_ENTRY_HALT_TIME_ET` | Wall-clock time (Eastern, `HH:MM`) after which the Low 10 PM halt gate is evaluated (default `22:00`). |
-| `LOW_TICKER_10PM_MAX_ASK` | YES ask threshold for Low 10 PM halt/closeout behavior. Rule applies only when `yes_ask < LOW_TICKER_10PM_MAX_ASK` (strict). Default `0.93` (93¢). |
+| `LOW_TICKER_10PM_MAX_ASK` | YES ask threshold for Low 10 PM **entry halt** behavior. Rule applies only when `yes_ask < LOW_TICKER_10PM_MAX_ASK` (strict). Default `0.93` (93¢). |
 | `SL_UNPROTECTED_MAX_BLIND_CYCLES` | Number of consecutive no-price SL evaluation cycles before a CRITICAL `phase.c.unprotected_escalation` alert fires for a blind position (default `30`; at 250 ms cadence ≈ 7.5 s). |
 | `SL_FLATTEN_UNPROTECTED_ON_BLIND` | `false` (default, conservative) / `true` — when `true`, attempt a protective panic-flatten exit of `app_owned_qty` once the blind-cycle threshold is exceeded. Only `app_owned_qty` is ever sold; `MANAGE_EXTERNAL_POSITIONS` semantics are fully respected. |
 
@@ -300,23 +303,28 @@ Root cause of the 16-contract order: `monitor.py`'s `_buy_hedge` computed `qty =
 
 High and Low markets are naturally independent because they have different `series_ticker` values (for example `KXHIGHTBOS` vs `KXLOWTBOS`).
 
-### Low-ticker daily close-out (22:00 ET)
+### Low-ticker PM close (per-ticker local time)
 
-A dedicated background loop (`_low_ticker_closeout_loop`) runs every 30 seconds and fires the close-out exactly once per Eastern-calendar day at/after the configured time (`LOW_TICKER_CLOSEOUT_TIME_ET`, default `22:00`).
+A dedicated background loop (`_low_ticker_closeout_loop`) runs every 30 seconds and evaluates each open `KXLOW*` ticker once per local day after that ticker reaches `LOW_PM_CLOSE_TIME` (default `22:00` local).
 
 - Only `KXLOW*` tickers are affected; `KXHIGH*` positions are never touched.
-- At/after the configured ET close-out time, only `KXLOW*` positions with `yes_ask < LOW_TICKER_10PM_MAX_ASK` (default `<93¢`) are closed.
+- If ticker prefix matches `PM_TICKERS_CLOSE`, it is closed immediately (ask ignored).
+- Otherwise, ticker is closed only when `yes_ask < LOW_PM_CLOSE_AMOUNT` (strict).
 - Close-out is routed through the existing `_execute_stop_loss` path so ownership guards (`MANAGE_EXTERNAL_POSITIONS=false`) and idempotency records are fully respected.
-- When `LOW_TICKER_CLOSEOUT_ON_LATE_START=true` (default) and the process starts **after** the configured time, the close-out runs once on the first loop iteration so no Low positions are inadvertently held overnight.
+- Evaluation time is ticker-local (for example Boston at 22:00 `America/New_York`, Los Angeles at 22:00 `America/Los_Angeles`).
 - Logs: `lowticker.daily_closeout_start`, per-ticker `lowticker.daily_closeout_ticker_done`, and `lowticker.daily_closeout_complete`.
-- This close-out is driven **entirely by Eastern Time** — the ticker's own city timezone plays no role.  A Pacific-time KXLOW ticker is closed out at 22:00 ET (= 19:00 PT).
+
+**Migration note:** if you previously used `LOW_TICKER_CLOSEOUT_TIME_ET`, move to:
+- `LOW_PM_CLOSE_TIME=HH:MM`
+- `LOW_PM_CLOSE_AMOUNT=<cents>`
+- optional `PM_TICKERS_CLOSE=<csv prefixes>`
 
 ### Low-ticker STOP/RESUME rule (combined)
 
 Low-ticker trading is controlled by two complementary gates that together form the daily STOP/RESUME cycle:
 
-1. **STOP — global ET halt (22:00 ET)**
-   At 22:00 Eastern Time, Low-ticker 10 PM behavior applies only when current `yes_ask` is **strictly below** `LOW_TICKER_10PM_MAX_ASK` (default `<93¢`).  Implemented via `is_low_entry_halted_et` + ask-threshold gating in `_evaluate_watchlist` and `_low_ticker_closeout_loop`.  `KXHIGH*` entries are completely unaffected.
+1. **STOP — global ET entry halt (22:00 ET)**
+   At 22:00 Eastern Time, the Low-ticker entry halt applies only when current `yes_ask` is **strictly below** `LOW_TICKER_10PM_MAX_ASK` (default `<93¢`). Implemented via `is_low_entry_halted_et` + ask-threshold gating in `_evaluate_watchlist`. `KXHIGH*` entries are completely unaffected.
 
 2. **RESUME — per-city local time**
    New Low-ticker entries resume once the ticker's **own** city local clock reaches the resume threshold.  Implemented via `is_entry_allowed` in `core/local_time_gate.py`, called **only for `KXLOW*` tickers** (the `_evaluate_watchlist` call is guarded by `if is_low:`):

@@ -291,6 +291,33 @@ class TestNoTradeTickers:
         assert cfg.no_trade_tickers == {"KXLOWTSEA", "KXHIGHTSFO"}
 
 
+class TestPmTickerCloseConfig:
+    def setup_method(self):
+        for key in ("LOW_PM_CLOSE_TIME", "LOW_PM_CLOSE_AMOUNT", "PM_TICKERS_CLOSE"):
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        for key in ("LOW_PM_CLOSE_TIME", "LOW_PM_CLOSE_AMOUNT", "PM_TICKERS_CLOSE"):
+            os.environ.pop(key, None)
+
+    def test_pm_close_defaults(self):
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_pm_close_time == "22:00"
+        assert cfg.low_pm_close_amount == 93
+        assert cfg.pm_tickers_close == set()
+
+    def test_pm_close_config_parses_csv_case_insensitive(self):
+        os.environ["LOW_PM_CLOSE_TIME"] = "21:45"
+        os.environ["LOW_PM_CLOSE_AMOUNT"] = "95"
+        os.environ["PM_TICKERS_CLOSE"] = " kxlowtchi, KXLOWTBOS, ,"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.low_pm_close_time == "21:45"
+        assert cfg.low_pm_close_amount == 95
+        assert cfg.pm_tickers_close == {"KXLOWTCHI", "KXLOWTBOS"}
+
+
 class TestParseInitialContractCount:
     """Unit tests for _parse_initial_contract_count helper."""
 

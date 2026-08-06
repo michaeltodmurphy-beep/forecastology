@@ -1,7 +1,7 @@
 """
 Tests for:
   Part 1 — Hedge buy cap enforcement (bug fix)
-  Part 2 — Daily Low-ticker close-out at 22:00 ET
+  Part 2 — Daily Low-ticker PM close (ticker-local time)
   Part 3 — Low-ticker entry halt after 22:00 ET
 """
 import asyncio
@@ -21,7 +21,7 @@ from core.state_machine import (
     TemperatureStrategy,
     hedge_policy,
     is_low_entry_halted_et,
-    is_past_closeout_time_et,
+    is_past_low_pm_close_time_local,
     parse_series_and_date,
 )
 from core.types import MarketBracket, OrderRequest, OrderSide, Phase
@@ -702,28 +702,31 @@ async def test_evaluate_watchlist_allows_high_entry_after_2200_et(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Part 2 — is_past_closeout_time_et helper
+# Part 2 — is_past_low_pm_close_time_local helper
 # ---------------------------------------------------------------------------
 
 def _make_closeout_config(**kw) -> AppConfig:
     cfg = make_config(**kw)
     cfg.low_ticker_daily_closeout_enabled = kw.get("low_ticker_daily_closeout_enabled", True)
-    cfg.low_ticker_closeout_time_et = kw.get("low_ticker_closeout_time_et", "22:00")
     cfg.low_ticker_closeout_on_late_start = kw.get("low_ticker_closeout_on_late_start", True)
+    cfg.low_pm_close_time = kw.get("low_pm_close_time", "22:00")
+    cfg.low_pm_close_amount = kw.get("low_pm_close_amount", 93)
+    cfg.pm_tickers_close = kw.get("pm_tickers_close", set())
     return cfg
 
 
-@pytest.mark.parametrize("h,m,expected_past", [
-    (21, 59, False),
-    (22,  0, True),
-    (22,  1, True),
+@pytest.mark.parametrize("ticker,expected_past,expected_tz", [
+    ("KXLOWTBOS-26JUL04-B52.5", True, "America/New_York"),
+    ("KXLOWTLAX-26JUL04-B60.5", False, "America/Los_Angeles"),
 ])
-def test_is_past_closeout_time_et(h, m, expected_past):
+def test_is_past_low_pm_close_time_local_uses_ticker_timezone(ticker, expected_past, expected_tz):
     config = _make_closeout_config()
-    now_utc = _et(2025, 1, 15, h, m)
-    past, et_date = is_past_closeout_time_et(config, now_utc=now_utc)
+    # 02:00 UTC = 22:00 ET (past) but 19:00 PT (not past).
+    now_utc = datetime.datetime(2025, 7, 5, 2, 0, tzinfo=_UTC)
+    past, local_date, ctx = is_past_low_pm_close_time_local(config, ticker, now_utc=now_utc)
     assert past is expected_past
-    assert et_date == datetime.date(2025, 1, 15)
+    assert local_date == datetime.date(2025, 7, 4)
+    assert ctx["timezone"] == expected_tz
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +785,8 @@ async def test_run_low_ticker_closeout_flattens_only_low(monkeypatch):
 
     monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
 
-    await strategy._run_low_ticker_closeout()
+    now_utc = datetime.datetime(2025, 7, 31, 5, 30, tzinfo=_UTC)  # 22:30 PT previous day
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
 
     assert low_ticker in stop_loss_calls, "KXLOW position must be closed out"
     assert high_ticker not in stop_loss_calls, "KXHIGH position must be untouched"
@@ -824,7 +828,8 @@ async def test_run_low_ticker_closeout_respects_manage_external_false(monkeypatc
 
     monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
 
-    await strategy._run_low_ticker_closeout()
+    now_utc = datetime.datetime(2025, 7, 31, 5, 30, tzinfo=_UTC)  # 22:30 PT previous day
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
 
     # _execute_stop_loss is invoked; it will skip internally due to manage_external=False.
     assert low_ticker in stop_loss_calls
@@ -839,7 +844,7 @@ async def test_run_low_ticker_closeout_respects_manage_external_false(monkeypatc
 async def test_run_low_ticker_closeout_applies_only_below_ask_threshold(monkeypatch, yes_ask, expected_closed):
     strategy = make_strategy(monkeypatch)
     strategy._reconciliation_complete = True
-    strategy.config.low_ticker_10pm_max_ask = 93
+    strategy.config.low_pm_close_amount = 93
 
     low_ticker = "KXLOWTLAX-26JUL30-B60.5"
     low_bracket = MarketBracket(
@@ -865,7 +870,8 @@ async def test_run_low_ticker_closeout_applies_only_below_ask_threshold(monkeypa
 
     monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
 
-    await strategy._run_low_ticker_closeout()
+    now_utc = datetime.datetime(2025, 7, 31, 5, 30, tzinfo=_UTC)  # 22:30 PT previous day
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
 
     if expected_closed:
         assert low_ticker in stop_loss_calls
@@ -874,118 +880,121 @@ async def test_run_low_ticker_closeout_applies_only_below_ask_threshold(monkeypa
 
 
 # ---------------------------------------------------------------------------
-# Part 2 — Idempotency: close-out does not repeat on same ET day
+# Part 2 — Override and idempotency behavior
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_low_ticker_closeout_loop_idempotent(monkeypatch):
-    """The close-out loop runs exactly once per ET day even if called multiple times."""
-    import core.state_machine as sm
-
+async def test_run_low_ticker_closeout_override_closes_regardless_of_ask(monkeypatch):
     strategy = make_strategy(monkeypatch)
-    strategy._running = True
     strategy._reconciliation_complete = True
-    strategy.config.low_ticker_daily_closeout_enabled = True
-    strategy.config.low_ticker_closeout_time_et = "22:00"
-    strategy.config.low_ticker_closeout_on_late_start = True
+    strategy.config.low_pm_close_amount = 93
+    strategy.config.pm_tickers_close = {"kxlowtlax"}
 
-    run_count = []
-
-    async def _fake_run_closeout():
-        run_count.append(1)
-
-    monkeypatch.setattr(strategy, "_run_low_ticker_closeout", _fake_run_closeout)
-
-    # Patch is_past_closeout_time_et to always return True for today.
-    today_et = datetime.date(2025, 7, 30)
-
-    def _fake_past_closeout(cfg, now_utc=None):
-        return True, today_et
-
-    monkeypatch.setattr(sm, "is_past_closeout_time_et", _fake_past_closeout)
-
-    # Also patch asyncio.sleep so the loop runs immediately.
-    sleep_calls = []
-
-    async def _fast_sleep(n):
-        sleep_calls.append(n)
-        if len(sleep_calls) >= 3:
-            # Stop the loop after 3 iterations.
-            strategy._running = False
-
-    monkeypatch.setattr(sm.asyncio, "sleep", _fast_sleep)
-
-    await strategy._low_ticker_closeout_loop()
-
-    # close-out must have run exactly once despite multiple loop iterations.
-    assert len(run_count) == 1, (
-        f"Expected 1 close-out run but got {len(run_count)}"
+    low_ticker = "KXLOWTLAX-26JUL30-B60.5"
+    low_bracket = MarketBracket(
+        market_ticker=low_ticker,
+        event_ticker="KXLOWTLAX-26JUL30",
+        series_ticker="KXLOWTLAX",
+        bracket_label="B60.5",
+        phase=Phase.HOLDING,
+        falling_knife_guard=False,
+        crossed_buy=True,
+        position_quantity=4,
     )
+    strategy.active_positions[low_ticker] = low_bracket
+    strategy.brackets[low_ticker] = low_bracket
+    strategy._app_owned_qty[low_ticker] = 4
+    strategy.cache.update_quote(low_ticker, yes_bid=80, yes_ask=99)
 
+    stop_loss_calls = []
 
-# ---------------------------------------------------------------------------
-# Part 2 — Close-out loop is ET-based and unaffected by local timezone
-# ---------------------------------------------------------------------------
+    async def _fake_execute_stop_loss(bracket, **kw):
+        stop_loss_calls.append(bracket.market_ticker)
+        return False
+
+    monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
+    now_utc = datetime.datetime(2025, 7, 31, 5, 30, tzinfo=_UTC)  # 22:30 PT previous day
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
+
+    assert low_ticker in stop_loss_calls
+
 
 @pytest.mark.asyncio
-async def test_low_ticker_closeout_loop_fires_at_et_time_only(monkeypatch):
-    """Close-out fires based on ET time regardless of the ticker's local timezone.
-
-    A Pacific-time KXLOW ticker (22:00 ET = 19:00 PT) must be included in the
-    close-out that fires at 22:00 ET — the local-time gate for that ticker's
-    city (01:00 PT = 04:00 ET) plays no role in the close-out timing.
-
-    Sequence: before 22:00 ET → not fired; at 22:01 ET → fires exactly once;
-    same ET day → idempotent, does not fire again.
-    """
-    import core.state_machine as sm
-
+async def test_run_low_ticker_closeout_idempotent_per_ticker_local_day(monkeypatch):
     strategy = make_strategy(monkeypatch)
-    strategy._running = True
     strategy._reconciliation_complete = True
-    strategy.config.low_ticker_daily_closeout_enabled = True
-    strategy.config.low_ticker_closeout_time_et = "22:00"
-    # Use True so the close-out fires on the first crossing (not treated as a skip).
-    strategy.config.low_ticker_closeout_on_late_start = True
+    strategy.config.low_pm_close_amount = 93
 
-    run_count = []
-
-    async def _fake_run_closeout():
-        run_count.append(1)
-
-    monkeypatch.setattr(strategy, "_run_low_ticker_closeout", _fake_run_closeout)
-
-    sleep_calls = []
-
-    # Sequence: before 22:00 ET → NOT fired; at 22:01 ET → FIRED; same day → idempotent.
-    _before_22 = _et(2025, 7, 4, 21, 59)
-    _after_22  = _et(2025, 7, 4, 22, 1)
-    _still_22  = _et(2025, 7, 4, 23, 0)
-
-    _et_times_iter = iter([_before_22, _after_22, _still_22])
-
-    def _fake_past_closeout(cfg, now_utc=None):
-        t = next(_et_times_iter, _still_22)
-        et_tz = ZoneInfo("America/New_York")
-        now_et = t.astimezone(et_tz)
-        closeout_wall = datetime.time(22, 0)
-        past = now_et.time() >= closeout_wall
-        return past, now_et.date()
-
-    monkeypatch.setattr(sm, "is_past_closeout_time_et", _fake_past_closeout)
-
-    async def _fast_sleep(n):
-        sleep_calls.append(n)
-        if len(sleep_calls) >= 3:
-            strategy._running = False
-
-    monkeypatch.setattr(sm.asyncio, "sleep", _fast_sleep)
-
-    await strategy._low_ticker_closeout_loop()
-
-    assert len(run_count) == 1, (
-        f"Close-out should fire exactly once at/after 22:00 ET, got {len(run_count)}"
+    low_ticker = "KXLOWTLAX-26JUL30-B60.5"
+    low_bracket = MarketBracket(
+        market_ticker=low_ticker,
+        event_ticker="KXLOWTLAX-26JUL30",
+        series_ticker="KXLOWTLAX",
+        bracket_label="B60.5",
+        phase=Phase.HOLDING,
+        falling_knife_guard=False,
+        crossed_buy=True,
+        position_quantity=4,
     )
+    strategy.active_positions[low_ticker] = low_bracket
+    strategy.brackets[low_ticker] = low_bracket
+    strategy._app_owned_qty[low_ticker] = 4
+    strategy.cache.update_quote(low_ticker, yes_bid=80, yes_ask=92)
+
+    stop_loss_calls = []
+
+    async def _fake_execute_stop_loss(bracket, **kw):
+        stop_loss_calls.append(bracket.market_ticker)
+        return False
+
+    monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
+
+    now_utc = datetime.datetime(2025, 7, 31, 5, 30, tzinfo=_UTC)  # 22:30 PT previous day
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
+
+    assert stop_loss_calls == [low_ticker]
+
+
+@pytest.mark.asyncio
+async def test_run_low_ticker_closeout_uses_ticker_local_time(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    strategy._reconciliation_complete = True
+    strategy.config.low_pm_close_amount = 93
+    strategy.config.low_pm_close_time = "22:00"
+
+    ny_ticker = "KXLOWTBOS-26JUL04-B52.5"
+    la_ticker = "KXLOWTLAX-26JUL04-B60.5"
+    for ticker, series in ((ny_ticker, "KXLOWTBOS"), (la_ticker, "KXLOWTLAX")):
+        bracket = MarketBracket(
+            market_ticker=ticker,
+            event_ticker=f"{series}-26JUL04",
+            series_ticker=series,
+            bracket_label="B52.5",
+            phase=Phase.HOLDING,
+            falling_knife_guard=False,
+            crossed_buy=True,
+            position_quantity=4,
+        )
+        strategy.active_positions[ticker] = bracket
+        strategy.brackets[ticker] = bracket
+        strategy._app_owned_qty[ticker] = 4
+        strategy.cache.update_quote(ticker, yes_bid=80, yes_ask=92)
+
+    stop_loss_calls = []
+
+    async def _fake_execute_stop_loss(bracket, **kw):
+        stop_loss_calls.append(bracket.market_ticker)
+        return False
+
+    monkeypatch.setattr(strategy, "_execute_stop_loss", _fake_execute_stop_loss)
+
+    # 02:00 UTC = 22:00 ET (BOS should evaluate) but 19:00 PT (LAX should not).
+    now_utc = datetime.datetime(2025, 7, 5, 2, 0, tzinfo=_UTC)
+    await strategy._run_low_ticker_closeout(now_utc=now_utc)
+
+    assert ny_ticker in stop_loss_calls
+    assert la_ticker not in stop_loss_calls
 
 
 @pytest.mark.asyncio
