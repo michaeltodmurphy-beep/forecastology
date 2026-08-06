@@ -229,13 +229,15 @@ class AppConfig(BaseSettings):
     # Maximum age (ms) of a cached YES ask quote before it is considered stale
     # for PANIC_FLATTEN pre-submit revalidation. Set to 0 to disable the check.
     sl_panic_max_quote_age_ms: int = 30000
-    # ── Low-ticker daily close-out at 22:00 ET ──────────────────────────────
-    # Automatically flattens all open KXLOW* positions at the configured time
-    # (Eastern, DST-aware) every day.  KXHIGH* positions are not touched.
+    # ── Low-ticker PM close ──────────────────────────────────────────────────
+    # Automatically evaluates all open KXLOW* positions at each ticker's own
+    # local LOW_PM_CLOSE_TIME every day. KXHIGH* positions are not touched.
     #
     # LOW_TICKER_DAILY_CLOSEOUT_ENABLED=true|false  (default: true)
-    # LOW_TICKER_CLOSEOUT_TIME_ET=HH:MM             (default: 22:00)
     # LOW_TICKER_CLOSEOUT_ON_LATE_START=true|false  (default: true)
+    # LOW_PM_CLOSE_TIME=HH:MM                       (default: 22:00)
+    # LOW_PM_CLOSE_AMOUNT=<int cents>               (default: 93)
+    # PM_TICKERS_CLOSE=<csv series/ticker prefixes> (default: empty)
     #   When true, if the process starts after the configured closeout time
     #   on a given ET day, perform the closeout once immediately so the
     #   "no Low positions held overnight" intent is honoured.
@@ -244,6 +246,9 @@ class AppConfig(BaseSettings):
     low_ticker_daily_closeout_enabled: bool = True
     low_ticker_closeout_time_et: str = "22:00"
     low_ticker_closeout_on_late_start: bool = True
+    low_pm_close_time: str = "22:00"
+    low_pm_close_amount: int = 93
+    pm_tickers_close: Annotated[set[str], NoDecode] = set()
     # ── Low-ticker entry halt after 22:00 ET ────────────────────────────────
     # Prevents new KXLOW* entry orders from being placed at/after the
     # configured Eastern time.  The block lasts for the remainder of that
@@ -311,9 +316,9 @@ class AppConfig(BaseSettings):
         # Already an int or float — it's already in cents
         return int(v)
 
-    @field_validator('no_trade_tickers', mode='before')
+    @field_validator('no_trade_tickers', 'pm_tickers_close', mode='before')
     @classmethod
-    def parse_no_trade_tickers(cls, v):
+    def parse_upper_csv_set(cls, v):
         if not v:
             return set()
         if isinstance(v, (set, list)):
@@ -393,6 +398,13 @@ class AppConfig(BaseSettings):
             "LOW_TICKER_CLOSEOUT_ON_LATE_START",
             default=True,
         )
+        low_pm_close_time = os.getenv("LOW_PM_CLOSE_TIME", "22:00")
+        low_pm_close_amount = _parse_positive_int(
+            os.getenv("LOW_PM_CLOSE_AMOUNT"),
+            "LOW_PM_CLOSE_AMOUNT",
+            default=93,
+        )
+        pm_tickers_close_raw = os.getenv("PM_TICKERS_CLOSE", "")
         low_ticker_entry_halt_enabled = _parse_trade_toggle(
             os.getenv("LOW_TICKER_ENTRY_HALT_ENABLED"),
             "LOW_TICKER_ENTRY_HALT_ENABLED",
@@ -456,6 +468,9 @@ class AppConfig(BaseSettings):
             low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,
             low_ticker_closeout_time_et=low_ticker_closeout_time_et,
             low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,
+            low_pm_close_time=low_pm_close_time,
+            low_pm_close_amount=low_pm_close_amount,
+            pm_tickers_close=pm_tickers_close_raw,
             low_ticker_entry_halt_enabled=low_ticker_entry_halt_enabled,
             low_ticker_entry_halt_time_et=low_ticker_entry_halt_time_et,
             low_ticker_10pm_max_ask=low_ticker_10pm_max_ask,

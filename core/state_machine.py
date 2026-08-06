@@ -11,7 +11,7 @@ from core.types import (
     APP_CLIENT_ORDER_PREFIX,
 )
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
-from core.local_time_gate import is_entry_allowed, get_series_station_code
+from core.local_time_gate import is_entry_allowed, get_series_station_code, get_series_timezone
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -140,17 +140,48 @@ def is_low_10pm_ask_eligible(config: "AppConfig", yes_ask: Optional[int]) -> boo
     return yes_ask < threshold
 
 
-def is_past_closeout_time_et(config: "AppConfig", now_utc: Optional[datetime.datetime] = None) -> tuple[bool, datetime.date]:
-    """Return (past_closeout_time, et_date) for the Low-ticker 22:00 ET close-out gate."""
+def is_past_low_pm_close_time_local(
+    config: "AppConfig",
+    ticker: str,
+    now_utc: Optional[datetime.datetime] = None,
+) -> tuple[bool, Optional[datetime.date], dict]:
+    """Return whether ticker's local wall-clock is at/after LOW_PM_CLOSE_TIME."""
+    tz_name = get_series_timezone(ticker)
+    if not tz_name:
+        return False, None, {}
     if now_utc is None:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_et = now_utc.astimezone(_ET_ZONE)
+    now_local = now_utc.astimezone(ZoneInfo(tz_name))
     try:
-        closeout_time = _parse_hhmm_et(config.low_ticker_closeout_time_et)
+        closeout_time = _parse_hhmm_et(getattr(config, "low_pm_close_time", "22:00"))
     except (ValueError, AttributeError):
         closeout_time = datetime.time(22, 0)
-    past = now_et.time() >= closeout_time
-    return past, now_et.date()
+    past = now_local.time() >= closeout_time
+    return past, now_local.date(), {
+        "timezone": tz_name,
+        "local_time": now_local.strftime("%H:%M:%S"),
+        "close_time_local": closeout_time.strftime("%H:%M"),
+    }
+
+
+def is_low_pm_close_ask_eligible(config: "AppConfig", yes_ask: Optional[int]) -> bool:
+    if yes_ask is None:
+        return False
+    threshold = int(getattr(config, "low_pm_close_amount", 93))
+    return yes_ask < threshold
+
+
+def is_low_pm_close_override_ticker(config: "AppConfig", ticker: str) -> bool:
+    overrides = getattr(config, "pm_tickers_close", set()) or set()
+    ticker_upper = ticker.upper()
+    series_prefix = ticker_upper.split("-", 1)[0]
+    for raw in overrides:
+        prefix = str(raw).strip().upper()
+        if not prefix:
+            continue
+        if series_prefix == prefix or ticker_upper.startswith(prefix):
+            return True
+    return False
 
 
 @dataclass
@@ -237,9 +268,9 @@ class TemperatureStrategy:
         # SL checks still run every cycle.
         self._positions_api_cache: dict = {}
         self._positions_api_last_fetch: float = 0.0
-        # Low-ticker daily close-out idempotency: track the ET date on which the
-        # close-out has already run so it is not repeated within the same day.
-        self._low_ticker_closeout_date: Optional[datetime.date] = None
+        # Low-ticker PM close idempotency: track the local date already evaluated
+        # for each ticker so it is not re-evaluated within the same local day.
+        self._low_ticker_pm_close_eval_dates: dict[str, datetime.date] = {}
 
         # Timestamp-based throttle for portfolio snapshot logging.
         # Using wall-clock time (not a counter) so the interval is not coupled
@@ -1216,7 +1247,7 @@ class TemperatureStrategy:
         # Start DB cleanup task (runs hourly)
         asyncio.create_task(self._db_cleanup_loop())
 
-        # Start Low-ticker 22:00 ET daily close-out loop
+        # Start Low-ticker PM close loop (per-ticker local time)
         asyncio.create_task(self._low_ticker_closeout_loop())
 
         # Start settlement reconciler loop
@@ -3715,7 +3746,7 @@ class TemperatureStrategy:
             
             await asyncio.sleep(3600)  # run every hour
 
-    async def _run_low_ticker_closeout(self) -> None:
+    async def _run_low_ticker_closeout(self, now_utc: Optional[datetime.datetime] = None) -> None:
         """Flatten all open KXLOW* positions.
 
         Routes each exit through the existing ``_execute_stop_loss`` machinery
@@ -3732,8 +3763,32 @@ class TemperatureStrategy:
                         reason="no_open_low_positions")
             return
 
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+
         eligible_low_tickers = []
         for ticker in low_tickers:
+            past_close_time_local, local_date, local_ctx = is_past_low_pm_close_time_local(
+                self.config,
+                ticker,
+                now_utc=now_utc,
+            )
+            if not past_close_time_local or local_date is None:
+                continue
+            if self._low_ticker_pm_close_eval_dates.get(ticker) == local_date:
+                continue
+            self._low_ticker_pm_close_eval_dates[ticker] = local_date
+
+            if is_low_pm_close_override_ticker(self.config, ticker):
+                logger.info(
+                    "lowticker.daily_closeout_ticker_override_match",
+                    ticker=ticker,
+                    local_date=local_date.isoformat(),
+                    **local_ctx,
+                )
+                eligible_low_tickers.append(ticker)
+                continue
+
             yes_ask = None
             quote = self.cache.get_quote(ticker)
             if quote is not None:
@@ -3743,22 +3798,24 @@ class TemperatureStrategy:
                 if rest_data:
                     yes_ask = rest_data.get("yes_ask")
 
-            if is_low_10pm_ask_eligible(self.config, yes_ask):
+            if is_low_pm_close_ask_eligible(self.config, yes_ask):
                 eligible_low_tickers.append(ticker)
             else:
                 logger.info(
                     "lowticker.daily_closeout_ticker_skipped_threshold",
                     ticker=ticker,
                     yes_ask=yes_ask,
-                    low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
+                    low_pm_close_amount=self.config.low_pm_close_amount,
+                    local_date=local_date.isoformat(),
+                    **local_ctx,
                 )
 
         if not eligible_low_tickers:
             logger.info(
                 "lowticker.daily_closeout_complete",
                 closed=0,
-                reason="no_open_low_positions_below_ask_threshold",
-                low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
+                reason="no_open_low_positions_eligible_for_pm_close",
+                low_pm_close_amount=self.config.low_pm_close_amount,
             )
             return
 
@@ -3780,14 +3837,7 @@ class TemperatureStrategy:
                     total=len(eligible_low_tickers))
 
     async def _low_ticker_closeout_loop(self) -> None:
-        """Scheduled loop that triggers the 22:00 ET Low-ticker close-out once per ET day.
-
-        Checks ET wall-clock time every 30 seconds.  Once the configured close-out
-        time is reached for a given ET date the close-out is run exactly once.
-        If the process starts after the configured time (and
-        ``low_ticker_closeout_on_late_start`` is true), the close-out runs once
-        on startup so the "no Low positions held overnight" intent is honoured.
-        """
+        """Scheduled loop that evaluates low-ticker PM close per ticker-local time."""
         if not self.config.low_ticker_daily_closeout_enabled:
             logger.info("lowticker.closeout_disabled")
             return
@@ -3798,32 +3848,28 @@ class TemperatureStrategy:
             if not self._reconciliation_complete:
                 continue
             try:
-                past, et_date = is_past_closeout_time_et(self.config)
-                if not past:
-                    continue
-                # Already ran for this ET day → skip.
-                if self._low_ticker_closeout_date == et_date:
-                    continue
-                # First iteration after crossing the threshold (or late start).
-                if not _late_start_handled and self._low_ticker_closeout_date is None:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                if not _late_start_handled:
                     _late_start_handled = True
                     if not self.config.low_ticker_closeout_on_late_start:
-                        # Skip the late-start run; record today so the next-day
-                        # check triggers normally.
-                        self._low_ticker_closeout_date = et_date
-                        logger.info(
-                            "lowticker.closeout_late_start_skipped",
-                            et_date=et_date.isoformat(),
-                            closeout_time_et=self.config.low_ticker_closeout_time_et,
-                        )
+                        for ticker in list(self.active_positions.keys()):
+                            if "KXLOW" not in ticker.upper():
+                                continue
+                            past, local_date, local_ctx = is_past_low_pm_close_time_local(
+                                self.config,
+                                ticker,
+                                now_utc=now_utc,
+                            )
+                            if past and local_date is not None:
+                                self._low_ticker_pm_close_eval_dates[ticker] = local_date
+                                logger.info(
+                                    "lowticker.closeout_late_start_skipped",
+                                    ticker=ticker,
+                                    local_date=local_date.isoformat(),
+                                    **local_ctx,
+                                )
                         continue
-                self._low_ticker_closeout_date = et_date
-                logger.info(
-                    "lowticker.closeout_triggered",
-                    et_date=et_date.isoformat(),
-                    closeout_time_et=self.config.low_ticker_closeout_time_et,
-                )
-                await self._run_low_ticker_closeout()
+                await self._run_low_ticker_closeout(now_utc=now_utc)
             except Exception as e:
                 logger.error("lowticker.closeout_loop_error", error=str(e), exc_info=True)
 
