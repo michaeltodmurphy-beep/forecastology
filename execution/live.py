@@ -500,3 +500,158 @@ class LiveTradeExecutor(BaseExecutor):
         return positions
     async def close(self):
         await self._client.aclose()
+
+    async def place_limit_sell(self, order: OrderRequest) -> ExecutionResult:
+        """Place a resting GTC SELL_YES limit order on the exchange.
+
+        Unlike sell_yes (which uses immediate_or_cancel for stop-loss exits),
+        this uses good_till_canceled so the order rests on the book until
+        filled or explicitly cancelled.
+        """
+        if self.dry_run:
+            logger.warning(
+                "live.dry_run_skip_order",
+                ticker=order.market_ticker,
+                side="place_limit_sell",
+                price=order.price,
+                quantity=order.quantity,
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="DRY_RUN",
+                notes="dry_run",
+            )
+        path = REST_PORTFOLIO_ORDERS
+        url = f"{self.base_url}{path}"
+        payload = order.to_kalshi_payload(
+            time_in_force="good_till_canceled",
+            reduce_only=True,
+        )
+        headers = self._headers("POST", path)
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._client.post(url, json=payload, headers=headers)
+            data = resp.json()
+            if resp.status_code in (200, 201):
+                order_data = data.get("order") if isinstance(data.get("order"), dict) else data
+                order_id = order_data.get("order_id") or data.get("order_id") or ""
+                logger.info(
+                    "live.place_limit_sell_placed",
+                    ticker=order.market_ticker,
+                    price=order.price,
+                    qty=order.quantity,
+                    order_id=order_id,
+                )
+                return ExecutionResult(
+                    success=True,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=0,
+                    fill_quantity=0,
+                    total_cost_cents=0,
+                    order_id=order_id,
+                    status="RESTING",
+                    notes=json.dumps(data),
+                )
+            else:
+                logger.error(
+                    "live.place_limit_sell_rejected",
+                    ticker=order.market_ticker,
+                    status=resp.status_code,
+                    response=data,
+                )
+                return ExecutionResult(
+                    success=False,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=0,
+                    fill_quantity=0,
+                    total_cost_cents=0,
+                    status="REJECTED",
+                    notes=json.dumps(data),
+                )
+        except Exception as e:
+            logger.error("live.place_limit_sell_error", error=str(e))
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="REJECTED",
+                notes=str(e),
+            )
+
+    async def cancel_order(self, order_id: str, market_ticker: str = "") -> bool:
+        """Cancel a resting order by exchange order ID.
+
+        Returns True if the order was cancelled or is already absent (404).
+        Returns False on unexpected error.
+        """
+        if not order_id:
+            return False
+        path = f"{REST_PORTFOLIO_ORDERS}/{order_id}"
+        url = f"{self.base_url}{path}"
+        headers = self._headers("DELETE", path)
+        try:
+            resp = await self._client.delete(url, headers=headers)
+            if resp.status_code in (200, 201, 204):
+                logger.info(
+                    "live.cancel_order_ok",
+                    order_id=order_id,
+                    ticker=market_ticker or None,
+                )
+                return True
+            if resp.status_code == 404:
+                # Already filled or cancelled — treat as success.
+                logger.info(
+                    "live.cancel_order_not_found",
+                    order_id=order_id,
+                    ticker=market_ticker or None,
+                    note="already_filled_or_cancelled",
+                )
+                return True
+            logger.error(
+                "live.cancel_order_failed",
+                order_id=order_id,
+                ticker=market_ticker or None,
+                status=resp.status_code,
+            )
+            return False
+        except Exception as e:
+            logger.error("live.cancel_order_error", order_id=order_id, error=str(e))
+            return False
+
+    async def get_order_status(self, order_id: str) -> Optional[str]:
+        """Return the exchange-reported status string for an order, or None."""
+        if not order_id:
+            return None
+        path = f"{REST_PORTFOLIO_ORDERS}/{order_id}"
+        url = f"{self.base_url}{path}"
+        headers = self._headers("GET", path)
+        try:
+            resp = await self._client.get(url, headers=headers)
+            if resp.status_code == 404:
+                return "not_found"
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                order_data = data.get("order") if isinstance(data.get("order"), dict) else data
+                return str(order_data.get("status") or "unknown").lower()
+            return None
+        except Exception as e:
+            logger.error("live.get_order_status_error", order_id=order_id, error=str(e))
+            return None

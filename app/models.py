@@ -103,6 +103,9 @@ class Position(Base):
     # DEPRECATED after hedge-engine removal; retained for schema/back-compat.
     hedge_pending = Column(Integer, nullable=True, default=0)
     position_ts = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    # Order ID of the resting SL backstop order on the exchange (if placed).
+    # NULL when no backstop is active.  Cleared on cancel or fill detection.
+    sl_backstop_order_id = Column(String(100), nullable=True)
 
 
 class PortfolioSnapshot(Base):

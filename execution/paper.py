@@ -247,3 +247,34 @@ class PaperTradeExecutor(BaseExecutor):
                 "average_fill_cost_dollars": f"{entry_price/100:.4f}",
             }
         return result
+
+    async def place_limit_sell(self, order) -> "ExecutionResult":
+        """Paper mode: no-op — does not place real resting orders."""
+        from execution.base import ExecutionResult
+        import structlog as _sl
+        _sl.get_logger(__name__).info(
+            "paper.place_limit_sell_skipped",
+            ticker=order.market_ticker,
+            price=order.price,
+            qty=order.quantity,
+        )
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            status="PAPER_NOOP",
+            notes="paper_mode",
+        )
+
+    async def cancel_order(self, order_id: str, market_ticker: str = "") -> bool:
+        """Paper mode: no-op cancel — always returns True."""
+        return True
+
+    async def get_order_status(self, order_id: str) -> "Optional[str]":
+        """Paper mode: resting orders don't exist, always not_found."""
+        return "not_found"

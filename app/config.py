@@ -296,12 +296,27 @@ class AppConfig(BaseSettings):
     # RECONCILER_INTERVAL_MINUTES=<int>        (default: 60)
     enable_settlement_reconciler: bool = True
     reconciler_interval_minutes: int = 60
+    # ── Resting "disaster" limit-sell backstop ───────────────────────────────
+    # Places a resting GTC SELL_YES limit order on the exchange a fixed offset
+    # below the normal stop-loss trigger price when the bot holds a YES position.
+    # The order executes exchange-side with zero round-trip latency, catching
+    # gap-downs that occur while the bot is mid-round-trip or during a WS
+    # reconnect.  The reactive SL path cancels this order before submitting its
+    # own sell to prevent overselling.
+    #
+    # SL_BACKSTOP_ENABLED=true|false     (default: false — opt-in)
+    # SL_BACKSTOP_OFFSET=<dollars>       (default: 0.05 → 5¢)
+    #   Backstop resting price = stop_loss_price_ask - sl_backstop_offset,
+    #   floored at 1¢.
+    sl_backstop_enabled: bool = False
+    # Default 5¢ (stored as int cents; converted from dollars via validator)
+    sl_backstop_offset: int = 5
 
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price_ask', 'stop_loss_price_bid', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
-        'sl_exit_max_slippage', 'low_ticker_10pm_max_ask',
+        'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
         mode='before'
     )
     @classmethod
