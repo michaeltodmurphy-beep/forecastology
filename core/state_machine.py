@@ -17,6 +17,7 @@ from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
 from execution.errors import TransientExecutionError, PermanentExecutionError
 from execution.sl_watcher import StopLossWatcher
+from execution.sl_backstop import SlBackstopManager
 from app.database import DatabaseManager
 from app.config import AppConfig
 from app.signing import load_private_key
@@ -216,6 +217,17 @@ class TemperatureStrategy:
         self.executor = executor
         self.db = db
         self.stop_loss_watcher = stop_loss_watcher
+
+        # Resting "disaster" limit-sell backstop manager (opt-in via config).
+        self.sl_backstop: Optional[SlBackstopManager] = None
+        if getattr(config, "sl_backstop_enabled", False):
+            self.sl_backstop = SlBackstopManager(
+                executor=executor,
+                sl_backstop_enabled=True,
+                sl_backstop_offset=int(getattr(config, "sl_backstop_offset", 5)),
+                stop_loss_price_ask=int(config.stop_loss_price_ask),
+                trading_mode=config.trading_mode,
+            )
 
         # Cached loaded date flags (set of date strings already loaded)
         # State: market_ticker -> MarketBracket
@@ -1022,6 +1034,8 @@ class TemperatureStrategy:
         self.brackets.pop(ticker, None)
         self._app_owned_qty.pop(ticker, None)
         await self._unregister_stop_loss_watcher(ticker)
+        # Cancel any resting backstop so it does not linger as an orphan order.
+        await self._cancel_sl_backstop(ticker, reason="position_closed")
         async with await self.db.get_session() as session:
             await session.execute(
                 delete(PositionModel).where(PositionModel.market_ticker == ticker)
@@ -1053,11 +1067,69 @@ class TemperatureStrategy:
             sl_price=self.config.stop_loss_price,
             sl_price_bid=self.config.stop_loss_price_bid,
         )
+        # Place (or replace) the resting backstop order for the app-owned qty.
+        await self._place_sl_backstop(bracket, qty=app_owned_qty)
 
     async def _unregister_stop_loss_watcher(self, ticker: str) -> None:
         if self.stop_loss_watcher is None:
             return
         await self.stop_loss_watcher.unregister_position(ticker)
+
+    async def _place_sl_backstop(
+        self, bracket: "MarketBracket", *, qty: Optional[int] = None
+    ) -> None:
+        """Place (or replace) the resting backstop sell for *bracket*.
+
+        Respects app-owned quantity semantics — only app_owned_qty contracts
+        are protected.  No-op when SL_BACKSTOP_ENABLED=false or PAPER mode.
+        """
+        if self.sl_backstop is None or not self.sl_backstop.enabled:
+            return
+        ticker = bracket.market_ticker
+        if qty is None:
+            _, app_owned_qty, _ = self._managed_exit_quantity(
+                ticker, bracket.position_quantity
+            )
+            qty = app_owned_qty
+        if qty <= 0:
+            return
+        order_id = await self.sl_backstop.place(ticker, qty)
+        # Persist the order ID to the DB so restarts can find it.
+        if order_id is not None:
+            await self._persist_backstop_order_id(ticker, order_id)
+
+    async def _cancel_sl_backstop(self, ticker: str, *, reason: str = "exit") -> bool:
+        """Cancel the backstop order for *ticker* and await confirmation.
+
+        Must be awaited and return True before an exit sell is placed to
+        prevent overselling.  Returns True if no backstop is active.
+        """
+        if self.sl_backstop is None or not self.sl_backstop.enabled:
+            return True
+        ok = await self.sl_backstop.cancel(ticker, reason=reason)
+        if ok:
+            await self._persist_backstop_order_id(ticker, None)
+        return ok
+
+    async def _persist_backstop_order_id(
+        self, ticker: str, order_id: Optional[str]
+    ) -> None:
+        """Update Position.sl_backstop_order_id in the DB (best-effort)."""
+        try:
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.market_ticker == ticker)
+                    .values(sl_backstop_order_id=order_id)
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(
+                "sl.backstop_persist_order_id_failed",
+                ticker=ticker,
+                order_id=order_id,
+                error=str(exc),
+            )
 
     @staticmethod
     def _avg_buy_fill_price_cents_from_fills(fills: list, ticker: str) -> int:
@@ -1371,6 +1443,21 @@ class TemperatureStrategy:
                     elif not bracket.avg_entry or bracket.avg_entry <= 0:
                         bracket.avg_entry = 0
                     self.active_positions[ticker] = bracket
+                    # Adopt any persisted backstop order so _register_stop_loss_watcher
+                    # can cancel+replace it rather than creating a duplicate.
+                    if self.sl_backstop is not None:
+                        db_pos_rec = db_by_ticker.get(ticker)
+                        existing_bsp_id = (
+                            getattr(db_pos_rec, "sl_backstop_order_id", None) or None
+                        )
+                        if existing_bsp_id:
+                            self.sl_backstop.set_order_id(ticker, existing_bsp_id)
+                            logger.info(
+                                "sl.backstop_orphan_adopted",
+                                ticker=ticker,
+                                order_id=existing_bsp_id,
+                                source="startup_live_positions",
+                            )
                     await self._register_stop_loss_watcher(bracket)
                     logger.info("strategy.restored_live_position", ticker=ticker,
                                 qty=qty, entry=bracket.avg_entry, entry_source=entry_source,
@@ -1434,6 +1521,18 @@ class TemperatureStrategy:
             )
 
             self.active_positions[ticker] = bracket
+            # Adopt any persisted backstop order so _register_stop_loss_watcher
+            # can cancel+replace it rather than creating a duplicate.
+            if self.sl_backstop is not None:
+                existing_bsp_id = getattr(pos, "sl_backstop_order_id", None) or None
+                if existing_bsp_id:
+                    self.sl_backstop.set_order_id(ticker, existing_bsp_id)
+                    logger.info(
+                        "sl.backstop_orphan_adopted",
+                        ticker=ticker,
+                        order_id=existing_bsp_id,
+                        source="startup_db_positions",
+                    )
             await self._register_stop_loss_watcher(bracket)
             logger.info("strategy.restored_position", ticker=ticker,
                         qty=total_qty, entry=bracket.avg_entry,
@@ -2342,6 +2441,8 @@ class TemperatureStrategy:
                     pos.quantity = bracket.position_quantity
                     pos.avg_entry_price = reconciled_fill_price
                     pos.last_price = reconciled_fill_price
+                    if self.sl_backstop is not None:
+                        pos.sl_backstop_order_id = self.sl_backstop.get_order_id(bracket.market_ticker)
                 else:
                     # Insert new position
                     pos = PositionModel(
@@ -2352,6 +2453,10 @@ class TemperatureStrategy:
                         quantity=bracket.position_quantity,
                         avg_entry_price=reconciled_fill_price,
                         last_price=reconciled_fill_price,
+                        sl_backstop_order_id=(
+                            self.sl_backstop.get_order_id(bracket.market_ticker)
+                            if self.sl_backstop is not None else None
+                        ),
                     )
                     session.add(pos)
 
@@ -3189,6 +3294,8 @@ class TemperatureStrategy:
                     if entry > 0:
                         pos.avg_entry_price = entry
                         pos.last_price = entry
+                    if self.sl_backstop is not None:
+                        pos.sl_backstop_order_id = self.sl_backstop.get_order_id(ticker)
                 else:
                     pos = PositionModel(
                         market_ticker=ticker,
@@ -3198,6 +3305,10 @@ class TemperatureStrategy:
                         quantity=qty,
                         avg_entry_price=entry,
                         last_price=entry,
+                        sl_backstop_order_id=(
+                            self.sl_backstop.get_order_id(ticker)
+                            if self.sl_backstop is not None else None
+                        ),
                     )
                     session.add(pos)
                 try:
@@ -3375,6 +3486,11 @@ class TemperatureStrategy:
             price=price,
             quantity=managed_qty,
         )
+
+        # Cancel the resting backstop BEFORE submitting the reactive sell to
+        # prevent overselling.  This must be awaited and confirmed before the
+        # sell order is placed.
+        await self._cancel_sl_backstop(bracket.market_ticker, reason="sl_exit")
 
         submit_start_ms = self._now_ms()
         if trigger_ts_ms is not None:

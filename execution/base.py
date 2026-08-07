@@ -58,3 +58,38 @@ class BaseExecutor(ABC):
     async def get_positions(self) -> dict[str, dict]:
         """Return current positions keyed by market ticker."""
         ...
+
+    async def place_limit_sell(self, order: "OrderRequest") -> "ExecutionResult":
+        """Place a resting (GTC) limit SELL_YES order.
+
+        Default implementation delegates to sell_yes with no-op semantics so
+        that subclasses which do not override it still satisfy the interface
+        without raising.  Live executor overrides this for a real GTC order.
+        """
+        from execution.base import ExecutionResult
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            status="NOT_SUPPORTED",
+            notes="place_limit_sell not implemented",
+        )
+
+    async def cancel_order(self, order_id: str, market_ticker: str = "") -> bool:
+        """Cancel a resting order by exchange order ID.
+
+        Returns True if the order was cancelled (or already absent), False on
+        unexpected error.  Default is a no-op returning False; subclasses that
+        support order management must override.
+        """
+        return False
+
+    async def get_order_status(self, order_id: str) -> Optional[str]:
+        """Return the exchange-reported status string for an order, or None if
+        the order cannot be found or the call fails."""
+        return None
