@@ -206,6 +206,9 @@ class AppConfig(BaseSettings):
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
     enable_fast_sl_exit: bool | None = None
+    # Minimum seconds between non-bypass stop-loss attempts for the same bracket.
+    # Watcher/fast paths always pass bypass_cooldown=True and are unaffected.
+    sl_execute_cooldown_seconds: int = 5
     sl_worker_interval_ms: int = 250
     sl_exit_retry_interval_ms: int = 300
     sl_exit_max_attempts: int = 3

@@ -280,6 +280,9 @@ class TemperatureStrategy:
         _SNAPSHOT_INTERVAL_S: float = 60.0  # log once per minute
         self._snapshot_interval_s: float = _SNAPSHOT_INTERVAL_S
 
+        # Long-lived HTTP client for REST fetches; created in start(), closed in stop().
+        self._http_client: Optional["httpx.AsyncClient"] = None
+
     @staticmethod
     def _first_non_none(*values):
         for value in values:
@@ -1160,6 +1163,10 @@ class TemperatureStrategy:
         """Register WebSocket handlers and start the strategy loop."""
         self._running = True
 
+        # Create long-lived HTTP client for REST fetches (avoids per-call TLS handshakes).
+        import httpx
+        self._http_client = httpx.AsyncClient(timeout=5.0)
+
         # Register handlers for WebSocket message types
         self.ws.on_message("ticker", self._handle_ticker)
         self.ws.on_message("trade", self._handle_trade)
@@ -1461,9 +1468,6 @@ class TemperatureStrategy:
         if not market_ticker:
             return
 
-        # Auto-discover new temperature markets
-        await self._ensure_bracket(market_ticker)
-
         last_price_raw = ticker_data.get("last_price")
         # Prefer *_dollars variants (authoritative); fall back to bare fields
         yes_bid_raw = self._first_non_none(
@@ -1486,12 +1490,18 @@ class TemperatureStrategy:
         # Cache YES bid/ask from ticker channel — this is the authoritative price source
         if yes_bid is not None and yes_ask is not None:
             self.cache.update_quote(market_ticker, yes_bid, yes_ask)
+
+        # RISK FIRST: feed the stop-loss watcher before any discovery/bookkeeping
         if self.stop_loss_watcher is not None and (yes_ask is not None or yes_bid is not None):
             await self.stop_loss_watcher.on_market_update(
                 market_ticker,
                 best_ask=yes_ask,
                 best_bid=yes_bid,
             )
+
+        # Auto-discover new temperature markets (non-critical path — fire-and-forget
+        # so a slow REST/DB round-trip never delays SL evaluation on the next tick)
+        asyncio.create_task(self._ensure_bracket(market_ticker))
 
         # Update brackets in state
         if market_ticker in self.brackets:
@@ -1580,9 +1590,6 @@ class TemperatureStrategy:
         if not market_ticker:
             return
         
-        # Auto-discover new temperature markets
-        await self._ensure_bracket(market_ticker, bracket_label=data.get("title", ""))
-        
         self.cache.update_orderbook_snapshot(market_ticker, data)
         
         ob = self.cache.get_orderbook(market_ticker)
@@ -1595,11 +1602,19 @@ class TemperatureStrategy:
                 bracket = self.brackets[market_ticker]
                 bracket.last_price = price
 
-            # Feed the orderbook-derived YES ask into the SL watcher so that
-            # book updates (which often arrive before the next ticker snapshot)
-            # can trigger the SL earlier.  Skip invalid/zero asks.
+            # RISK FIRST: Feed orderbook-derived prices into the SL watcher before
+            # any discovery/bookkeeping. Forward both best_ask and best_bid so the
+            # bid-side stop (stop_loss_price_bid) can trigger from orderbook updates.
             if self.stop_loss_watcher is not None and price > 0:
-                await self.stop_loss_watcher.on_market_update(market_ticker, best_ask=price)
+                best_bid = ob.best_bid if ob.best_bid is not None else None
+                await self.stop_loss_watcher.on_market_update(
+                    market_ticker, best_ask=price, best_bid=best_bid
+                )
+
+        # Auto-discover new temperature markets (non-critical path)
+        asyncio.create_task(
+            self._ensure_bracket(market_ticker, bracket_label=data.get("title", ""))
+        )
 
     async def _handle_orderbook_delta(self, msg: dict):
         """Process orderbook delta - update cached price."""
@@ -1608,13 +1623,12 @@ class TemperatureStrategy:
         if not market_ticker:
             return
         
-        # Auto-discover new temperature markets
-        await self._ensure_bracket(market_ticker)
-        
         self.cache.update_orderbook_delta(market_ticker, data)
         
         ob = self.cache.get_orderbook(market_ticker)
         if not ob:
+            # Auto-discover new temperature markets (non-critical path)
+            asyncio.create_task(self._ensure_bracket(market_ticker))
             return
             
         current_price = ob.best_ask
@@ -1624,11 +1638,17 @@ class TemperatureStrategy:
             if market_ticker in self.brackets:
                 self.brackets[market_ticker].last_price = current_price
 
-            # Feed the orderbook-derived YES ask into the SL watcher so that
-            # book updates (which often arrive before the next ticker snapshot)
-            # can trigger the SL earlier.  Skip invalid/zero asks.
+            # RISK FIRST: Feed orderbook-derived prices into the SL watcher before
+            # any discovery/bookkeeping. Forward both best_ask and best_bid so the
+            # bid-side stop (stop_loss_price_bid) can trigger from orderbook updates.
             if self.stop_loss_watcher is not None and current_price > 0:
-                await self.stop_loss_watcher.on_market_update(market_ticker, best_ask=current_price)
+                best_bid = ob.best_bid if ob.best_bid is not None else None
+                await self.stop_loss_watcher.on_market_update(
+                    market_ticker, best_ask=current_price, best_bid=best_bid
+                )
+
+        # Auto-discover new temperature markets (non-critical path)
+        asyncio.create_task(self._ensure_bracket(market_ticker))
 
     async def _handle_lifecycle(self, msg: dict):
         """Handle market lifecycle events (new markets, status changes)."""
@@ -1655,25 +1675,28 @@ class TemperatureStrategy:
                     headers = build_auth_headers(private_key, self.config.kalshi_api_key, "GET", "/trade-api/v2/markets")
                     url = f"{self.config.rest_base_url}/trade-api/v2/markets"
                     try:
-                        async with httpx.AsyncClient(timeout=5.0) as client:
-                            resp = await client.get(url, headers=headers, params={"event_ticker": event_ticker, "limit": 100})
-                            if resp.status_code in (200, 201):
-                                all_markets = resp.json().get("markets", [])
-                                count = 0
-                                for m in all_markets:
-                                    t = m.get("ticker", "")
-                                    if t:
-                                        existed = t in self.brackets
-                                        await self._ensure_bracket(
-                                            t,
-                                            event_ticker=event_ticker,
-                                            series_ticker=series_ticker,
-                                            bracket_label=m.get("title", ""),
-                                        )
-                                        if not existed and t in self.brackets:
-                                            count += 1
-                                logger.info("strategy.new_event_brackets",
-                                            event_ticker=event_ticker, count=count)
+                        client = self._http_client
+                        if client is None or client.is_closed:
+                            import httpx as _httpx
+                            client = _httpx.AsyncClient(timeout=5.0)
+                        resp = await client.get(url, headers=headers, params={"event_ticker": event_ticker, "limit": 100})
+                        if resp.status_code in (200, 201):
+                            all_markets = resp.json().get("markets", [])
+                            count = 0
+                            for m in all_markets:
+                                t = m.get("ticker", "")
+                                if t:
+                                    existed = t in self.brackets
+                                    await self._ensure_bracket(
+                                        t,
+                                        event_ticker=event_ticker,
+                                        series_ticker=series_ticker,
+                                        bracket_label=m.get("title", ""),
+                                    )
+                                    if not existed and t in self.brackets:
+                                        count += 1
+                            logger.info("strategy.new_event_brackets",
+                                        event_ticker=event_ticker, count=count)
                     except Exception as e:
                         logger.error("strategy.new_event_brackets_error",
                                       event_ticker=event_ticker, error=str(e))
@@ -3216,7 +3239,7 @@ class TemperatureStrategy:
         """
         now = asyncio.get_event_loop().time()
         last_attempt = getattr(bracket, '_last_stop_loss_attempt', 0)
-        if not bypass_cooldown and now - last_attempt < 60:
+        if not bypass_cooldown and now - last_attempt < self.config.sl_execute_cooldown_seconds:
             return False
         bracket._last_stop_loss_attempt = now
 
@@ -3252,7 +3275,9 @@ class TemperatureStrategy:
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
             return True
 
-        # Create or reset the idempotency record to PENDING.
+        # Create or transition the idempotency record directly to SUBMITTED.
+        # Inserting as SUBMITTED immediately (rather than PENDING then updating)
+        # saves one DB round-trip on the common new-record path.
         # An existing FAILED record is retried; an existing SUBMITTED record
         # means another attempt is in-flight — skip this cycle.
         if action_row is None:
@@ -3261,7 +3286,7 @@ class TemperatureStrategy:
                     action_key=action_key,
                     action_type="STOP_LOSS",
                     market_ticker=bracket.market_ticker,
-                    status=OrderActionStatus.PENDING,
+                    status=OrderActionStatus.SUBMITTED,
                 )
                 session.add(action_row)
                 try:
@@ -3299,16 +3324,16 @@ class TemperatureStrategy:
                 state="SUBMITTING",
             )
             return False
-
-        # Transition to SUBMITTED before API call so crash recovery knows a
-        # call was in-flight.
-        async with await self.db.get_session() as session:
-            await session.execute(
-                update(OrderAction)
-                .where(OrderAction.action_key == action_key)
-                .values(status=OrderActionStatus.SUBMITTED)
-            )
-            await session.commit()
+        else:
+            # FAILED or PENDING — transition to SUBMITTED before calling the API.
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    update(OrderAction)
+                    .where(OrderAction.action_key == action_key)
+                    .values(status=OrderActionStatus.SUBMITTED)
+                )
+                await session.commit()
+        # action_row is now SUBMITTED — proceed to API call.
 
         price = override_price if override_price is not None else 1
         managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
@@ -3634,46 +3659,48 @@ class TemperatureStrategy:
         markets_url = f"{self.config.rest_base_url}{markets_path}"
         try:
             rest_headers = build_auth_headers(self._private_key, self.config.kalshi_api_key, "GET", markets_path)
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(markets_url, headers=rest_headers)
-                if resp.status_code == 200:
-                    mkt = resp.json().get("market", {})
-                    result = {}
+            client = self._http_client
+            if client is None or client.is_closed:
+                client = httpx.AsyncClient(timeout=5.0)
+            resp = await client.get(markets_url, headers=rest_headers)
+            if resp.status_code == 200:
+                mkt = resp.json().get("market", {})
+                result = {}
 
-                    ya = self._first_non_none(mkt.get("yes_ask_dollars"), mkt.get("yes_ask"))
-                    ya_cents = self._to_cents(ya)
-                    if ya_cents is not None:
-                        result["yes_ask"] = ya_cents
+                ya = self._first_non_none(mkt.get("yes_ask_dollars"), mkt.get("yes_ask"))
+                ya_cents = self._to_cents(ya)
+                if ya_cents is not None:
+                    result["yes_ask"] = ya_cents
 
-                    yb = self._first_non_none(mkt.get("yes_bid_dollars"), mkt.get("yes_bid"))
-                    yb_cents = self._to_cents(yb)
-                    if yb_cents is not None:
-                        result["yes_bid"] = yb_cents
+                yb = self._first_non_none(mkt.get("yes_bid_dollars"), mkt.get("yes_bid"))
+                yb_cents = self._to_cents(yb)
+                if yb_cents is not None:
+                    result["yes_bid"] = yb_cents
 
-                    lp = self._first_non_none(
-                        mkt.get("last_price_dollars"),
-                        mkt.get("last_price"),
-                    )
-                    lp_cents = self._to_cents(lp)
-                    if lp_cents is not None:
-                        result["price"] = lp_cents
-                    elif "yes_ask" in result:
-                        result["price"] = result["yes_ask"]
+                lp = self._first_non_none(
+                    mkt.get("last_price_dollars"),
+                    mkt.get("last_price"),
+                )
+                lp_cents = self._to_cents(lp)
+                if lp_cents is not None:
+                    result["price"] = lp_cents
+                elif "yes_ask" in result:
+                    result["price"] = result["yes_ask"]
 
-                    if "yes_ask" in result and "yes_bid" in result:
-                        result["spread"] = result["yes_ask"] - result["yes_bid"]
+                if "yes_ask" in result and "yes_bid" in result:
+                    result["spread"] = result["yes_ask"] - result["yes_bid"]
 
-                    status = self._first_non_none(mkt.get("status"), mkt.get("market_status"))
-                    if status is not None:
-                        result["status"] = status
-                    if mkt.get("result") is not None:
-                        result["result"] = mkt.get("result")
-                    if mkt.get("settlement_ts") is not None:
-                        result["settlement_ts"] = mkt.get("settlement_ts")
-                    if mkt.get("is_settled") is not None:
-                        result["is_settled"] = mkt.get("is_settled")
+                status = self._first_non_none(mkt.get("status"), mkt.get("market_status"))
+                if status is not None:
+                    result["status"] = status
+                if mkt.get("result") is not None:
+                    result["result"] = mkt.get("result")
+                if mkt.get("settlement_ts") is not None:
+                    result["settlement_ts"] = mkt.get("settlement_ts")
+                if mkt.get("is_settled") is not None:
+                    result["is_settled"] = mkt.get("is_settled")
 
-                    return result if result else None
+                return result if result else None
         except Exception as e:
             logger.warning("rest.fetch_failed", ticker=ticker, error=str(e))
         return None
@@ -3917,4 +3944,7 @@ class TemperatureStrategy:
             except asyncio.CancelledError:
                 pass
             self._trade_log_writer_task = None
+        if self._http_client is not None and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
         logger.info("strategy.stopped")
