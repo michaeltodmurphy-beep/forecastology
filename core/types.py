@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+import datetime
 import uuid
 
 
@@ -90,6 +91,10 @@ class MarketBracket:
     avg_entry: int = 0
     hedge_market: Optional[str] = None
     hedge_quantity: int = 0
+    # Timestamp when this position was filled (set at Phase B entry fill).
+    # Used by intraday checkpoint exits to enforce the entry grace period.
+    # None for positions restored from DB without a known fill time.
+    entry_time: Optional[datetime.datetime] = None
 
 
 @dataclass

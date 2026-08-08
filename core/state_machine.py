@@ -20,6 +20,7 @@ from execution.sl_watcher import StopLossWatcher
 from execution.sl_backstop import SlBackstopManager
 from app.database import DatabaseManager
 from app.config import AppConfig
+from app.config import _parse_intraday_schedule as _parse_intraday_schedule_cfg
 from app.signing import load_private_key
 from app.models import (
     StreamedTicker, StreamedTrade, ExecutedTrade, TradeAction, TradeStatus,
@@ -283,6 +284,17 @@ class TemperatureStrategy:
         # Low-ticker PM close idempotency: track the local date already evaluated
         # for each ticker so it is not re-evaluated within the same local day.
         self._low_ticker_pm_close_eval_dates: dict[str, datetime.date] = {}
+
+        # Intraday checkpoint exit state ------------------------------------------
+        # Idempotency: (ticker, "HH:MM") → local date already evaluated.
+        self._intraday_checkpoint_eval_dates: dict[tuple[str, str], datetime.date] = {}
+        # Confirmation read: (ticker, "HH:MM") → monotonic time of first below-threshold read.
+        # Once set, a second read ≥60 s later that is still below threshold triggers exit.
+        self._intraday_checkpoint_pending: dict[tuple[str, str], float] = {}
+        # HWM arm state: (ticker, local_date) → True when armed.
+        self._hwm_armed: dict[tuple[str, datetime.date], bool] = {}
+        # HWM confirmation read: ticker → monotonic time of first below-exit-price read.
+        self._hwm_pending: dict[str, float] = {}
 
         # Timestamp-based throttle for portfolio snapshot logging.
         # Using wall-clock time (not a counter) so the interval is not coupled
@@ -1319,6 +1331,9 @@ class TemperatureStrategy:
 
         # Start settlement reconciler loop
         asyncio.create_task(self._settlement_reconciler_loop())
+
+        # Start intraday checkpoint + HWM exit loop
+        asyncio.create_task(self._intraday_exit_loop())
 
     async def _restore_positions(self):
         """
@@ -2412,6 +2427,8 @@ class TemperatureStrategy:
             )
             self.active_positions[bracket.market_ticker] = bracket
             await self._register_stop_loss_watcher(bracket)
+            if bracket.entry_time is None:
+                bracket.entry_time = datetime.datetime.now(datetime.timezone.utc)
             logger.info("phase.b.entry_filled", ticker=bracket.market_ticker,
                         price=result.fill_price, qty=result.fill_quantity,
                         cost=result.total_cost_cents,
@@ -4007,6 +4024,393 @@ class TemperatureStrategy:
                 await run_reconciliation_cycle(self.db, self.config)
             except Exception as exc:
                 logger.error("reconciler.loop_error", error=str(exc), exc_info=True)
+
+    async def _intraday_exit_loop(self) -> None:
+        """Background loop evaluating intraday checkpoint and HWM exits for KXLOW* positions.
+
+        Mirrors ``_low_ticker_closeout_loop``: sleeps 30 s per iteration, gated
+        on ``_reconciliation_complete``, respects ``self._running``.  Both
+        features are fully inert (zero side-effects) when disabled.
+        """
+        intraday_enabled = getattr(self.config, "intraday_exit_enabled", True)
+        hwm_enabled = getattr(self.config, "hwm_exit_enabled", False)
+        if not intraday_enabled and not hwm_enabled:
+            logger.info("intraday.exit_loop_disabled")
+            return
+
+        while self._running:
+            await asyncio.sleep(30)
+            if not self._reconciliation_complete:
+                continue
+            try:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                await self._run_intraday_exits(now_utc=now_utc)
+            except Exception as exc:
+                logger.error("intraday.exit_loop_error", error=str(exc), exc_info=True)
+
+    async def _run_intraday_exits(
+        self, now_utc: Optional[datetime.datetime] = None
+    ) -> None:
+        """Evaluate intraday checkpoint exits and HWM deterioration exits.
+
+        Only KXLOW* positions in ``active_positions`` are examined.  KXHIGH*
+        positions are never touched.
+        """
+        intraday_enabled = getattr(self.config, "intraday_exit_enabled", True)
+        hwm_enabled = getattr(self.config, "hwm_exit_enabled", False)
+        if not intraday_enabled and not hwm_enabled:
+            return
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+        schedule = _parse_intraday_schedule_cfg(
+            getattr(self.config, "intraday_exit_schedule", None)
+        )
+        grace_minutes = int(getattr(self.config, "intraday_exit_entry_grace_minutes", 90))
+        hwm_arm_price = int(getattr(self.config, "hwm_arm_price", 93))
+        hwm_exit_price = int(getattr(self.config, "hwm_exit_price", 88))
+        # Seconds between first below-threshold read and confirmation read.
+        confirm_seconds = 60.0
+
+        now_mono = asyncio.get_event_loop().time()
+
+        low_tickers = [
+            t for t in list(self.active_positions.keys()) if "KXLOW" in t.upper()
+        ]
+
+        for ticker in low_tickers:
+            bracket = self.active_positions.get(ticker)
+            if bracket is None:
+                continue
+
+            tz_name = get_series_timezone(ticker)
+            if not tz_name:
+                continue
+
+            now_local = now_utc.astimezone(ZoneInfo(tz_name))
+            local_date = now_local.date()
+            local_time = now_local.time()
+            local_time_str = now_local.strftime("%H:%M:%S")
+
+            # ── Grace-period check ──────────────────────────────────────────
+            in_grace = False
+            if bracket.entry_time is not None:
+                age_s = (now_utc - bracket.entry_time).total_seconds()
+                if age_s < grace_minutes * 60:
+                    in_grace = True
+            # Restored positions with no known entry_time → treat as past grace
+
+            # ── Ask / bid from cache or REST ────────────────────────────────
+            yes_ask: Optional[int] = None
+            yes_bid: Optional[int] = None
+            quote = self.cache.get_quote(ticker)
+            if quote is not None:
+                yes_bid, yes_ask = quote
+            if yes_ask is None:
+                try:
+                    rest_data = await self._fetch_market_data_via_rest(ticker)
+                    if rest_data:
+                        yes_ask = rest_data.get("yes_ask")
+                        if yes_bid is None:
+                            yes_bid = rest_data.get("yes_bid")
+                except Exception:
+                    pass
+
+            # ── Feature 1: Intraday checkpoints ─────────────────────────────
+            exited_this_cycle = False
+            if intraday_enabled:
+                exited_this_cycle = False
+                for chk_time_str, chk_threshold in schedule:
+                    if exited_this_cycle:
+                        break
+                    chk_key = (ticker, chk_time_str)
+
+                    # Idempotency: already evaluated for this date
+                    if self._intraday_checkpoint_eval_dates.get(chk_key) == local_date:
+                        continue
+
+                    # Only fire at/after checkpoint local time
+                    try:
+                        chk_h, chk_m = chk_time_str.split(":")
+                        chk_time = datetime.time(int(chk_h), int(chk_m))
+                    except (ValueError, TypeError):
+                        continue
+                    if local_time < chk_time:
+                        continue
+
+                    below_threshold = yes_ask is not None and yes_ask < chk_threshold
+
+                    logger.info(
+                        "intraday.checkpoint_evaluated",
+                        ticker=ticker,
+                        checkpoint=chk_time_str,
+                        local_time=local_time_str,
+                        yes_ask=yes_ask,
+                        threshold=chk_threshold,
+                        below_threshold=below_threshold,
+                    )
+
+                    if not below_threshold:
+                        # Mark evaluated; clear any stale pending for this key
+                        self._intraday_checkpoint_eval_dates[chk_key] = local_date
+                        self._intraday_checkpoint_pending.pop(chk_key, None)
+                        continue
+
+                    # Ask is below threshold
+                    if in_grace:
+                        logger.info(
+                            "intraday.exit_skipped_grace_period",
+                            ticker=ticker,
+                            checkpoint=chk_time_str,
+                            yes_ask=yes_ask,
+                            threshold=chk_threshold,
+                        )
+                        self._intraday_checkpoint_eval_dates[chk_key] = local_date
+                        continue
+
+                    if yes_ask is None:
+                        # No ask yet — skip; retry on next cycle
+                        continue
+
+                    pending_since = self._intraday_checkpoint_pending.get(chk_key)
+                    if pending_since is None:
+                        # First read below threshold
+                        self._intraday_checkpoint_pending[chk_key] = now_mono
+                        logger.info(
+                            "intraday.exit_pending_confirmation",
+                            ticker=ticker,
+                            checkpoint=chk_time_str,
+                            yes_ask=yes_ask,
+                            threshold=chk_threshold,
+                        )
+                        continue
+
+                    elapsed = now_mono - pending_since
+                    if elapsed < confirm_seconds:
+                        # Still within confirmation window — wait
+                        continue
+
+                    # Second read confirmed below threshold
+                    logger.info(
+                        "intraday.exit_confirmed",
+                        ticker=ticker,
+                        checkpoint=chk_time_str,
+                        yes_ask=yes_ask,
+                        threshold=chk_threshold,
+                        confirmation_elapsed_s=round(elapsed, 1),
+                    )
+                    self._intraday_checkpoint_eval_dates[chk_key] = local_date
+                    self._intraday_checkpoint_pending.pop(chk_key, None)
+
+                    await self._intraday_execute_exit(
+                        bracket,
+                        yes_bid=yes_bid,
+                        log_prefix="intraday",
+                        checkpoint=chk_time_str,
+                    )
+                    exited_this_cycle = True
+
+            # ── Feature 2: HWM deterioration exit ───────────────────────────
+            if hwm_enabled and not exited_this_cycle:
+                is_noon_or_later = local_time >= datetime.time(12, 0)
+                hwm_key = (ticker, local_date)
+
+                # Arm when ask reaches/exceeds hwm_arm_price after local noon
+                if is_noon_or_later and yes_ask is not None and yes_ask >= hwm_arm_price:
+                    if not self._hwm_armed.get(hwm_key):
+                        self._hwm_armed[hwm_key] = True
+                        logger.info(
+                            "hwm.armed",
+                            ticker=ticker,
+                            yes_ask=yes_ask,
+                            hwm_arm_price=hwm_arm_price,
+                            local_date=local_date.isoformat(),
+                        )
+
+                if self._hwm_armed.get(hwm_key):
+                    below_exit = yes_ask is not None and yes_ask <= hwm_exit_price
+
+                    if below_exit and not in_grace:
+                        pending_since = self._hwm_pending.get(ticker)
+                        if pending_since is None:
+                            self._hwm_pending[ticker] = now_mono
+                            logger.info(
+                                "hwm.exit_pending_confirmation",
+                                ticker=ticker,
+                                yes_ask=yes_ask,
+                                hwm_exit_price=hwm_exit_price,
+                            )
+                        else:
+                            elapsed = now_mono - pending_since
+                            if elapsed >= confirm_seconds:
+                                logger.info(
+                                    "hwm.exit_confirmed",
+                                    ticker=ticker,
+                                    yes_ask=yes_ask,
+                                    hwm_exit_price=hwm_exit_price,
+                                    confirmation_elapsed_s=round(elapsed, 1),
+                                )
+                                self._hwm_pending.pop(ticker, None)
+                                # Disarm to prevent re-triggering after exit
+                                self._hwm_armed[hwm_key] = False
+                                await self._intraday_execute_exit(
+                                    bracket,
+                                    yes_bid=yes_bid,
+                                    log_prefix="hwm",
+                                )
+                    else:
+                        # Ask recovered above exit price — clear pending confirmation
+                        if ticker in self._hwm_pending:
+                            logger.info(
+                                "hwm.exit_flicker_ignored",
+                                ticker=ticker,
+                                yes_ask=yes_ask,
+                                hwm_exit_price=hwm_exit_price,
+                            )
+                            self._hwm_pending.pop(ticker, None)
+
+    async def _intraday_execute_exit(
+        self,
+        bracket: "MarketBracket",
+        *,
+        yes_bid: Optional[int],
+        log_prefix: str,
+        **log_kwargs,
+    ) -> None:
+        """Exit a KXLOW* position via limit-at-bid first, panic-fallback second.
+
+        This is a *scheduled capital-preservation* exit, not a reactive
+        stop-loss.  The StopLossLedger martingale count is NOT incremented
+        here (unlike the watcher-triggered path).  If the exit falls back to
+        ``_execute_stop_loss``, whatever that path does stands.
+
+        Steps
+        -----
+        1. Cancel the resting backstop order (same cancel-before-sell rule).
+        2. Submit a GTC SELL_YES limit at ``yes_bid`` via ``place_limit_sell``.
+        3. Wait ~30 s; if still not fully filled, cancel and fall back to
+           ``_execute_stop_loss(bracket, bypass_cooldown=True)``.
+        4. If the executor does not support ``place_limit_sell``, fall back
+           immediately to ``_execute_stop_loss``.
+        """
+        ticker = bracket.market_ticker
+        managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
+            ticker, bracket.position_quantity
+        )
+        if managed_qty <= 0:
+            logger.info(
+                "exit.skipped_no_app_qty",
+                ticker=ticker,
+                total_position_qty=bracket.position_quantity,
+                app_owned_qty=app_owned_qty,
+                external_qty=external_qty,
+                action=f"{log_prefix}_exit_not_executed",
+            )
+            return
+
+        # Cancel resting backstop before submitting sell (prevent overselling)
+        await self._cancel_sl_backstop(ticker, reason=f"{log_prefix}_exit")
+
+        bid_price = yes_bid if yes_bid and yes_bid > 0 else None
+        limit_succeeded = False
+
+        if bid_price is not None:
+            order = OrderRequest(
+                market_ticker=ticker,
+                side=OrderSide.SELL_YES,
+                price=bid_price,
+                quantity=managed_qty,
+            )
+            logger.info(
+                f"{log_prefix}.exit_submitted",
+                ticker=ticker,
+                price=bid_price,
+                qty=managed_qty,
+                **log_kwargs,
+            )
+            try:
+                result = await self.executor.place_limit_sell(order)
+                placed_order_id = result.order_id if result.order_id else None
+                if result.status != "NOT_SUPPORTED" and placed_order_id:
+                    # Wait ~30 s for the resting limit to fill
+                    await asyncio.sleep(30)
+                    fill_status = await self.executor.get_order_status(placed_order_id)
+                    filled = (fill_status or "").lower() in ("filled", "settled")
+                    if filled:
+                        limit_succeeded = True
+                        logger.info(
+                            f"{log_prefix}.exit_filled",
+                            ticker=ticker,
+                            price=bid_price,
+                            qty=managed_qty,
+                            order_id=placed_order_id,
+                            **log_kwargs,
+                        )
+                        await self._record_and_remove_intraday_exit(bracket, result)
+                    else:
+                        await self.executor.cancel_order(placed_order_id, ticker)
+                        logger.info(
+                            f"{log_prefix}.exit_fallback_panic",
+                            ticker=ticker,
+                            reason="limit_not_filled",
+                            **log_kwargs,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    f"{log_prefix}.exit_limit_error",
+                    ticker=ticker,
+                    error=str(exc),
+                )
+
+        if not limit_succeeded:
+            if bid_price is None:
+                logger.info(
+                    f"{log_prefix}.exit_fallback_panic",
+                    ticker=ticker,
+                    reason="no_bid",
+                    **log_kwargs,
+                )
+            await self._execute_stop_loss(bracket, bypass_cooldown=True)
+
+    async def _record_and_remove_intraday_exit(
+        self, bracket: "MarketBracket", result: "ExecutionResult"
+    ) -> None:
+        """Record a successful limit-at-bid intraday exit and clean up position state."""
+        ticker = bracket.market_ticker
+        async with await self.db.get_session() as session:
+            et = ExecutedTrade(
+                market_ticker=ticker,
+                action=TradeAction.STOP_LOSS,
+                side="yes",
+                price=result.fill_price,
+                quantity=result.fill_quantity,
+                total_cost_cents=result.total_cost_cents,
+                trade_mode=self.config.trading_mode,
+                status=TradeStatus.FILLED if result.success else TradeStatus.REJECTED,
+                kalshi_order_id=result.order_id or None,
+                notes=result.notes,
+            )
+            session.add(et)
+            await session.execute(
+                delete(PositionModel).where(PositionModel.market_ticker == ticker)
+            )
+            await session.commit()
+
+        bracket.phase = Phase.CLOSED
+        self.active_positions.pop(ticker, None)
+        self.brackets.pop(ticker, None)
+        self._app_owned_qty.pop(ticker, None)
+        await self._unregister_stop_loss_watcher(ticker)
+
+        asyncio.create_task(
+            self._update_exit_outcome(
+                market_ticker=ticker,
+                exit_price=result.fill_price,
+                exit_qty=result.fill_quantity,
+                outcome=TradeOutcomeStatus.STOPPED,
+            )
+        )
 
     async def stop(self):
         self._running = False
