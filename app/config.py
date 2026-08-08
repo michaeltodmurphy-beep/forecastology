@@ -156,7 +156,6 @@ class AppConfig(BaseSettings):
     spread_monitor_price: int
     minimum_spread: int
     stop_loss_price_ask: int
-    stop_loss_price_bid: int = 0
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
     weather_series_prefix: str = 'KXWEATHER'
@@ -314,7 +313,7 @@ class AppConfig(BaseSettings):
 
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
-        'stop_loss_price_ask', 'stop_loss_price_bid', 'monitor_start_price',
+        'stop_loss_price_ask', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
         mode='before'

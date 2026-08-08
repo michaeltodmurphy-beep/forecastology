@@ -10,7 +10,6 @@ os.environ['BUY_TRIGGER_PRICE_LOW'] = '0.82'
 os.environ['BUY_TRIGGER_PRICE_HIGH'] = '0.83'
 os.environ['HEDGE_TRIGGER_PRICE'] = '0.48'
 os.environ['STOP_LOSS_PRICE_ASK'] = '0.35'
-os.environ['STOP_LOSS_PRICE_BID'] = '0.30'
 os.environ['INITIAL_CONTRACT_COUNT'] = '1'
 os.environ['MINIMUM_SPREAD'] = '0.04'
 os.environ['MONITOR_START_PRICE'] = '0.80'
@@ -31,7 +30,6 @@ class TestAppConfig:
         assert cfg.buy_trigger_price_high == 83
         assert cfg.hedge_trigger_price == 48
         assert cfg.stop_loss_price_ask == 35
-        assert cfg.stop_loss_price_bid == 30
         assert cfg.initial_contract_count == 1
         assert cfg.minimum_spread == 4
         assert cfg.monitor_start_price == 80
@@ -50,6 +48,18 @@ class TestAppConfig:
             assert cfg.buy_trigger_price_high == 83
         finally:
             os.environ.pop("BUY_TRIGGER_PRICE", None)
+
+    def test_from_env_ignores_stop_loss_price_bid(self):
+        """STOP_LOSS_PRICE_BID in .env must be silently ignored (extra='ignore')."""
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        os.environ["STOP_LOSS_PRICE_BID"] = "0.30"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert not hasattr(cfg, "stop_loss_price_bid")
+        finally:
+            os.environ.pop("STOP_LOSS_PRICE_BID", None)
 
     def test_low_ticker_10pm_max_ask_parses_dollar_value(self):
         import pytest
