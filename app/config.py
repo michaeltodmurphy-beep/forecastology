@@ -91,6 +91,78 @@ def _parse_initial_contract_count(raw: str | None) -> int:
         return 1
 
 
+_INTRADAY_EXIT_SCHEDULE_DEFAULT = "12:00:0.85,15:00:0.90,18:00:0.90"
+
+
+def _parse_intraday_schedule(raw: str | None) -> list[tuple[str, int]]:
+    """Parse INTRADAY_EXIT_SCHEDULE into a sorted list of (HH:MM, threshold_cents) tuples.
+
+    Format: comma-separated ``HH:MM:price`` entries where price is in dollars
+    (e.g. ``0.85`` → 85¢).  Malformed individual entries are skipped with a
+    warning.  Falls back to the built-in default schedule when the whole string
+    contains no valid entries.
+    """
+    default = _parse_intraday_schedule_raw(_INTRADAY_EXIT_SCHEDULE_DEFAULT)
+    if not raw or not raw.strip():
+        return default
+    return _parse_intraday_schedule_raw(raw, fallback=default)
+
+
+def _parse_intraday_schedule_raw(
+    raw: str, fallback: "list[tuple[str, int]] | None" = None
+) -> "list[tuple[str, int]]":
+    """Low-level parser shared by _parse_intraday_schedule and tests."""
+    entries: list[tuple[str, int]] = []
+    for part in raw.strip().split(","):
+        part = part.strip()
+        if not part:
+            continue
+        segments = part.split(":")
+        if len(segments) != 3:
+            logger.warning(
+                "config.intraday_schedule_entry_malformed",
+                entry=part,
+                reason="wrong_segment_count",
+            )
+            continue
+        hh, mm, price_str = segments
+        try:
+            h = int(hh)
+            m = int(mm)
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError("time out of range")
+            time_str = f"{h:02d}:{m:02d}"
+        except (ValueError, TypeError):
+            logger.warning(
+                "config.intraday_schedule_entry_malformed",
+                entry=part,
+                reason="invalid_time",
+            )
+            continue
+        try:
+            price_cents = int(round(float(price_str) * 100))
+            if not (1 <= price_cents <= 99):
+                raise ValueError("price out of valid range")
+        except (ValueError, TypeError):
+            logger.warning(
+                "config.intraday_schedule_entry_malformed",
+                entry=part,
+                reason="invalid_price",
+            )
+            continue
+        entries.append((time_str, price_cents))
+
+    if not entries:
+        logger.warning(
+            "config.intraday_schedule_all_entries_malformed",
+            raw=raw,
+            fallback="default",
+        )
+        return fallback if fallback is not None else []
+
+    return sorted(entries, key=lambda x: x[0])
+
+
 def _parse_trade_toggle(raw: str | None, name: str, default: bool = True) -> bool:
     """Parse a yes/no trade-direction toggle from an env-var string.
 
@@ -310,12 +382,47 @@ class AppConfig(BaseSettings):
     sl_backstop_enabled: bool = False
     # Default 5¢ (stored as int cents; converted from dollars via validator)
     sl_backstop_offset: int = 5
+    # ── Intraday checkpoint exits ────────────────────────────────────────────
+    # At each configured local-time checkpoint, checks the YES ask for held
+    # KXLOW* positions.  If the ask is below the checkpoint's threshold, a
+    # capital-preservation exit is initiated after a confirmation re-read
+    # (~60 s later) to filter single-tick flickers.
+    #
+    # INTRADAY_EXIT_ENABLED=true|false  (default: true)
+    # INTRADAY_EXIT_SCHEDULE=HH:MM:price,...  (default: "12:00:0.85,15:00:0.90,18:00:0.90")
+    #   Comma-separated HH:MM:price entries in the ticker's city-local time.
+    #   Price is in dollars; parsed to cents (0.85 → 85).  Malformed entries
+    #   are skipped with a warning; all-malformed input falls back to the
+    #   default schedule.
+    # INTRADAY_EXIT_ENTRY_GRACE_MINUTES=N  (default: 90)
+    #   Skip checkpoint exits for positions entered within the last N minutes.
+    #   Restored positions without a known entry time are treated as past grace.
+    #
+    # Parsed by from_env().
+    intraday_exit_enabled: bool = True
+    intraday_exit_schedule: str = _INTRADAY_EXIT_SCHEDULE_DEFAULT
+    intraday_exit_entry_grace_minutes: int = 90
+    # ── High-water-mark deterioration exit (opt-in) ──────────────────────────
+    # Once a held KXLOW* position's ask has reached HWM_ARM_PRICE after local
+    # noon, arms a deterioration trigger: if the ask subsequently drops to
+    # HWM_EXIT_PRICE or below, the position is exited (same confirmation-read
+    # + limit-at-bid mechanics as checkpoint exits).
+    #
+    # HWM_EXIT_ENABLED=true|false  (default: false — opt-in)
+    # HWM_ARM_PRICE=<dollars>      (default: 0.93 → 93¢)
+    # HWM_EXIT_PRICE=<dollars>     (default: 0.88 → 88¢)
+    #
+    # Parsed by from_env().
+    hwm_exit_enabled: bool = False
+    hwm_arm_price: int = 93
+    hwm_exit_price: int = 88
 
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price_ask', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
+        'hwm_arm_price', 'hwm_exit_price',
         mode='before'
     )
     @classmethod
@@ -469,6 +576,26 @@ class AppConfig(BaseSettings):
             "RECONCILER_INTERVAL_MINUTES",
             default=60,
         )
+        intraday_exit_enabled = _parse_trade_toggle(
+            os.getenv("INTRADAY_EXIT_ENABLED"),
+            "INTRADAY_EXIT_ENABLED",
+            default=True,
+        )
+        intraday_exit_schedule = os.getenv(
+            "INTRADAY_EXIT_SCHEDULE", _INTRADAY_EXIT_SCHEDULE_DEFAULT
+        )
+        intraday_exit_entry_grace_minutes = _parse_positive_int(
+            os.getenv("INTRADAY_EXIT_ENTRY_GRACE_MINUTES"),
+            "INTRADAY_EXIT_ENTRY_GRACE_MINUTES",
+            default=90,
+        )
+        hwm_exit_enabled = _parse_trade_toggle(
+            os.getenv("HWM_EXIT_ENABLED"),
+            "HWM_EXIT_ENABLED",
+            default=False,
+        )
+        hwm_arm_price = os.getenv("HWM_ARM_PRICE", "0.93")
+        hwm_exit_price = os.getenv("HWM_EXIT_PRICE", "0.88")
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -501,4 +628,10 @@ class AppConfig(BaseSettings):
             sl_flatten_unprotected_on_blind=sl_flatten_unprotected_on_blind,
             enable_settlement_reconciler=enable_settlement_reconciler,
             reconciler_interval_minutes=reconciler_interval_minutes,
+            intraday_exit_enabled=intraday_exit_enabled,
+            intraday_exit_schedule=intraday_exit_schedule,
+            intraday_exit_entry_grace_minutes=intraday_exit_entry_grace_minutes,
+            hwm_exit_enabled=hwm_exit_enabled,
+            hwm_arm_price=hwm_arm_price,
+            hwm_exit_price=hwm_exit_price,
         )

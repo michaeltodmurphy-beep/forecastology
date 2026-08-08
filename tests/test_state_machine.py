@@ -6864,3 +6864,366 @@ async def test_execute_entry_final_gate_exception_resets_crossed_buy(monkeypatch
     assert bracket.crossed_buy is False, (
         "crossed_buy must be reset to False when final gate raises"
     )
+
+
+# ---------------------------------------------------------------------------
+# Intraday checkpoint exits (Feature 1) and HWM exits (Feature 2)
+# ---------------------------------------------------------------------------
+
+def _make_low_bracket(ticker: str, series: str, qty: int = 3, avg_entry: int = 80):
+    return MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker=series,
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=qty,
+        avg_entry=avg_entry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_intraday_checkpoint_no_exit_before_checkpoint_time(monkeypatch):
+    """When local time is before the checkpoint, no exit is triggered."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, intraday_exit_enabled=True)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Ask=80 (below 85 threshold), but time is 11:30 — before 12:00 checkpoint
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    # America/New_York: pick a UTC time that gives 11:30 local
+    import pytz
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))  # EDT
+    now_local = datetime.datetime(2026, 8, 8, 11, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    # No exit should be triggered — checkpoint 12:00 not yet reached
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert not any(ev == "intraday.exit_pending_confirmation" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_intraday_checkpoint_pending_then_confirmed(monkeypatch):
+    """Ask below threshold at checkpoint: first call sets pending, second call (60+ s later) exits."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, intraday_exit_enabled=True)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Ask=80 is below 12:00 checkpoint threshold of 85
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    # Local time: 12:30 Eastern (past 12:00 checkpoint)
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    # First call: should set pending but NOT exit
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert any(ev == "intraday.exit_pending_confirmation" for ev, _ in logged)
+
+    # Simulate 65 s later (past the 60 s confirmation window)
+    chk_key = (ticker, "12:00")
+    strategy._intraday_checkpoint_pending[chk_key] -= 65
+
+    # Second call: should confirm and exit
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert any(ev == "intraday.exit_confirmed" for ev, _ in logged)
+    strategy._execute_stop_loss.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_intraday_checkpoint_flicker_ignored(monkeypatch):
+    """Ask recovers above threshold before 60 s: confirmation is cleared, no exit."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, intraday_exit_enabled=True)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    # First call: ask=80 < 85 → pending
+    strategy.cache.update_quote(ticker, 75, 80)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    chk_key = (ticker, "12:00")
+    assert chk_key in strategy._intraday_checkpoint_pending
+
+    # Ask recovers to 92 (above threshold) before 60 s
+    strategy.cache.update_quote(ticker, 88, 92)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    # Pending should be cleared (the eval_date marks it done for today)
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_intraday_checkpoint_idempotent_per_local_date(monkeypatch):
+    """Once a checkpoint fires for a ticker+date, it does not re-evaluate."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, intraday_exit_enabled=True)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    # Mark evaluation as already done for today
+    local_date = now_local.date()
+    strategy._intraday_checkpoint_eval_dates[(ticker, "12:00")] = local_date
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    # No exit and no pending confirmation since it was already evaluated
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert not any(ev == "intraday.exit_pending_confirmation" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_intraday_checkpoint_grace_period_skips_recent_entry(monkeypatch):
+    """Positions entered within grace window are skipped at checkpoint."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_entry_grace_minutes=90,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    # Entry time: 30 minutes before now_utc (within 90-minute grace)
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+    bracket.entry_time = now_utc - datetime.timedelta(minutes=30)
+
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert any(ev == "intraday.exit_skipped_grace_period" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_disabled_is_inert(monkeypatch):
+    """No checkpoint evaluation when intraday_exit_enabled=False."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=False,
+        hwm_exit_enabled=False,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 14, 0, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert not any(ev == "intraday.checkpoint_evaluated" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_hwm_arms_after_noon_when_ask_high_enough(monkeypatch):
+    """HWM arms when ask ≥ hwm_arm_price after local noon."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=False,
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 90, 95)  # ask=95 >= arm_price=93
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    local_date = now_local.date()
+    assert strategy._hwm_armed.get((ticker, local_date)) is True
+    assert any(ev == "hwm.armed" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_hwm_does_not_arm_before_noon(monkeypatch):
+    """HWM must not arm before local noon even if ask is high."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=False,
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 90, 95)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 11, 30, 0, tzinfo=ny_tz)  # before noon
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    local_date = now_local.date()
+    assert not strategy._hwm_armed.get((ticker, local_date))
+    assert not any(ev == "hwm.armed" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_hwm_exit_confirmed_after_two_reads(monkeypatch):
+    """HWM exit: first read sets pending, second read 60+ s later triggers exit."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=False,
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 14, 0, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+    local_date = now_local.date()
+
+    # Pre-arm the HWM
+    strategy._hwm_armed[(ticker, local_date)] = True
+
+    # Ask falls to 85 (≤ hwm_exit_price=88) → first read sets pending
+    strategy.cache.update_quote(ticker, 80, 85)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert any(ev == "hwm.exit_pending_confirmation" for ev, _ in logged)
+
+    # Simulate 65 s later
+    strategy._hwm_pending[ticker] -= 65
+
+    # Second call: confirmed → exit
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert any(ev == "hwm.exit_confirmed" for ev, _ in logged)
+    strategy._execute_stop_loss.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hwm_exit_flicker_ignored(monkeypatch):
+    """Ask drops below exit price then recovers before 60 s: no exit."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=False,
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 14, 0, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+    local_date = now_local.date()
+
+    strategy._hwm_armed[(ticker, local_date)] = True
+
+    # First: ask drops to 85 → pending
+    strategy.cache.update_quote(ticker, 80, 85)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert ticker in strategy._hwm_pending
+
+    # Ask recovers to 92 (> exit_price=88) before 60 s
+    strategy.cache.update_quote(ticker, 88, 92)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    assert any(ev == "hwm.exit_flicker_ignored" for ev, _ in logged)
+    assert ticker not in strategy._hwm_pending
+    strategy._execute_stop_loss.assert_not_awaited()

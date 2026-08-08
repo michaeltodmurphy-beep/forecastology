@@ -360,3 +360,147 @@ class TestParseInitialContractCount:
         from app.config import _parse_initial_contract_count
         assert _parse_initial_contract_count("abc") == 1
         assert _parse_initial_contract_count("?!") == 1
+
+
+class TestIntradayScheduleParsing:
+    """Unit tests for _parse_intraday_schedule_raw and _parse_intraday_schedule."""
+
+    def test_valid_schedule_parses_dollars_to_cents(self):
+        from app.config import _parse_intraday_schedule
+        result = _parse_intraday_schedule("12:00:0.85,15:00:0.90,18:00:0.90")
+        assert result == [("12:00", 85), ("15:00", 90), ("18:00", 90)]
+
+    def test_result_is_sorted_by_time(self):
+        from app.config import _parse_intraday_schedule
+        result = _parse_intraday_schedule("18:00:0.90,12:00:0.85,15:00:0.90")
+        assert result == [("12:00", 85), ("15:00", 90), ("18:00", 90)]
+
+    def test_none_returns_default(self):
+        from app.config import _parse_intraday_schedule
+        result = _parse_intraday_schedule(None)
+        assert result == [("12:00", 85), ("15:00", 90), ("18:00", 90)]
+
+    def test_empty_string_returns_default(self):
+        from app.config import _parse_intraday_schedule
+        result = _parse_intraday_schedule("")
+        assert result == [("12:00", 85), ("15:00", 90), ("18:00", 90)]
+
+    def test_malformed_entry_skipped_keeps_valid(self):
+        from app.config import _parse_intraday_schedule
+        # "bad_entry" has no colons at all → skipped; valid entry kept
+        result = _parse_intraday_schedule("bad_entry,12:00:0.85")
+        assert result == [("12:00", 85)]
+
+    def test_bad_price_entry_skipped(self):
+        from app.config import _parse_intraday_schedule
+        # invalid price string
+        result = _parse_intraday_schedule("12:00:not_a_price,15:00:0.90")
+        assert result == [("15:00", 90)]
+
+    def test_bad_time_entry_skipped(self):
+        from app.config import _parse_intraday_schedule
+        # invalid time values
+        result = _parse_intraday_schedule("25:99:0.85,15:00:0.90")
+        assert result == [("15:00", 90)]
+
+    def test_all_malformed_falls_back_to_default(self):
+        from app.config import _parse_intraday_schedule
+        result = _parse_intraday_schedule("badentry,alsoBad")
+        assert result == [("12:00", 85), ("15:00", 90), ("18:00", 90)]
+
+    def test_price_zero_is_rejected(self):
+        from app.config import _parse_intraday_schedule
+        # price 0.00 → 0 cents → invalid range → skipped
+        result = _parse_intraday_schedule("12:00:0.00,15:00:0.85")
+        assert result == [("15:00", 85)]
+
+    def test_price_one_dollar_is_rejected(self):
+        from app.config import _parse_intraday_schedule
+        # price 1.00 → 100 cents → invalid range → skipped
+        result = _parse_intraday_schedule("12:00:1.00,15:00:0.85")
+        assert result == [("15:00", 85)]
+
+
+class TestIntradayExitConfig:
+    """Tests for intraday checkpoint and HWM config fields."""
+
+    def _base_cfg(self):
+        from app.config import AppConfig
+        return AppConfig(
+            kalshi_api_key='k',
+            kalshi_private_key_path='k.pem',
+            mysql_database_url='******localhost:3306/test',
+            trading_mode='PAPER',
+            initial_contract_count=1,
+            monitor_start_price=80,
+            buy_trigger_price_low=82,
+            buy_trigger_price_high=82,
+            spread_monitor_price=90,
+            minimum_spread=4,
+            stop_loss_price=35,
+            no_trade_tickers=set(),
+        )
+
+    def test_intraday_exit_enabled_default_true(self):
+        cfg = self._base_cfg()
+        assert cfg.intraday_exit_enabled is True
+
+    def test_hwm_exit_enabled_default_false(self):
+        cfg = self._base_cfg()
+        assert cfg.hwm_exit_enabled is False
+
+    def test_hwm_arm_price_default_cents(self):
+        cfg = self._base_cfg()
+        assert cfg.hwm_arm_price == 93
+
+    def test_hwm_exit_price_default_cents(self):
+        cfg = self._base_cfg()
+        assert cfg.hwm_exit_price == 88
+
+    def test_hwm_arm_price_parses_dollars_from_env(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["HWM_ARM_PRICE"] = "0.95"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.hwm_arm_price == 95
+        finally:
+            os.environ.pop("HWM_ARM_PRICE", None)
+
+    def test_hwm_exit_price_parses_dollars_from_env(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["HWM_EXIT_PRICE"] = "0.82"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.hwm_exit_price == 82
+        finally:
+            os.environ.pop("HWM_EXIT_PRICE", None)
+
+    def test_intraday_exit_enabled_from_env_false(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["INTRADAY_EXIT_ENABLED"] = "false"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.intraday_exit_enabled is False
+        finally:
+            os.environ.pop("INTRADAY_EXIT_ENABLED", None)
+
+    def test_intraday_exit_entry_grace_minutes_from_env(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["INTRADAY_EXIT_ENTRY_GRACE_MINUTES"] = "120"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.intraday_exit_entry_grace_minutes == 120
+        finally:
+            os.environ.pop("INTRADAY_EXIT_ENTRY_GRACE_MINUTES", None)
