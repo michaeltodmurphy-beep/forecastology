@@ -125,8 +125,7 @@ Key variables:
 | `TRADING_MODE` | `PAPER` (simulated) or `LIVE` (real money) |
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
-| `STOP_LOSS_PRICE_ASK` | WebSocket best ask at or below this (cents) contributes to stop-loss trigger (default `0.35`) |
-| `STOP_LOSS_PRICE_BID` | WebSocket best bid at or below this (cents) contributes to stop-loss trigger (default `0.00`, disabled until set above 0) |
+| `STOP_LOSS_PRICE_ASK` | WebSocket best ask at or below this (cents) triggers stop-loss exit (default `0.35`) |
 | `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
 | `SL_EXIT_MODE` | Stop-loss exit strategy: `PANIC_FLATTEN` (default, immediate 1¢ floor sell so Kalshi matches at the best available bid) or `AGGRESSIVE_LIMIT` (opt-in repricing ladder) |
 | `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
@@ -355,7 +354,7 @@ Low-ticker trading is controlled by two complementary gates that together form t
 Stop-loss is driven by the **WebSocket `StopLossWatcher`** inside `run.py`:
 
 - On every `ticker` WebSocket update, `yes_ask` is passed to `StopLossWatcher.on_market_update()`.
-- If either `yes_ask ≤ STOP_LOSS_PRICE_ASK` OR `yes_bid ≤ STOP_LOSS_PRICE_BID` (when bid threshold > 0), the exit handler fires immediately.
+- If `yes_ask ≤ STOP_LOSS_PRICE_ASK`, the exit handler fires immediately.
 - An `exit_in_progress` guard prevents duplicate exits on repeated ticks or reconnect bursts.
 - On failure, the guard is reset so the next tick can retry.
 - Startup reconciliation (`_restore_positions`) registers all open positions with the watcher so coverage begins from the first WebSocket message.
@@ -444,8 +443,7 @@ Key variables:
 | `TRADING_MODE` | `PAPER` (simulated) or `LIVE` (real money) |
 | `REST_BASE_URL` | Kalshi REST API base URL |
 | `WS_URL` | Kalshi WebSocket URL |
-| `STOP_LOSS_PRICE_ASK` | WebSocket best ask at or below this (cents) contributes to stop-loss trigger (default `0.35`) |
-| `STOP_LOSS_PRICE_BID` | WebSocket best bid at or below this (cents) contributes to stop-loss trigger (default `0.00`, disabled until set above 0) |
+| `STOP_LOSS_PRICE_ASK` | WebSocket best ask at or below this (cents) triggers stop-loss exit (default `0.35`) |
 | `ENABLE_FAST_SL_EXIT` | Enable immediate async stop-loss execution path (`true` by default in `LIVE`, `false` in `PAPER`) |
 | `SL_EXIT_MODE` | Stop-loss exit strategy: `PANIC_FLATTEN` (default, immediate 1¢ floor sell so Kalshi matches at the best available bid) or `AGGRESSIVE_LIMIT` (opt-in repricing ladder) |
 | `SL_EXIT_RETRY_INTERVAL_MS` | Fast stop-loss retry interval in milliseconds (default `300`) |
@@ -547,7 +545,7 @@ When stop-loss trigger conditions are met, the strategy dispatches an immediate 
 
 **`PANIC_FLATTEN` (default)** — immediate floor sell:
 
-- **Trigger condition (ask/bid OR):** `trigger_met = (best_ask_yes is not None AND best_ask_yes <= STOP_LOSS_PRICE_ASK) OR (best_bid_yes is not None AND best_bid_yes <= STOP_LOSS_PRICE_BID)` (bid threshold active when > 0).
+- **Trigger condition (ask only):** `trigger_met = (best_ask_yes is not None AND best_ask_yes <= STOP_LOSS_PRICE_ASK)`.
 - On trigger, immediately submits a sell at `SL_PANIC_SELL_PRICE` (default 1¢) — a floor-priced order that is immediately marketable, so Kalshi matches it at the **best available bid**
 - no slow repricing ladder before the first submit: fill speed is prioritised over exit price and avoids chasing the book down
 - **Pre-submit revalidation:** immediately before placing each panic order, the latest cached YES quote is re-checked against ask/bid thresholds. If both prices are back above configured stops, the submit is **canceled** and logged as `sl.panic_revalidation_aborted` (`reason="prices_above_stops"`). If the quote is missing or stale (older than `SL_PANIC_MAX_QUOTE_AGE_MS`), the submit proceeds in **degraded mode** (`sl.panic_revalidation_degraded`) — failing to exit is worse than a marginal false positive.
@@ -556,7 +554,7 @@ When stop-loss trigger conditions are met, the strategy dispatches an immediate 
 - per-ticker task idempotency: repeated triggers while an exit is in-flight are silently suppressed
 - structured logs: `sl.panic_triggered`, `sl.panic_revalidation`, `sl.panic_revalidation_degraded`, `sl.panic_revalidation_aborted`, `sl.panic_submit`, `sl.panic_retry`, `sl.panic_submit_error`, `sl.panic_filled` / `sl.panic_failed`
 - trade-off: fill speed is prioritised over exit price — you may receive less than 1¢; the intent is to get flat immediately
-- units: `STOP_LOSS_PRICE_ASK` / `STOP_LOSS_PRICE_BID` and cached YES quotes are stored in **cents** (integer); dollar-format `.env` values (e.g. `STOP_LOSS_PRICE_ASK=0.48`) are automatically converted to 48¢ by AppConfig.
+- units: `STOP_LOSS_PRICE_ASK` and cached YES quotes are stored in **cents** (integer); dollar-format `.env` values (e.g. `STOP_LOSS_PRICE_ASK=0.48`) are automatically converted to 48¢ by AppConfig.
 
 **`AGGRESSIVE_LIMIT`** — opt-in repricing ladder:
 

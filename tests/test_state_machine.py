@@ -250,7 +250,6 @@ def make_config(**overrides):
         sl_panic_retry_ms=0,
         sl_panic_max_retries=3,
         sl_panic_max_quote_age_ms=30000,
-        stop_loss_price_bid=0,
         no_trade_tickers=set(),
     )
     for key, value in overrides.items():
@@ -2976,7 +2975,6 @@ async def test_stop_loss_triggers_on_ask_threshold(monkeypatch):
         monkeypatch,
         executor=executor,
         stop_loss_price=50,
-        stop_loss_price_bid=0,
     )
     strategy._execute_stop_loss = AsyncMock()
 
@@ -2992,33 +2990,8 @@ async def test_stop_loss_triggers_on_ask_threshold(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_triggers_on_bid_threshold(monkeypatch):
-    """Bid-side threshold triggers stop-loss when ask is above ask threshold."""
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(
-        monkeypatch,
-        executor=executor,
-        stop_loss_price=64,
-        stop_loss_price_bid=45,
-        sl_exit_mode="PANIC_FLATTEN",
-    )
-    strategy._execute_stop_loss = AsyncMock()
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-    strategy.cache.update_quote(ticker, 42, 66)
-
-    await strategy._evaluate_held_positions()
-
-    strategy._execute_stop_loss.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_stop_loss_does_not_trigger_when_both_prices_above_thresholds(monkeypatch):
-    """Neither threshold met => no stop-loss."""
+async def test_stop_loss_does_not_trigger_when_prices_above_threshold(monkeypatch):
+    """Ask above threshold => no stop-loss."""
     ticker = "KXLOWTBOS-26JUN23-B65.5"
     executor = FakeExecutor()
     executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
@@ -3026,7 +2999,6 @@ async def test_stop_loss_does_not_trigger_when_both_prices_above_thresholds(monk
         monkeypatch,
         executor=executor,
         stop_loss_price=40,
-        stop_loss_price_bid=45,
     )
     strategy._execute_stop_loss = AsyncMock()
 
@@ -3038,31 +3010,6 @@ async def test_stop_loss_does_not_trigger_when_both_prices_above_thresholds(monk
     await strategy._evaluate_held_positions()
 
     strategy._execute_stop_loss.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_stop_loss_example_ask_above_bid_below_triggers(monkeypatch):
-    """Example case: ask=66, bid=42 with ask_stop=64 and bid_stop=45 must trigger."""
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
-    strategy = make_strategy(
-        monkeypatch,
-        executor=executor,
-        stop_loss_price=64,
-        stop_loss_price_bid=45,
-        sl_exit_mode="PANIC_FLATTEN",
-    )
-    strategy._execute_stop_loss = AsyncMock()
-
-    bracket = _make_held_bracket(ticker, "KXLOWTBOS")
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-    strategy.cache.update_quote(ticker, 42, 66)
-
-    await strategy._evaluate_held_positions()
-
-    strategy._execute_stop_loss.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

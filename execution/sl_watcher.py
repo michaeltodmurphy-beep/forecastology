@@ -19,7 +19,6 @@ class WatchedPosition:
     sl_price: int
     side: PositionSide
     quantity: int
-    sl_price_bid: int = 0
     exit_in_progress: bool = False
     state: StopLossWatcherState = "IDLE"
     trigger_price: Optional[int] = None
@@ -56,20 +55,17 @@ class StopLossWatcher:
         side: PositionSide,
         quantity: int,
         sl_price: int,
-        sl_price_bid: int = 0,
     ) -> None:
         async with self._lock:
             existing = self._positions.get(ticker)
             if existing is None:
                 self._positions[ticker] = WatchedPosition(
                     sl_price=sl_price,
-                    sl_price_bid=sl_price_bid,
                     side=side,
                     quantity=quantity,
                 )
             else:
                 existing.sl_price = sl_price
-                existing.sl_price_bid = sl_price_bid
                 existing.side = side
                 existing.quantity = quantity
                 if existing.state == "TERMINAL":
@@ -80,23 +76,15 @@ class StopLossWatcher:
                         existing.last_best_ask is not None
                         and existing.last_best_ask <= existing.sl_price
                     )
-                    bid_trigger = (
-                        existing.sl_price_bid > 0
-                        and existing.last_best_bid is not None
-                        and existing.last_best_bid <= existing.sl_price_bid
-                    )
-                    if ask_trigger or bid_trigger:
+                    if ask_trigger:
                         existing.state = "TRIGGERED"
-                        existing.trigger_price = (
-                            existing.last_best_ask if ask_trigger else existing.last_best_bid
-                        )
+                        existing.trigger_price = existing.last_best_ask
         logger.info(
             "sl.position_registered",
             ticker=ticker,
             side=side,
             quantity=quantity,
             sl_price=sl_price,
-            sl_price_bid=sl_price_bid,
         )
 
     async def rearm_position(self, ticker: str, *, trigger_price: Optional[int] = None) -> bool:
@@ -160,12 +148,7 @@ class StopLossWatcher:
                 best_ask is not None
                 and best_ask <= position.sl_price
             )
-            bid_trigger = (
-                position.sl_price_bid > 0
-                and best_bid is not None
-                and best_bid <= position.sl_price_bid
-            )
-            if not (ask_trigger or bid_trigger):
+            if not ask_trigger:
                 if position.state in {"TRIGGERED", "SUBMITTING", "RETRYING"} and not position.exit_in_progress:
                     position.state = "IDLE"
                     position.trigger_price = None
@@ -175,10 +158,8 @@ class StopLossWatcher:
             else:
                 # Fresh trigger: transition state and inline-dispatch the worker.
                 position.state = "TRIGGERED"
-                if ask_trigger and best_ask is not None:
+                if best_ask is not None:
                     position.trigger_price = best_ask
-                elif best_bid is not None:
-                    position.trigger_price = best_bid
                 existing_task = self._worker_tasks.get(ticker)
                 if existing_task is None or existing_task.done():
                     position.exit_in_progress = True
