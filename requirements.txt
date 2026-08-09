@@ -8,5 +8,6 @@ pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 structlog>=24.0.0
 requests>=2.31.0
+astral>=3.2
 pymysql>=1.1.0
 apscheduler>=3.10.0

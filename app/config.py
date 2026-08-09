@@ -214,6 +214,62 @@ def _parse_positive_int(raw: str | None, name: str, default: int) -> int:
     return parsed
 
 
+def _parse_non_negative_int(raw: str | None, name: str, default: int) -> int:
+    if not raw or not raw.strip():
+        return default
+    try:
+        parsed = int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "config.non_negative_int_invalid",
+            name=name,
+            raw=raw,
+            fallback=default,
+            message=f"Unrecognized value for {name}='{raw}'; defaulting to {default}",
+        )
+        return default
+    if parsed < 0:
+        logger.warning(
+            "config.non_negative_int_below_minimum",
+            name=name,
+            raw=raw,
+            fallback=default,
+            message=f"Value for {name} must be >= 0; defaulting to {default}",
+        )
+        return default
+    return parsed
+
+
+def _parse_entry_gate_mode(raw: str | None) -> str:
+    if not raw or not raw.strip():
+        return "NWS_WINDOW"
+    normalized = raw.strip().upper()
+    if normalized in ("NWS_WINDOW", "SUNRISE"):
+        return normalized
+    logger.warning(
+        "config.entry_gate_mode_invalid",
+        raw=raw,
+        fallback="NWS_WINDOW",
+        message=f"Unrecognized value for ENTRY_GATE_MODE='{raw}'; defaulting to NWS_WINDOW",
+    )
+    return "NWS_WINDOW"
+
+
+def _parse_sunrise_source(raw: str | None) -> str:
+    if not raw or not raw.strip():
+        return "astral"
+    normalized = raw.strip().lower()
+    if normalized in ("astral", "api"):
+        return normalized
+    logger.warning(
+        "config.sunrise_source_invalid",
+        raw=raw,
+        fallback="astral",
+        message=f"Unrecognized value for SUNRISE_SOURCE='{raw}'; defaulting to astral",
+    )
+    return "astral"
+
+
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
@@ -267,6 +323,20 @@ class AppConfig(BaseSettings):
     enable_local_settle_gate: bool = True
     default_entry_start_local: str = "01:00"
     phoenix_entry_start_local: str = "00:00"
+    # ── KXLOW entry gate mode ────────────────────────────────────────────────
+    # ENTRY_GATE_MODE selects how KXLOW* entry timing is gated:
+    #   - NWS_WINDOW (default): existing forecast-window behavior (GATE_LOW_*)
+    #   - SUNRISE: sunrise-based gate; bypasses only the KXLOW NWS low-window gate
+    #
+    # SUNRISE_STRATEGY_TIME: open gate at sunrise + N minutes (default 30)
+    # SUNRISE_ENTRY_WINDOW_MINUTES: gate closes N minutes after open (default 120)
+    # SUNRISE_REQUIRE_TEMP_RISING: require latest observed temp >= previous (default true)
+    # SUNRISE_SOURCE: astral|api (default astral)
+    entry_gate_mode: Literal["NWS_WINDOW", "SUNRISE"] = "NWS_WINDOW"
+    sunrise_strategy_time: int = 30
+    sunrise_entry_window_minutes: int = 120
+    sunrise_require_temp_rising: bool = True
+    sunrise_source: Literal["astral", "api"] = "astral"
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 100–250 ms.  Configurable via
@@ -509,6 +579,23 @@ class AppConfig(BaseSettings):
         no_trade_tickers_raw = os.getenv("NO_TRADE_TICKERS", "")
         default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
+        entry_gate_mode = _parse_entry_gate_mode(os.getenv("ENTRY_GATE_MODE"))
+        sunrise_strategy_time = _parse_non_negative_int(
+            os.getenv("SUNRISE_STRATEGY_TIME"),
+            "SUNRISE_STRATEGY_TIME",
+            default=30,
+        )
+        sunrise_entry_window_minutes = _parse_positive_int(
+            os.getenv("SUNRISE_ENTRY_WINDOW_MINUTES"),
+            "SUNRISE_ENTRY_WINDOW_MINUTES",
+            default=120,
+        )
+        sunrise_require_temp_rising = _parse_trade_toggle(
+            os.getenv("SUNRISE_REQUIRE_TEMP_RISING"),
+            "SUNRISE_REQUIRE_TEMP_RISING",
+            default=True,
+        )
+        sunrise_source = _parse_sunrise_source(os.getenv("SUNRISE_SOURCE"))
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
         low_ticker_daily_closeout_enabled = _parse_trade_toggle(
@@ -605,6 +692,11 @@ class AppConfig(BaseSettings):
             enable_local_settle_gate=enable_local_settle_gate,
             default_entry_start_local=default_entry_start_local,
             phoenix_entry_start_local=phoenix_entry_start_local,
+            entry_gate_mode=entry_gate_mode,
+            sunrise_strategy_time=sunrise_strategy_time,
+            sunrise_entry_window_minutes=sunrise_entry_window_minutes,
+            sunrise_require_temp_rising=sunrise_require_temp_rising,
+            sunrise_source=sunrise_source,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],

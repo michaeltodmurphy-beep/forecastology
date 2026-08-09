@@ -12,6 +12,7 @@ from core.types import (
 )
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from core.local_time_gate import is_entry_allowed, get_series_station_code, get_series_timezone
+from core.sunrise_gate import SunriseEntryGate
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -263,6 +264,7 @@ class TemperatureStrategy:
         # (station, ticker_type) -> (computed_monotonic_ts, has_data, gate_open)
         self._nws_gate_cache: dict[tuple[str, str | None], tuple[float, bool, bool]] = {}
         self._nws_gate_cache_refresh_seconds = 30
+        self._sunrise_entry_gate = SunriseEntryGate(config)
 
         # Bounded queue for non-blocking trade-log persistence (Change B).
         # Trade logging is non-critical; drops are acceptable when the queue
@@ -1308,6 +1310,15 @@ class TemperatureStrategy:
                      default_entry_start_local=self.config.default_entry_start_local,
                      phoenix_entry_start_local=self.config.phoenix_entry_start_local,
                      restored_positions=len(self.active_positions))
+        if self.config.entry_gate_mode == "SUNRISE":
+            logger.info(
+                "strategy.sunrise_gate_config",
+                entry_gate_mode=self.config.entry_gate_mode,
+                sunrise_strategy_time=self.config.sunrise_strategy_time,
+                sunrise_entry_window_minutes=self.config.sunrise_entry_window_minutes,
+                sunrise_require_temp_rising=self.config.sunrise_require_temp_rising,
+                sunrise_source=self.config.sunrise_source,
+            )
 
         hedge_max = int(self.config.hedge_max_factor)
         initial_qty = self.config.initial_contract_count
@@ -2051,9 +2062,27 @@ class TemperatureStrategy:
                         continue
                 # -------------------------------------------------------
 
+                use_nws_window_for_low = True
+                if is_low and self.config.entry_gate_mode == "SUNRISE":
+                    sunrise_decision = self._sunrise_entry_gate.evaluate(
+                        ticker=ticker,
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                    )
+                    if not sunrise_decision.allowed:
+                        continue
+                    use_nws_window_for_low = sunrise_decision.use_nws_window_fallback
+
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)
-                if _station is not None:
+                apply_nws_temp_gate = (
+                    _station is not None
+                    and (
+                        not is_low
+                        or self.config.entry_gate_mode == "NWS_WINDOW"
+                        or use_nws_window_for_low
+                    )
+                )
+                if apply_nws_temp_gate:
                     try:
                         from nws.gate import has_forecast, is_trading_gate_open
                         now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -2232,10 +2261,29 @@ class TemperatureStrategy:
         # can bypass it.  Applies only to weather entry orders; exits, SL, and
         # panic-flatten paths never call _execute_entry.
         _gate_station = get_series_station_code(bracket.market_ticker)
-        if _gate_station is not None:
-            _ticker_upper = bracket.market_ticker.upper()
-            _is_high = "KXHIGH" in _ticker_upper
-            _is_low = "KXLOW" in _ticker_upper
+        _ticker_upper = bracket.market_ticker.upper()
+        _is_high = "KXHIGH" in _ticker_upper
+        _is_low = "KXLOW" in _ticker_upper
+        _use_nws_window_for_low_final = True
+        if _is_low and self.config.entry_gate_mode == "SUNRISE":
+            _sunrise_decision = self._sunrise_entry_gate.evaluate(
+                ticker=bracket.market_ticker,
+                now_utc=datetime.datetime.now(datetime.timezone.utc),
+            )
+            if not _sunrise_decision.allowed:
+                bracket.phase = Phase.MONITORING
+                bracket.crossed_buy = False
+                return
+            _use_nws_window_for_low_final = _sunrise_decision.use_nws_window_fallback
+        _apply_nws_gate_final = (
+            _gate_station is not None
+            and (
+                not _is_low
+                or self.config.entry_gate_mode == "NWS_WINDOW"
+                or _use_nws_window_for_low_final
+            )
+        )
+        if _apply_nws_gate_final:
             _gate_now_utc = datetime.datetime.now(datetime.timezone.utc)
             _gate_market_date = None
             _gate_parsed = parse_series_and_date(bracket.market_ticker)
