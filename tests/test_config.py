@@ -504,3 +504,53 @@ class TestIntradayExitConfig:
             assert cfg.intraday_exit_entry_grace_minutes == 120
         finally:
             os.environ.pop("INTRADAY_EXIT_ENTRY_GRACE_MINUTES", None)
+
+
+class TestSunriseEntryGateConfig:
+    def setup_method(self):
+        for key in (
+            "ENTRY_GATE_MODE",
+            "SUNRISE_STRATEGY_TIME",
+            "SUNRISE_ENTRY_WINDOW_MINUTES",
+            "SUNRISE_REQUIRE_TEMP_RISING",
+            "SUNRISE_SOURCE",
+        ):
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        self.setup_method()
+
+    def test_defaults(self):
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.entry_gate_mode == "NWS_WINDOW"
+        assert cfg.sunrise_strategy_time == 30
+        assert cfg.sunrise_entry_window_minutes == 120
+        assert cfg.sunrise_require_temp_rising is True
+        assert cfg.sunrise_source == "astral"
+
+    def test_valid_sunrise_mode_values(self):
+        os.environ["ENTRY_GATE_MODE"] = "sunrise"
+        os.environ["SUNRISE_STRATEGY_TIME"] = "45"
+        os.environ["SUNRISE_ENTRY_WINDOW_MINUTES"] = "150"
+        os.environ["SUNRISE_REQUIRE_TEMP_RISING"] = "no"
+        os.environ["SUNRISE_SOURCE"] = "api"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.entry_gate_mode == "SUNRISE"
+        assert cfg.sunrise_strategy_time == 45
+        assert cfg.sunrise_entry_window_minutes == 150
+        assert cfg.sunrise_require_temp_rising is False
+        assert cfg.sunrise_source == "api"
+
+    def test_invalid_mode_falls_back_to_nws_window(self):
+        os.environ["ENTRY_GATE_MODE"] = "bad-mode"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.entry_gate_mode == "NWS_WINDOW"
+
+    def test_invalid_sunrise_source_falls_back_to_astral(self):
+        os.environ["SUNRISE_SOURCE"] = "bad-source"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.sunrise_source == "astral"

@@ -312,6 +312,44 @@ async def test_strategy_started_logs_minimum_spread(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_strategy_start_logs_sunrise_gate_config_when_enabled(monkeypatch):
+    logged = capture_logs(monkeypatch)
+
+    def fake_create_task(coro):
+        coro.close()
+        return object()
+
+    import core.state_machine as state_machine
+
+    monkeypatch.setattr(state_machine.asyncio, "create_task", fake_create_task)
+
+    strategy = make_strategy(
+        monkeypatch,
+        entry_gate_mode="SUNRISE",
+        sunrise_strategy_time=45,
+        sunrise_entry_window_minutes=150,
+        sunrise_require_temp_rising=False,
+        sunrise_source="api",
+    )
+    monkeypatch.setattr(strategy, "_restore_positions", AsyncMock())
+    monkeypatch.setattr(strategy, "_strategy_loop", AsyncMock())
+    monkeypatch.setattr(strategy, "_db_cleanup_loop", AsyncMock())
+
+    await strategy.start()
+
+    sunrise_log = next(
+        (kwargs for event, kwargs in logged if event == "strategy.sunrise_gate_config"),
+        None,
+    )
+    assert sunrise_log is not None
+    assert sunrise_log["entry_gate_mode"] == "SUNRISE"
+    assert sunrise_log["sunrise_strategy_time"] == 45
+    assert sunrise_log["sunrise_entry_window_minutes"] == 150
+    assert sunrise_log["sunrise_require_temp_rising"] is False
+    assert sunrise_log["sunrise_source"] == "api"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("spread", "expected_note"),
     [(0, "crossed"), (3, "tight"), (4, "normal")],
@@ -5855,6 +5893,57 @@ async def test_nws_temp_gate_fail_closed_for_no_data_and_exception(monkeypatch):
     await strategy._evaluate_watchlist()
     strategy._execute_entry.assert_not_awaited()
     assert any(event == "entry.blocked_nws_temp_gate_error" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_sunrise_mode_keeps_kxhigh_on_nws_window_gate(monkeypatch):
+    import core.state_machine as _sm
+    import nws.gate as _nws_gate
+
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(
+        monkeypatch,
+        entry_gate_mode="SUNRISE",
+        enable_local_settle_gate=False,
+        low_ticker_entry_halt_enabled=False,
+    )
+    ticker = "KXHIGHTBOS-26JUN25-T75"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXHIGHTBOS")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    monkeypatch.setattr(_sm, "get_series_station_code", lambda _ticker: "KBOS")
+    monkeypatch.setattr(_nws_gate, "has_forecast", lambda *_a, **_kw: True)
+    monkeypatch.setattr(_nws_gate, "is_trading_gate_open", lambda *_a, **_kw: False)
+    monkeypatch.setattr(_sm.asyncio, "to_thread", lambda func, *args, **kwargs: asyncio.sleep(0, result=func(*args, **kwargs)))
+
+    await strategy._evaluate_watchlist()
+
+    strategy._execute_entry.assert_not_awaited()
+    assert any(event == "entry.blocked_nws_temp_gate" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_nws_window_mode_keeps_sunrise_gate_inert(monkeypatch):
+    strategy = make_strategy(
+        monkeypatch,
+        entry_gate_mode="NWS_WINDOW",
+        enable_local_settle_gate=False,
+        low_ticker_entry_halt_enabled=False,
+    )
+    ticker = "KXLOWTBOS-26JUN25-B62.5"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTBOS")
+    strategy.cache.update_quote(ticker, 82, 82)
+    strategy._execute_entry = AsyncMock()
+
+    def _should_not_call(*_a, **_k):
+        raise AssertionError("sunrise gate should be inert in NWS_WINDOW mode")
+
+    monkeypatch.setattr(strategy._sunrise_entry_gate, "evaluate", _should_not_call)
+
+    await strategy._evaluate_watchlist()
+
+    strategy._execute_entry.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
