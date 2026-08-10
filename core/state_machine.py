@@ -1318,6 +1318,10 @@ class TemperatureStrategy:
                 sunrise_entry_window_minutes=self.config.sunrise_entry_window_minutes,
                 sunrise_require_temp_rising=self.config.sunrise_require_temp_rising,
                 sunrise_source=self.config.sunrise_source,
+                sunrise_require_am_low=self.config.sunrise_require_am_low,
+                nws_low_deadline_hour=self.config.nws_low_deadline_hour,
+                sunrise_temp_rise_required=self.config.sunrise_temp_rise_required,
+                sunrise_temp_baseline_minutes=self.config.sunrise_temp_baseline_minutes,
             )
 
         hedge_max = int(self.config.hedge_max_factor)

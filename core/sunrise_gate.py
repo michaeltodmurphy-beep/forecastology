@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
@@ -22,6 +22,14 @@ except ImportError:
 
 logger = structlog.get_logger(__name__)
 
+_CELSIUS_TO_F_FACTOR = 9.0 / 5.0
+_STALE_OBS_THRESHOLD_MINUTES = 15.0
+_AM_LOW_CACHE_TTL_SECONDS = 1800  # 30 minutes
+
+
+def _c_to_f(celsius: float) -> float:
+    return celsius * _CELSIUS_TO_F_FACTOR + 32.0
+
 
 @dataclass(frozen=True)
 class SunriseGateDecision:
@@ -29,15 +37,38 @@ class SunriseGateDecision:
     use_nws_window_fallback: bool = False
 
 
+@dataclass
+class _TempRiseState:
+    """Per-series mutable state for the temperature-rise latch."""
+
+    running_min_f: float = float("inf")
+    latched: bool = False
+    latch_baseline_f: Optional[float] = None
+    latch_current_f: Optional[float] = None
+    latch_time_utc: Optional[datetime.datetime] = None
+    last_obs_time_utc: Optional[datetime.datetime] = None
+    obs_cadence_logged_date: Optional[datetime.date] = None
+
+
 class SunriseEntryGate:
     def __init__(self, config: AppConfig, nws_client: Optional[NWSClient] = None) -> None:
         self.config = config
         self.nws_client = nws_client or NWSClient()
         self._sunrise_cache: dict[tuple[str, datetime.date], tuple[datetime.datetime, str]] = {}
-        self._temp_cache: dict[tuple[str, str], tuple[float, bool, str, dict]] = {}
-        self._temp_cache_ttl_seconds = 180
+        # AM-low forecast cache: series -> (fetch_monotonic, passed: bool, min_temp_f, min_time_local_iso)
+        self._am_low_cache: dict[tuple[str, datetime.date], tuple[float, bool, Optional[float], Optional[str]]] = {}
+        # Temp-rise latch state: series -> _TempRiseState
+        self._rise_state: dict[str, _TempRiseState] = {}
         self._logged_gate_open: set[tuple[str, datetime.date]] = set()
         self._missing_coords_warned: set[str] = set()
+        # Legacy simple-check cache (only used when sunrise_temp_rise_required == 0 and
+        # sunrise_require_temp_rising is explicitly True for backward compat).
+        self._temp_cache: dict[tuple[str, str], tuple[float, bool, str, dict]] = {}
+        self._temp_cache_ttl_seconds = 180
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def evaluate(
         self,
@@ -72,6 +103,7 @@ class SunriseEntryGate:
             minutes=int(self.config.sunrise_entry_window_minutes)
         )
 
+        # 1. Time-window gate
         if now_local < gate_open:
             logger.info(
                 "sunrise.gate_blocked",
@@ -92,7 +124,28 @@ class SunriseEntryGate:
             )
             return SunriseGateDecision(allowed=False)
 
-        if self.config.sunrise_require_temp_rising:
+        # 2. AM-low forecast check (SUNRISE_REQUIRE_AM_LOW)
+        if self.config.sunrise_require_am_low:
+            am_passed = self._check_am_low_forecast(
+                series, station_id, now_utc, now_local, local_date, tz
+            )
+            if not am_passed:
+                return SunriseGateDecision(allowed=False)
+
+        # 3. Temperature rise-from-baseline latch
+        #    (replaces old binary sunrise_require_temp_rising check)
+        #    sunrise_temp_rise_required == 0.0 disables it entirely.
+        if self.config.sunrise_temp_rise_required > 0.0:
+            baseline_start = sunrise_local - datetime.timedelta(
+                minutes=int(self.config.sunrise_temp_baseline_minutes)
+            )
+            rise_ok = self._check_temp_rise_latch(
+                series, station_id, now_utc, baseline_start, gate_close, tz, local_date
+            )
+            if not rise_ok:
+                return SunriseGateDecision(allowed=False)
+        elif self.config.sunrise_require_temp_rising:
+            # Legacy path: SUNRISE_TEMP_RISE_REQUIRED=0 but old flag still set
             passed, event_name, event_ctx = self._check_temp_rising(station_id, now_utc)
             if not passed:
                 logger.info(event_name, ticker=ticker, station=station_id, **event_ctx)
@@ -111,6 +164,275 @@ class SunriseEntryGate:
                 now_local=now_local.isoformat(),
             )
         return SunriseGateDecision(allowed=True)
+
+    # ------------------------------------------------------------------
+    # AM-low forecast check
+    # ------------------------------------------------------------------
+
+    def _check_am_low_forecast(
+        self,
+        series: str,
+        station_id: str,
+        now_utc: datetime.datetime,
+        now_local: datetime.datetime,
+        local_date: datetime.date,
+        tz: ZoneInfo,
+    ) -> bool:
+        """Return True iff the NWS hourly forecast day-low is before the deadline hour."""
+        cache_key = (series, local_date)
+        now_mono = time.monotonic()
+        cached = self._am_low_cache.get(cache_key)
+        if cached is not None and now_mono - cached[0] < _AM_LOW_CACHE_TTL_SECONDS:
+            passed, min_temp_f, min_time_iso = cached[1], cached[2], cached[3]
+            logger.info(
+                "sunrise.am_low_check",
+                series=series,
+                forecast_min_temp_f=min_temp_f,
+                min_time_local=min_time_iso,
+                deadline_hour=self.config.nws_low_deadline_hour,
+                passed=passed,
+                cached=True,
+            )
+            return passed
+
+        try:
+            _lat, _lon, hourly_url, _tz_name = self.nws_client._get_station_metadata(station_id)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "sunrise.forecast_unavailable",
+                series=series,
+                station=station_id,
+                reason="metadata_error",
+                error_class=type(exc).__name__,
+                error_message=str(exc),
+            )
+            self._am_low_cache[cache_key] = (now_mono, False, None, None)
+            return False
+
+        try:
+            periods = self.nws_client._get_hourly_periods(hourly_url)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "sunrise.forecast_unavailable",
+                series=series,
+                station=station_id,
+                reason="forecast_fetch_error",
+                error_class=type(exc).__name__,
+                error_message=str(exc),
+            )
+            self._am_low_cache[cache_key] = (now_mono, False, None, None)
+            return False
+
+        # Find the minimum temperature period within the LOCAL calendar day
+        day_start_local = datetime.datetime.combine(local_date, datetime.time.min, tzinfo=tz)
+        day_end_local = day_start_local + datetime.timedelta(days=1)
+
+        min_temp_f: Optional[float] = None
+        min_time_local: Optional[datetime.datetime] = None
+
+        for period in periods:
+            start_str = period.get("startTime")
+            temp_raw = period.get("temperature")
+            temp_unit = period.get("temperatureUnit", "F")
+            if start_str is None or temp_raw is None:
+                continue
+            try:
+                t_dt = datetime.datetime.fromisoformat(str(start_str))
+                if t_dt.tzinfo is None:
+                    t_dt = t_dt.replace(tzinfo=datetime.timezone.utc)
+                t_local = t_dt.astimezone(tz)
+            except ValueError:
+                continue
+            if not (day_start_local <= t_local < day_end_local):
+                continue
+            try:
+                temp_f = float(temp_raw)
+                if temp_unit == "C":
+                    temp_f = _c_to_f(temp_f)
+            except (TypeError, ValueError):
+                continue
+            if min_temp_f is None or temp_f < min_temp_f:
+                min_temp_f = temp_f
+                min_time_local = t_local
+
+        if min_temp_f is None or min_time_local is None:
+            logger.warning(
+                "sunrise.forecast_unavailable",
+                series=series,
+                station=station_id,
+                reason="no_periods_for_local_date",
+                local_date=local_date.isoformat(),
+            )
+            self._am_low_cache[cache_key] = (now_mono, False, None, None)
+            return False
+
+        deadline_hour = int(self.config.nws_low_deadline_hour)
+        min_time_iso = min_time_local.isoformat()
+        passed = min_time_local.hour < deadline_hour
+
+        logger.info(
+            "sunrise.am_low_check",
+            series=series,
+            forecast_min_temp_f=round(min_temp_f, 1),
+            min_time_local=min_time_iso,
+            deadline_hour=deadline_hour,
+            passed=passed,
+            cached=False,
+        )
+        if not passed:
+            logger.info(
+                "sunrise.am_low_blocked",
+                series=series,
+                forecast_min_temp_f=round(min_temp_f, 1),
+                min_time_local=min_time_iso,
+                deadline_hour=deadline_hour,
+            )
+
+        self._am_low_cache[cache_key] = (now_mono, passed, round(min_temp_f, 1), min_time_iso)
+        return passed
+
+    # ------------------------------------------------------------------
+    # Temperature rise-from-baseline latch
+    # ------------------------------------------------------------------
+
+    def _check_temp_rise_latch(
+        self,
+        series: str,
+        station_id: str,
+        now_utc: datetime.datetime,
+        baseline_start_utc: datetime.datetime,
+        gate_close_utc: datetime.datetime,
+        tz: ZoneInfo,
+        local_date: datetime.date,
+    ) -> bool:
+        """Update the running-min / latch for *series* and return latch state."""
+        state = self._rise_state.setdefault(series, _TempRiseState())
+
+        # Fetch recent observations since baseline start
+        start_iso = baseline_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            payload = self.nws_client._get_json(  # noqa: SLF001
+                f"https://api.weather.gov/stations/{station_id}/observations"
+                f"?start={start_iso}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "sunrise.obs_unavailable",
+                series=series,
+                station=station_id,
+                reason="fetch_error",
+                error_class=type(exc).__name__,
+                error_message=str(exc),
+            )
+            return False
+
+        features = payload.get("features") or []
+        parsed_obs: list[tuple[datetime.datetime, float]] = []
+        for item in features:
+            props = item.get("properties") or {}
+            temp_val = (props.get("temperature") or {}).get("value")
+            timestamp = props.get("timestamp")
+            if temp_val is None or not timestamp:
+                continue
+            try:
+                obs_ts = datetime.datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if obs_ts.tzinfo is None:
+                obs_ts = obs_ts.replace(tzinfo=datetime.timezone.utc)
+            obs_ts_utc = obs_ts.astimezone(datetime.timezone.utc)
+            if obs_ts_utc < baseline_start_utc:
+                continue
+            parsed_obs.append((obs_ts_utc, _c_to_f(float(temp_val))))
+
+        parsed_obs.sort(key=lambda x: x[0])
+
+        if not parsed_obs:
+            logger.info(
+                "sunrise.obs_unavailable",
+                series=series,
+                station=station_id,
+                reason="no_observations_in_window",
+                baseline_start=start_iso,
+            )
+            return False
+
+        latest_ts, latest_f = parsed_obs[-1]
+
+        # Log observation cadence once per day per station
+        if state.obs_cadence_logged_date != local_date and len(parsed_obs) >= 2:
+            obs_gaps = [
+                (parsed_obs[i][0] - parsed_obs[i - 1][0]).total_seconds() / 60.0
+                for i in range(1, len(parsed_obs))
+            ]
+            avg_gap = sum(obs_gaps) / len(obs_gaps) if obs_gaps else 0.0
+            logger.info(
+                "sunrise.obs_cadence",
+                series=series,
+                station=station_id,
+                obs_count=len(parsed_obs),
+                avg_gap_minutes=round(avg_gap, 1),
+                date=local_date.isoformat(),
+            )
+            state.obs_cadence_logged_date = local_date
+
+        # Stale-obs check
+        age_minutes = (now_utc - latest_ts).total_seconds() / 60.0
+        if age_minutes > _STALE_OBS_THRESHOLD_MINUTES:
+            logger.info(
+                "sunrise.obs_unavailable",
+                series=series,
+                station=station_id,
+                reason="stale_observation",
+                latest_obs_utc=latest_ts.isoformat(),
+                age_minutes=round(age_minutes, 1),
+            )
+            return False
+
+        # Update running minimum from all observations in window
+        for obs_ts, obs_f in parsed_obs:
+            if obs_f < state.running_min_f:
+                if state.latched and obs_f < (state.latch_baseline_f or float("inf")):
+                    # New low below the baseline used when latched → reset latch
+                    logger.info(
+                        "sunrise.temp_rise_reset",
+                        series=series,
+                        station=station_id,
+                        new_min_f=round(obs_f, 2),
+                        previous_baseline_f=round(state.latch_baseline_f, 2) if state.latch_baseline_f is not None else None,
+                        obs_utc=obs_ts.isoformat(),
+                    )
+                    state.latched = False
+                    state.latch_baseline_f = None
+                    state.latch_current_f = None
+                    state.latch_time_utc = None
+                state.running_min_f = obs_f
+
+        # Check rise condition
+        if not state.latched:
+            rise = latest_f - state.running_min_f
+            if rise >= self.config.sunrise_temp_rise_required:
+                state.latched = True
+                state.latch_baseline_f = state.running_min_f
+                state.latch_current_f = latest_f
+                state.latch_time_utc = latest_ts
+                logger.info(
+                    "sunrise.temp_rise_latched",
+                    series=series,
+                    station=station_id,
+                    baseline_f=round(state.running_min_f, 2),
+                    current_f=round(latest_f, 2),
+                    rise_f=round(rise, 2),
+                    required_f=self.config.sunrise_temp_rise_required,
+                    baseline_utc=latest_ts.isoformat(),
+                )
+
+        state.last_obs_time_utc = latest_ts
+        return state.latched
+
+    # ------------------------------------------------------------------
+    # Sunrise computation helpers
+    # ------------------------------------------------------------------
 
     def _get_sunrise_local(
         self,
@@ -195,6 +517,10 @@ class SunriseEntryGate:
         if sunrise_utc.tzinfo is None:
             sunrise_utc = sunrise_utc.replace(tzinfo=datetime.timezone.utc)
         return sunrise_utc.astimezone(datetime.timezone.utc)
+
+    # ------------------------------------------------------------------
+    # Legacy 2-observation check (kept for sunrise_temp_rise_required=0 path)
+    # ------------------------------------------------------------------
 
     def _check_temp_rising(
         self,

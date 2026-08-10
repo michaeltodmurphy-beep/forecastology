@@ -514,6 +514,10 @@ class TestSunriseEntryGateConfig:
             "SUNRISE_ENTRY_WINDOW_MINUTES",
             "SUNRISE_REQUIRE_TEMP_RISING",
             "SUNRISE_SOURCE",
+            "SUNRISE_REQUIRE_AM_LOW",
+            "NWS_LOW_DEADLINE_HOUR",
+            "SUNRISE_TEMP_RISE_REQUIRED",
+            "SUNRISE_TEMP_BASELINE_MINUTES",
         ):
             os.environ.pop(key, None)
 
@@ -528,6 +532,10 @@ class TestSunriseEntryGateConfig:
         assert cfg.sunrise_entry_window_minutes == 120
         assert cfg.sunrise_require_temp_rising is True
         assert cfg.sunrise_source == "astral"
+        assert cfg.sunrise_require_am_low is True
+        assert cfg.nws_low_deadline_hour == 12
+        assert cfg.sunrise_temp_rise_required == 1.0
+        assert cfg.sunrise_temp_baseline_minutes == 15
 
     def test_valid_sunrise_mode_values(self):
         os.environ["ENTRY_GATE_MODE"] = "sunrise"
@@ -535,6 +543,10 @@ class TestSunriseEntryGateConfig:
         os.environ["SUNRISE_ENTRY_WINDOW_MINUTES"] = "150"
         os.environ["SUNRISE_REQUIRE_TEMP_RISING"] = "no"
         os.environ["SUNRISE_SOURCE"] = "api"
+        os.environ["SUNRISE_REQUIRE_AM_LOW"] = "no"
+        os.environ["NWS_LOW_DEADLINE_HOUR"] = "10"
+        os.environ["SUNRISE_TEMP_RISE_REQUIRED"] = "2.0"
+        os.environ["SUNRISE_TEMP_BASELINE_MINUTES"] = "20"
         from app.config import AppConfig
         cfg = AppConfig.from_env()
         assert cfg.entry_gate_mode == "SUNRISE"
@@ -542,6 +554,10 @@ class TestSunriseEntryGateConfig:
         assert cfg.sunrise_entry_window_minutes == 150
         assert cfg.sunrise_require_temp_rising is False
         assert cfg.sunrise_source == "api"
+        assert cfg.sunrise_require_am_low is False
+        assert cfg.nws_low_deadline_hour == 10
+        assert cfg.sunrise_temp_rise_required == 2.0
+        assert cfg.sunrise_temp_baseline_minutes == 20
 
     def test_invalid_mode_falls_back_to_nws_window(self):
         os.environ["ENTRY_GATE_MODE"] = "bad-mode"

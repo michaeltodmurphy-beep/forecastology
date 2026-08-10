@@ -330,13 +330,26 @@ class AppConfig(BaseSettings):
     #
     # SUNRISE_STRATEGY_TIME: open gate at sunrise + N minutes (default 30)
     # SUNRISE_ENTRY_WINDOW_MINUTES: gate closes N minutes after open (default 120)
-    # SUNRISE_REQUIRE_TEMP_RISING: require latest observed temp >= previous (default true)
+    # SUNRISE_REQUIRE_TEMP_RISING: DEPRECATED — replaced by SUNRISE_TEMP_RISE_REQUIRED.
+    #   Still parsed; triggers a deprecation warning if set.
     # SUNRISE_SOURCE: astral|api (default astral)
+    # SUNRISE_REQUIRE_AM_LOW: block entry when NWS forecast min for the day is
+    #   scheduled at/after NWS_LOW_DEADLINE_HOUR local (default YES / true)
+    # NWS_LOW_DEADLINE_HOUR: local hour (0–23) deadline for the day's forecast low
+    #   (default 12 noon)
+    # SUNRISE_TEMP_RISE_REQUIRED: °F rise above running baseline required to latch
+    #   entry permission (default 1.0; 0 disables the check)
+    # SUNRISE_TEMP_BASELINE_MINUTES: minutes before sunrise to start baseline
+    #   observation window (default 15)
     entry_gate_mode: Literal["NWS_WINDOW", "SUNRISE"] = "NWS_WINDOW"
     sunrise_strategy_time: int = 30
     sunrise_entry_window_minutes: int = 120
     sunrise_require_temp_rising: bool = True
     sunrise_source: Literal["astral", "api"] = "astral"
+    sunrise_require_am_low: bool = True
+    nws_low_deadline_hour: int = 12
+    sunrise_temp_rise_required: float = 1.0
+    sunrise_temp_baseline_minutes: int = 15
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 100–250 ms.  Configurable via
@@ -590,12 +603,66 @@ class AppConfig(BaseSettings):
             "SUNRISE_ENTRY_WINDOW_MINUTES",
             default=120,
         )
+        sunrise_require_temp_rising_raw = os.getenv("SUNRISE_REQUIRE_TEMP_RISING")
+        if sunrise_require_temp_rising_raw is not None:
+            logger.warning(
+                "config.sunrise_require_temp_rising_deprecated",
+                message=(
+                    "SUNRISE_REQUIRE_TEMP_RISING is deprecated; "
+                    "use SUNRISE_TEMP_RISE_REQUIRED (float °F, default 1.0) instead. "
+                    "The setting is still applied but will be removed in a future release."
+                ),
+            )
         sunrise_require_temp_rising = _parse_trade_toggle(
-            os.getenv("SUNRISE_REQUIRE_TEMP_RISING"),
+            sunrise_require_temp_rising_raw,
             "SUNRISE_REQUIRE_TEMP_RISING",
             default=True,
         )
         sunrise_source = _parse_sunrise_source(os.getenv("SUNRISE_SOURCE"))
+        sunrise_require_am_low = _parse_trade_toggle(
+            os.getenv("SUNRISE_REQUIRE_AM_LOW"),
+            "SUNRISE_REQUIRE_AM_LOW",
+            default=True,
+        )
+        nws_low_deadline_hour = _parse_non_negative_int(
+            os.getenv("NWS_LOW_DEADLINE_HOUR"),
+            "NWS_LOW_DEADLINE_HOUR",
+            default=12,
+        )
+        if nws_low_deadline_hour > 23:
+            logger.warning(
+                "config.nws_low_deadline_hour_out_of_range",
+                raw=os.getenv("NWS_LOW_DEADLINE_HOUR"),
+                fallback=12,
+                message="NWS_LOW_DEADLINE_HOUR must be 0–23; defaulting to 12",
+            )
+            nws_low_deadline_hour = 12
+        sunrise_temp_rise_required_raw = os.getenv("SUNRISE_TEMP_RISE_REQUIRED")
+        sunrise_temp_rise_required: float = 1.0
+        if sunrise_temp_rise_required_raw is not None and sunrise_temp_rise_required_raw.strip():
+            try:
+                sunrise_temp_rise_required = float(sunrise_temp_rise_required_raw.strip())
+                if sunrise_temp_rise_required < 0:
+                    logger.warning(
+                        "config.sunrise_temp_rise_required_negative",
+                        raw=sunrise_temp_rise_required_raw,
+                        fallback=1.0,
+                        message="SUNRISE_TEMP_RISE_REQUIRED must be >= 0; defaulting to 1.0",
+                    )
+                    sunrise_temp_rise_required = 1.0
+            except ValueError:
+                logger.warning(
+                    "config.sunrise_temp_rise_required_invalid",
+                    raw=sunrise_temp_rise_required_raw,
+                    fallback=1.0,
+                    message="Invalid SUNRISE_TEMP_RISE_REQUIRED; defaulting to 1.0",
+                )
+                sunrise_temp_rise_required = 1.0
+        sunrise_temp_baseline_minutes = _parse_non_negative_int(
+            os.getenv("SUNRISE_TEMP_BASELINE_MINUTES"),
+            "SUNRISE_TEMP_BASELINE_MINUTES",
+            default=15,
+        )
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
         low_ticker_daily_closeout_enabled = _parse_trade_toggle(
@@ -697,6 +764,10 @@ class AppConfig(BaseSettings):
             sunrise_entry_window_minutes=sunrise_entry_window_minutes,
             sunrise_require_temp_rising=sunrise_require_temp_rising,
             sunrise_source=sunrise_source,
+            sunrise_require_am_low=sunrise_require_am_low,
+            nws_low_deadline_hour=nws_low_deadline_hour,
+            sunrise_temp_rise_required=sunrise_temp_rise_required,
+            sunrise_temp_baseline_minutes=sunrise_temp_baseline_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
