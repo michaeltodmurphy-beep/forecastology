@@ -13,6 +13,7 @@ from core.types import (
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from core.local_time_gate import is_entry_allowed, get_series_station_code, get_series_timezone
 from core.sunrise_gate import SunriseEntryGate
+from core.log_dedupe import DedupeLogger
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -265,6 +266,7 @@ class TemperatureStrategy:
         self._nws_gate_cache: dict[tuple[str, str | None], tuple[float, bool, bool]] = {}
         self._nws_gate_cache_refresh_seconds = 30
         self._sunrise_entry_gate = SunriseEntryGate(config)
+        self._log_dedupe = DedupeLogger(summary_interval_seconds=300)
 
         # Bounded queue for non-blocking trade-log persistence (Change B).
         # Trade logging is non-critical; drops are acceptable when the queue
@@ -324,6 +326,28 @@ class TemperatureStrategy:
             return round(float(raw) * 100)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _ticker_market_day(ticker: str) -> str:
+        parsed = parse_series_and_date(ticker)
+        if parsed is not None:
+            return parsed[1]
+        return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+    def _log_deduped_info(
+        self,
+        event: str,
+        dedupe_key: str,
+        **fields,
+    ) -> None:
+        self._log_dedupe.log(
+            logger,
+            "info",
+            event,
+            dedupe_key,
+            day=self._ticker_market_day(dedupe_key),
+            **fields,
+        )
 
     @staticmethod
     def _to_quantity_float(raw) -> float:
@@ -1299,7 +1323,7 @@ class TemperatureStrategy:
                      monitor_start=self.config.monitor_start_price,
                      buy_trigger_low=self.config.buy_trigger_price_low,
                      buy_trigger_high=self.config.buy_trigger_price_high,
-                     minimum_spread=self.config.minimum_spread,
+                     max_spread=self.config.minimum_spread,
                      spread_monitor=self.config.spread_monitor_price,
                      stop_loss=self.config.stop_loss_price,
                      mode=self.config.trading_mode,
@@ -1322,6 +1346,8 @@ class TemperatureStrategy:
                 nws_low_deadline_hour=self.config.nws_low_deadline_hour,
                 sunrise_temp_rise_required=self.config.sunrise_temp_rise_required,
                 sunrise_temp_baseline_minutes=self.config.sunrise_temp_baseline_minutes,
+                sunrise_obs_max_age_minutes=self.config.sunrise_obs_max_age_minutes,
+                sunrise_obs_max_age_overrides=dict(sorted(self.config.sunrise_obs_max_age_overrides.items())),
             )
 
         hedge_max = int(self.config.hedge_max_factor)
@@ -1926,6 +1952,21 @@ class TemperatureStrategy:
         max_rest_per_cycle = 5
 
         for ticker, bracket in list(self.brackets.items()):
+            should_evaluate_entry = not bracket.crossed_buy and bracket.phase == Phase.MONITORING
+            if should_evaluate_entry and self.config.no_trade_tickers:
+                ticker_upper = ticker.upper()
+                if any(
+                    ticker_upper == nt or ticker_upper.startswith(nt + "-")
+                    for nt in self.config.no_trade_tickers
+                ):
+                    self._log_deduped_info(
+                        "phase.b.entry_blocked_by_config",
+                        ticker,
+                        ticker=ticker,
+                        reason="NO_TRADE_TICKERS",
+                    )
+                    continue
+
             price = None
             spread = None
             rest_data = None
@@ -1940,8 +1981,6 @@ class TemperatureStrategy:
                 yes_ask = yes_ask_q
                 price = yes_ask_q
                 spread = yes_ask_q - yes_bid_q
-
-            should_evaluate_entry = not bracket.crossed_buy and bracket.phase == Phase.MONITORING
 
             # Fallback: REST endpoint (entry-evaluation brackets only)
             if price is None and should_evaluate_entry and rest_calls_this_cycle < max_rest_per_cycle:
@@ -2002,25 +2041,25 @@ class TemperatureStrategy:
 
             if price > self.config.spread_monitor_price:
                 # Price above the maximum we're willing to enter; log and skip
-                logger.info("phase.b.missed_entry", ticker=ticker,
-                            price=price, max_price=self.config.spread_monitor_price)
+                self._log_deduped_info(
+                    "phase.b.missed_entry",
+                    ticker,
+                    ticker=ticker,
+                    price=price,
+                    max_price=self.config.spread_monitor_price,
+                )
                 continue
 
             if bracket.falling_knife_guard:
-                logger.info("phase.b.falling_knife_blocked", ticker=ticker, price=price)
+                self._log_deduped_info(
+                    "phase.b.falling_knife_blocked",
+                    ticker,
+                    ticker=ticker,
+                    price=price,
+                )
                 continue
 
             if spread <= self.config.minimum_spread:
-                # --- No-trade ticker gate ---
-                if self.config.no_trade_tickers:
-                    ticker_upper = ticker.upper()
-                    if any(ticker_upper == nt or ticker_upper.startswith(nt + "-")
-                           for nt in self.config.no_trade_tickers):
-                        logger.info("phase.b.entry_blocked_by_config",
-                                    ticker=ticker, reason="NO_TRADE_TICKERS")
-                        continue
-                # ----------------------------
-
                 # --- Trade-direction toggle gate ---
                 ticker_upper = ticker.upper()
                 is_high = "KXHIGH" in ticker_upper
@@ -2251,8 +2290,13 @@ class TemperatureStrategy:
                 else:
                     await self._execute_entry(bracket)
             else:
-                logger.info("phase.b.spread_too_wide", ticker=ticker,
-                            price=price, spread=spread)
+                self._log_deduped_info(
+                    "phase.b.spread_too_wide",
+                    ticker,
+                    ticker=ticker,
+                    price=price,
+                    spread=spread,
+                )
 
     async def _execute_entry(self, bracket: MarketBracket, ob: Optional[OrderBook] = None, quantity: Optional[int] = None):
         """

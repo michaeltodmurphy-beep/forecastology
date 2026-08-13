@@ -12,6 +12,7 @@ from astral.sun import sun
 
 from app.config import AppConfig
 from core.local_time_gate import get_series_prefix, get_series_timezone
+from core.log_dedupe import DedupeLogger
 from core.station_coords import SERIES_STATION_COORDS
 from nws.client import NWSClient
 
@@ -23,7 +24,6 @@ except ImportError:
 logger = structlog.get_logger(__name__)
 
 _CELSIUS_TO_F_FACTOR = 9.0 / 5.0
-_STALE_OBS_THRESHOLD_MINUTES = 15.0
 _AM_LOW_CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 
@@ -65,6 +65,23 @@ class SunriseEntryGate:
         # sunrise_require_temp_rising is explicitly True for backward compat).
         self._temp_cache: dict[tuple[str, str], tuple[float, bool, str, dict]] = {}
         self._temp_cache_ttl_seconds = 180
+        self._log_dedupe = DedupeLogger(summary_interval_seconds=300)
+
+    def _deduped_info(
+        self,
+        event: str,
+        key: str,
+        local_date: datetime.date,
+        **fields,
+    ) -> None:
+        self._log_dedupe.log(logger, "info", event, key, day=local_date, **fields)
+
+    def _station_obs_max_age_minutes(self, station_id: str) -> int:
+        overrides = self.config.sunrise_obs_max_age_overrides or {}
+        station_upper = station_id.upper()
+        if station_upper in overrides:
+            return int(overrides[station_upper])
+        return int(self.config.sunrise_obs_max_age_minutes)
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,12 +122,14 @@ class SunriseEntryGate:
 
         # 1. Time-window gate
         if now_local < gate_open:
-            logger.info(
+            self._deduped_info(
                 "sunrise.gate_blocked",
-                ticker=ticker,
+                ticker,
+                local_date,
                 sunrise_local=sunrise_local.isoformat(),
                 gate_open_local=gate_open.isoformat(),
                 now_local=now_local.isoformat(),
+                ticker=ticker,
             )
             return SunriseGateDecision(allowed=False)
         if now_local > gate_close:
@@ -148,7 +167,18 @@ class SunriseEntryGate:
             # Legacy path: SUNRISE_TEMP_RISE_REQUIRED=0 but old flag still set
             passed, event_name, event_ctx = self._check_temp_rising(station_id, now_utc)
             if not passed:
-                logger.info(event_name, ticker=ticker, station=station_id, **event_ctx)
+                if event_name == "sunrise.obs_unavailable":
+                    self._deduped_info(
+                        event_name,
+                        series,
+                        local_date,
+                        ticker=ticker,
+                        station=station_id,
+                        series=series,
+                        **event_ctx,
+                    )
+                else:
+                    logger.info(event_name, ticker=ticker, station=station_id, **event_ctx)
                 return SunriseGateDecision(allowed=False)
 
         open_key = (ticker, local_date)
@@ -184,7 +214,7 @@ class SunriseEntryGate:
         cached = self._am_low_cache.get(cache_key)
         if cached is not None and now_mono - cached[0] < _AM_LOW_CACHE_TTL_SECONDS:
             passed, min_temp_f, min_time_iso = cached[1], cached[2], cached[3]
-            logger.info(
+            logger.debug(
                 "sunrise.am_low_check",
                 series=series,
                 forecast_min_temp_f=min_temp_f,
@@ -316,8 +346,10 @@ class SunriseEntryGate:
                 f"?start={start_iso}"
             )
         except Exception as exc:  # noqa: BLE001
-            logger.info(
+            self._deduped_info(
                 "sunrise.obs_unavailable",
+                series,
+                local_date,
                 series=series,
                 station=station_id,
                 reason="fetch_error",
@@ -348,8 +380,10 @@ class SunriseEntryGate:
         parsed_obs.sort(key=lambda x: x[0])
 
         if not parsed_obs:
-            logger.info(
+            self._deduped_info(
                 "sunrise.obs_unavailable",
+                series,
+                local_date,
                 series=series,
                 station=station_id,
                 reason="no_observations_in_window",
@@ -378,14 +412,18 @@ class SunriseEntryGate:
 
         # Stale-obs check
         age_minutes = (now_utc - latest_ts).total_seconds() / 60.0
-        if age_minutes > _STALE_OBS_THRESHOLD_MINUTES:
-            logger.info(
+        max_age_minutes = self._station_obs_max_age_minutes(station_id)
+        if age_minutes > max_age_minutes:
+            self._deduped_info(
                 "sunrise.obs_unavailable",
+                series,
+                local_date,
                 series=series,
                 station=station_id,
                 reason="stale_observation",
                 latest_obs_utc=latest_ts.isoformat(),
                 age_minutes=round(age_minutes, 1),
+                max_age_minutes=max_age_minutes,
             )
             return False
 
@@ -598,4 +636,3 @@ class SunriseEntryGate:
 
         self._temp_cache[cache_key] = (cache_now, True, "sunrise.gate_open", check_ctx)
         return True, "sunrise.gate_open", check_ctx
-

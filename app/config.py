@@ -270,6 +270,51 @@ def _parse_sunrise_source(raw: str | None) -> str:
     return "astral"
 
 
+def _parse_sunrise_obs_max_age_overrides(raw: str | None) -> dict[str, int]:
+    if not raw or not raw.strip():
+        return {}
+
+    parsed: dict[str, int] = {}
+    for part in raw.strip().split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        station_part, sep, minutes_part = entry.partition(":")
+        if sep != ":":
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="missing_colon",
+            )
+            continue
+        station = station_part.strip().upper()
+        if not station:
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="missing_station",
+            )
+            continue
+        try:
+            minutes = int(minutes_part.strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="invalid_minutes",
+            )
+            continue
+        if minutes < 1:
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="minutes_below_minimum",
+            )
+            continue
+        parsed[station] = minutes
+    return parsed
+
+
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
@@ -341,6 +386,9 @@ class AppConfig(BaseSettings):
     #   entry permission (default 1.0; 0 disables the check)
     # SUNRISE_TEMP_BASELINE_MINUTES: minutes before sunrise to start baseline
     #   observation window (default 15)
+    # SUNRISE_OBS_MAX_AGE_MINUTES: stale-observation threshold in minutes (default 15)
+    # SUNRISE_OBS_MAX_AGE_OVERRIDES: per-station stale threshold overrides as
+    #   STATION:MINUTES entries, comma-separated (e.g. KNYC:25,KSEA:20)
     entry_gate_mode: Literal["NWS_WINDOW", "SUNRISE"] = "NWS_WINDOW"
     sunrise_strategy_time: int = 30
     sunrise_entry_window_minutes: int = 120
@@ -350,6 +398,8 @@ class AppConfig(BaseSettings):
     nws_low_deadline_hour: int = 12
     sunrise_temp_rise_required: float = 1.0
     sunrise_temp_baseline_minutes: int = 15
+    sunrise_obs_max_age_minutes: int = 15
+    sunrise_obs_max_age_overrides: Annotated[dict[str, int], NoDecode] = {}
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 100–250 ms.  Configurable via
@@ -581,6 +631,23 @@ class AppConfig(BaseSettings):
         """
         dry_run_raw = os.getenv("DRY_RUN", "")
         dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
+        max_spread_raw = os.getenv("MAX_SPREAD")
+        minimum_spread_legacy_raw = os.getenv("MINIMUM_SPREAD")
+        if max_spread_raw and max_spread_raw.strip():
+            minimum_spread_raw = max_spread_raw
+            if minimum_spread_legacy_raw and minimum_spread_legacy_raw.strip():
+                logger.warning(
+                    "config.max_spread_precedence",
+                    message="Both MAX_SPREAD and deprecated MINIMUM_SPREAD are set; using MAX_SPREAD.",
+                )
+        elif minimum_spread_legacy_raw and minimum_spread_legacy_raw.strip():
+            minimum_spread_raw = minimum_spread_legacy_raw
+            logger.warning(
+                "config.minimum_spread_deprecated",
+                message="MINIMUM_SPREAD is deprecated; use MAX_SPREAD instead.",
+            )
+        else:
+            minimum_spread_raw = minimum_spread_legacy_raw
         low_trades = _parse_trade_toggle(os.getenv("LOW_TRADES"), "LOW_TRADES", default=True)
         high_trades = _parse_trade_toggle(os.getenv("HIGH_TRADES"), "HIGH_TRADES", default=True)
         manage_external_positions = _parse_trade_toggle(
@@ -662,6 +729,14 @@ class AppConfig(BaseSettings):
             os.getenv("SUNRISE_TEMP_BASELINE_MINUTES"),
             "SUNRISE_TEMP_BASELINE_MINUTES",
             default=15,
+        )
+        sunrise_obs_max_age_minutes = _parse_positive_int(
+            os.getenv("SUNRISE_OBS_MAX_AGE_MINUTES"),
+            "SUNRISE_OBS_MAX_AGE_MINUTES",
+            default=15,
+        )
+        sunrise_obs_max_age_overrides = _parse_sunrise_obs_max_age_overrides(
+            os.getenv("SUNRISE_OBS_MAX_AGE_OVERRIDES")
         )
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
@@ -768,10 +843,13 @@ class AppConfig(BaseSettings):
             nws_low_deadline_hour=nws_low_deadline_hour,
             sunrise_temp_rise_required=sunrise_temp_rise_required,
             sunrise_temp_baseline_minutes=sunrise_temp_baseline_minutes,
+            sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
+            sunrise_obs_max_age_overrides=sunrise_obs_max_age_overrides,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
             buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
+            minimum_spread=minimum_spread_raw,
             low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,
             low_ticker_closeout_time_et=low_ticker_closeout_time_et,
             low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,

@@ -259,7 +259,7 @@ The hedge engine has been removed. The strategy is now a simple entry + stop-los
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢):
+**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ `MAX_SPREAD` (default 7¢; `MINIMUM_SPREAD` still accepted as deprecated alias):
 - `KXLOW*` uses `BUY_TRIGGER_PRICE_LOW` (default 85¢)
 - `KXHIGH*` uses `BUY_TRIGGER_PRICE_HIGH` (default 85¢)
 
@@ -505,7 +505,7 @@ The hedge engine has been removed. The strategy is now a simple entry + stop-los
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ `MINIMUM_SPREAD` (default 7¢):
+**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ `MAX_SPREAD` (default 7¢; `MINIMUM_SPREAD` still accepted as deprecated alias):
 - `KXLOW*` uses `BUY_TRIGGER_PRICE_LOW` (default 85¢)
 - `KXHIGH*` uses `BUY_TRIGGER_PRICE_HIGH` (default 85¢)
 
