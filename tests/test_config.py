@@ -12,6 +12,7 @@ os.environ['HEDGE_TRIGGER_PRICE'] = '0.48'
 os.environ['STOP_LOSS_PRICE_ASK'] = '0.35'
 os.environ['INITIAL_CONTRACT_COUNT'] = '1'
 os.environ['MINIMUM_SPREAD'] = '0.04'
+os.environ.pop('MAX_SPREAD', None)
 os.environ['MONITOR_START_PRICE'] = '0.80'
 os.environ['SPREAD_MONITOR_PRICE'] = '0.90'
 os.environ['DRY_RUN'] = 'true'
@@ -36,6 +37,50 @@ class TestAppConfig:
         assert cfg.spread_monitor_price == 90
         assert cfg.dry_run is True
         assert cfg.enable_fast_sl_exit is False
+
+    def test_max_spread_is_canonical_env_var(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        os.environ["MAX_SPREAD"] = "0.05"
+        os.environ["MINIMUM_SPREAD"] = "0.04"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.minimum_spread == 5
+        finally:
+            os.environ.pop("MAX_SPREAD", None)
+            os.environ["MINIMUM_SPREAD"] = "0.04"
+
+    def test_minimum_spread_alias_warns_when_used(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        from structlog.testing import capture_logs
+        os.environ.pop("MAX_SPREAD", None)
+        os.environ["MINIMUM_SPREAD"] = "0.06"
+        try:
+            from app.config import AppConfig
+            with capture_logs() as logs:
+                cfg = AppConfig.from_env()
+            assert cfg.minimum_spread == 6
+            assert any(e.get("event") == "config.minimum_spread_deprecated" for e in logs)
+        finally:
+            os.environ["MINIMUM_SPREAD"] = "0.04"
+
+    def test_max_spread_wins_over_minimum_with_warning(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        from structlog.testing import capture_logs
+        os.environ["MAX_SPREAD"] = "0.07"
+        os.environ["MINIMUM_SPREAD"] = "0.04"
+        try:
+            from app.config import AppConfig
+            with capture_logs() as logs:
+                cfg = AppConfig.from_env()
+            assert cfg.minimum_spread == 7
+            assert any(e.get("event") == "config.max_spread_precedence" for e in logs)
+        finally:
+            os.environ.pop("MAX_SPREAD", None)
+            os.environ["MINIMUM_SPREAD"] = "0.04"
 
     def test_from_env_ignores_legacy_buy_trigger_price(self):
         import pytest
@@ -518,6 +563,8 @@ class TestSunriseEntryGateConfig:
             "NWS_LOW_DEADLINE_HOUR",
             "SUNRISE_TEMP_RISE_REQUIRED",
             "SUNRISE_TEMP_BASELINE_MINUTES",
+            "SUNRISE_OBS_MAX_AGE_MINUTES",
+            "SUNRISE_OBS_MAX_AGE_OVERRIDES",
         ):
             os.environ.pop(key, None)
 
@@ -536,6 +583,8 @@ class TestSunriseEntryGateConfig:
         assert cfg.nws_low_deadline_hour == 12
         assert cfg.sunrise_temp_rise_required == 1.0
         assert cfg.sunrise_temp_baseline_minutes == 15
+        assert cfg.sunrise_obs_max_age_minutes == 15
+        assert cfg.sunrise_obs_max_age_overrides == {}
 
     def test_valid_sunrise_mode_values(self):
         os.environ["ENTRY_GATE_MODE"] = "sunrise"
@@ -547,6 +596,8 @@ class TestSunriseEntryGateConfig:
         os.environ["NWS_LOW_DEADLINE_HOUR"] = "10"
         os.environ["SUNRISE_TEMP_RISE_REQUIRED"] = "2.0"
         os.environ["SUNRISE_TEMP_BASELINE_MINUTES"] = "20"
+        os.environ["SUNRISE_OBS_MAX_AGE_MINUTES"] = "18"
+        os.environ["SUNRISE_OBS_MAX_AGE_OVERRIDES"] = "KNYC:25,KSEA:20"
         from app.config import AppConfig
         cfg = AppConfig.from_env()
         assert cfg.entry_gate_mode == "SUNRISE"
@@ -558,6 +609,18 @@ class TestSunriseEntryGateConfig:
         assert cfg.nws_low_deadline_hour == 10
         assert cfg.sunrise_temp_rise_required == 2.0
         assert cfg.sunrise_temp_baseline_minutes == 20
+        assert cfg.sunrise_obs_max_age_minutes == 18
+        assert cfg.sunrise_obs_max_age_overrides == {"KNYC": 25, "KSEA": 20}
+
+    def test_malformed_sunrise_obs_overrides_are_skipped_with_warning(self):
+        from structlog.testing import capture_logs
+        os.environ["SUNRISE_OBS_MAX_AGE_OVERRIDES"] = "KNYC:25,bad,KSEA:xx,:10,KATL:0,KORD:20"
+        from app.config import AppConfig
+        with capture_logs() as logs:
+            cfg = AppConfig.from_env()
+        assert cfg.sunrise_obs_max_age_overrides == {"KNYC": 25, "KORD": 20}
+        malformed = [e for e in logs if e.get("event") == "config.sunrise_obs_max_age_override_malformed"]
+        assert len(malformed) >= 3
 
     def test_invalid_mode_falls_back_to_nws_window(self):
         os.environ["ENTRY_GATE_MODE"] = "bad-mode"

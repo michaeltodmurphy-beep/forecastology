@@ -4,6 +4,7 @@ import warnings
 
 from app.config import AppConfig
 from core.sunrise_gate import SunriseEntryGate, _c_to_f
+from structlog.testing import capture_logs
 
 try:
     from zoneinfo import ZoneInfo
@@ -422,6 +423,22 @@ def test_am_low_forecast_cache_is_used(monkeypatch):
     assert call_count[0] == 1  # second call used cache
 
 
+def test_am_low_cached_result_logs_at_debug(monkeypatch):
+    tz = ZoneInfo("America/New_York")
+    local_date = datetime.date(2026, 8, 9)
+    periods = _make_forecast_periods_local_low_before_noon(tz, local_date)
+    gate = _gate_with_am_low(periods, tz, deadline_hour=12, monkeypatch=monkeypatch)
+    now_utc = datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc)
+
+    with capture_logs() as logs:
+        gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
+        gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
+
+    cached_logs = [e for e in logs if e.get("event") == "sunrise.am_low_check" and e.get("cached") is True]
+    assert cached_logs
+    assert all(e.get("log_level") == "debug" for e in cached_logs)
+
+
 # ---------------------------------------------------------------------------
 # Celsius conversion helper
 # ---------------------------------------------------------------------------
@@ -533,6 +550,18 @@ def test_temp_rise_stale_observation_blocks(monkeypatch):
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     assert result.allowed is False
+
+
+def test_temp_rise_station_staleness_override_applies(monkeypatch):
+    now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
+    obs = _obs_features([
+        ("2026-08-09T09:50:00+00:00", 20.0),
+        ("2026-08-09T10:20:00+00:00", 20.6),  # 20 minutes old
+    ])
+    gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
+    gate.config.sunrise_obs_max_age_overrides = {"KNYC": 25}
+    result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
+    assert result.allowed is True
 
 
 def test_temp_rise_obs_fetch_error_blocks(monkeypatch):
@@ -773,4 +802,3 @@ def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):
         gate.evaluate("KXHIGHTATL-26AUG09-B95", now_utc=now_utc)
     except Exception as exc:  # noqa: BLE001
         raise AssertionError(f"Unexpected exception from evaluate: {exc}") from exc
-

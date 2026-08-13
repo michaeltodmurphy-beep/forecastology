@@ -288,7 +288,7 @@ def capture_logs(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_strategy_started_logs_minimum_spread(monkeypatch):
+async def test_strategy_started_logs_max_spread(monkeypatch):
     logged = capture_logs(monkeypatch)
 
     def fake_create_task(coro):
@@ -307,7 +307,7 @@ async def test_strategy_started_logs_minimum_spread(monkeypatch):
     await strategy.start()
 
     start_log = next(kwargs for event, kwargs in logged if event == "strategy.started")
-    assert start_log["minimum_spread"] == 7
+    assert start_log["max_spread"] == 7
     assert "hedge_trigger" not in start_log
 
 
@@ -347,6 +347,8 @@ async def test_strategy_start_logs_sunrise_gate_config_when_enabled(monkeypatch)
     assert sunrise_log["sunrise_entry_window_minutes"] == 150
     assert sunrise_log["sunrise_require_temp_rising"] is False
     assert sunrise_log["sunrise_source"] == "api"
+    assert sunrise_log["sunrise_obs_max_age_minutes"] == 15
+    assert sunrise_log["sunrise_obs_max_age_overrides"] == {}
 
 
 @pytest.mark.asyncio
@@ -373,6 +375,24 @@ async def test_evaluate_watchlist_logs_spread_note(monkeypatch, spread, expected
     buy_log = next(kwargs for event, kwargs in logged if event == "phase.b.buying")
     assert buy_log["spread_note"] == expected_note
     strategy._execute_entry.assert_awaited_once_with(bracket)
+
+
+@pytest.mark.asyncio
+async def test_missed_entry_log_is_deduped_for_identical_repeat(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN22-B52.5"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXLOWTBOS")
+    strategy.cache.update_quote(ticker, 94, 95)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+    await strategy._evaluate_watchlist()
+
+    missed = [kw for event, kw in logged if event == "phase.b.missed_entry"]
+    assert len(missed) == 1
+    assert missed[0]["ticker"] == ticker
+    assert missed[0]["price"] == 95
 
 
 @pytest.mark.asyncio
@@ -5477,6 +5497,36 @@ async def test_no_trade_tickers_blocks_matching_series(monkeypatch):
     assert blocked[0]["ticker"] == ticker
     assert blocked[0]["reason"] == "NO_TRADE_TICKERS"
     strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_trade_tickers_blocks_early_before_rest_eval(monkeypatch):
+    strategy = make_strategy(monkeypatch, no_trade_tickers={"KXHIGHTOKC"})
+    ticker = "KXHIGHTOKC-26JUL25-T89"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXHIGHTOKC")
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"yes_bid": 81, "yes_ask": 82})
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    strategy._fetch_market_data_via_rest.assert_not_awaited()
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_trade_ticker_block_log_is_deduped_per_day(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, no_trade_tickers={"KXHIGHTOKC"})
+    ticker = "KXHIGHTOKC-26JUL25-T89"
+    strategy.brackets[ticker] = _make_entry_bracket(ticker, "KXHIGHTOKC")
+
+    await strategy._evaluate_watchlist()
+    await strategy._evaluate_watchlist()
+
+    blocked = [kw for event, kw in logged if event == "phase.b.entry_blocked_by_config"]
+    assert len(blocked) == 1
+    assert blocked[0]["ticker"] == ticker
+    assert blocked[0]["reason"] == "NO_TRADE_TICKERS"
 
 
 @pytest.mark.asyncio
