@@ -258,51 +258,6 @@ def _parse_entry_gate_mode(raw: str | None) -> str:
 def _parse_sunrise_source(raw: str | None) -> str:
     if not raw or not raw.strip():
         return "astral"
-
-
-def _parse_sunrise_obs_max_age_overrides(raw: str | None) -> dict[str, int]:
-        if not raw or not raw.strip():
-            return {}
-
-        parsed: dict[str, int] = {}
-        for part in raw.strip().split(","):
-            entry = part.strip()
-            if not entry:
-                continue
-            station_part, sep, minutes_part = entry.partition(":")
-            if sep != ":":
-                logger.warning(
-                    "config.sunrise_obs_max_age_override_malformed",
-                    entry=entry,
-                    reason="missing_colon",
-                )
-                continue
-            station = station_part.strip().upper()
-            if not station:
-                logger.warning(
-                    "config.sunrise_obs_max_age_override_malformed",
-                    entry=entry,
-                    reason="missing_station",
-                )
-                continue
-            try:
-                minutes = int(minutes_part.strip())
-            except (TypeError, ValueError):
-                logger.warning(
-                    "config.sunrise_obs_max_age_override_malformed",
-                    entry=entry,
-                    reason="invalid_minutes",
-                )
-                continue
-            if minutes < 1:
-                logger.warning(
-                    "config.sunrise_obs_max_age_override_malformed",
-                    entry=entry,
-                    reason="minutes_below_minimum",
-                )
-                continue
-            parsed[station] = minutes
-        return parsed
     normalized = raw.strip().lower()
     if normalized in ("astral", "api"):
         return normalized
@@ -313,6 +268,51 @@ def _parse_sunrise_obs_max_age_overrides(raw: str | None) -> dict[str, int]:
         message=f"Unrecognized value for SUNRISE_SOURCE='{raw}'; defaulting to astral",
     )
     return "astral"
+
+
+def _parse_sunrise_obs_max_age_overrides(raw: str | None) -> dict[str, int]:
+    if not raw or not raw.strip():
+        return {}
+
+    parsed: dict[str, int] = {}
+    for part in raw.strip().split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        station_part, sep, minutes_part = entry.partition(":")
+        if sep != ":":
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="missing_colon",
+            )
+            continue
+        station = station_part.strip().upper()
+        if not station:
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="missing_station",
+            )
+            continue
+        try:
+            minutes = int(minutes_part.strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="invalid_minutes",
+            )
+            continue
+        if minutes < 1:
+            logger.warning(
+                "config.sunrise_obs_max_age_override_malformed",
+                entry=entry,
+                reason="minutes_below_minimum",
+            )
+            continue
+        parsed[station] = minutes
+    return parsed
 
 
 class AppConfig(BaseSettings):
@@ -399,7 +399,7 @@ class AppConfig(BaseSettings):
     sunrise_temp_rise_required: float = 1.0
     sunrise_temp_baseline_minutes: int = 15
     sunrise_obs_max_age_minutes: int = 15
-    sunrise_obs_max_age_overrides: dict[str, int] = {}
+    sunrise_obs_max_age_overrides: Annotated[dict[str, int], NoDecode] = {}
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 100–250 ms.  Configurable via

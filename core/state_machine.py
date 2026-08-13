@@ -337,15 +337,15 @@ class TemperatureStrategy:
     def _log_deduped_info(
         self,
         event: str,
-        ticker: str,
+        dedupe_key: str,
         **fields,
     ) -> None:
         self._log_dedupe.log(
             logger,
             "info",
             event,
-            ticker,
-            day=self._ticker_market_day(ticker),
+            dedupe_key,
+            day=self._ticker_market_day(dedupe_key),
             **fields,
         )
 
