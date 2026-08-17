@@ -567,6 +567,20 @@ class AppConfig(BaseSettings):
     hwm_arm_price: int = 93
     hwm_exit_price: int = 88
 
+    # ── Partial-fill chaser ─────────────────────────────────────────────────
+    # When an entry order partially fills due to insufficient ask liquidity,
+    # automatically work a pegged limit bid for the remaining contracts,
+    # adjusting every CHASE_INTERVAL_SECONDS, capped at spread_monitor_price.
+    #
+    # PARTIAL_FILL_CHASE=yes|no     (default: no — deployed dark until tested)
+    # CHASE_INTERVAL_SECONDS=<int>  (default: 60)
+    # CHASE_MAX_MINUTES=<int>       (default: 30)
+    #
+    # Parsed by from_env().
+    partial_fill_chase: bool = False
+    chase_interval_seconds: int = 60
+    chase_max_minutes: int = 30
+
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price_ask', 'monitor_start_price',
@@ -848,6 +862,21 @@ class AppConfig(BaseSettings):
         )
         hwm_arm_price = os.getenv("HWM_ARM_PRICE", "0.93")
         hwm_exit_price = os.getenv("HWM_EXIT_PRICE", "0.88")
+        partial_fill_chase = _parse_trade_toggle(
+            os.getenv("PARTIAL_FILL_CHASE"),
+            "PARTIAL_FILL_CHASE",
+            default=False,
+        )
+        chase_interval_seconds = _parse_positive_int(
+            os.getenv("CHASE_INTERVAL_SECONDS"),
+            "CHASE_INTERVAL_SECONDS",
+            default=60,
+        )
+        chase_max_minutes = _parse_positive_int(
+            os.getenv("CHASE_MAX_MINUTES"),
+            "CHASE_MAX_MINUTES",
+            default=30,
+        )
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -900,4 +929,7 @@ class AppConfig(BaseSettings):
             hwm_exit_enabled=hwm_exit_enabled,
             hwm_arm_price=hwm_arm_price,
             hwm_exit_price=hwm_exit_price,
+            partial_fill_chase=partial_fill_chase,
+            chase_interval_seconds=chase_interval_seconds,
+            chase_max_minutes=chase_max_minutes,
         )

@@ -93,3 +93,22 @@ class BaseExecutor(ABC):
         """Return the exchange-reported status string for an order, or None if
         the order cannot be found or the call fails."""
         return None
+
+    async def place_limit_buy(self, order: "OrderRequest") -> "ExecutionResult":
+        """Place a resting (GTC) limit BUY_YES order.
+
+        Default implementation delegates to buy_yes so subclasses that do not
+        override it still satisfy the interface.  Live executor overrides this
+        for a real GTC buy order.
+        """
+        return await self.buy_yes(order, max_price=order.price)
+
+    async def get_order_fill_info(self, order_id: str) -> dict:
+        """Return fill details for an order as a dict with keys:
+          status    — str ('resting', 'filled', 'cancelled', 'not_found', 'unknown')
+          fill_qty  — int, cumulative filled quantity
+          fill_price — int, average fill price in cents (0 if not filled)
+
+        Default returns unknown/zero so subclasses can opt in.
+        """
+        return {"status": "unknown", "fill_qty": 0, "fill_price": 0}

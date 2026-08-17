@@ -655,3 +655,126 @@ class LiveTradeExecutor(BaseExecutor):
         except Exception as e:
             logger.error("live.get_order_status_error", order_id=order_id, error=str(e))
             return None
+
+    async def place_limit_buy(self, order: OrderRequest) -> ExecutionResult:
+        """Place a resting GTC BUY_YES limit order on the exchange.
+
+        Unlike buy_yes (which uses immediate_or_cancel), this uses
+        good_till_canceled so the order rests on the book until filled or
+        explicitly cancelled.  Used by the partial-fill chaser.
+        """
+        if self.dry_run:
+            logger.warning(
+                "live.dry_run_skip_order",
+                ticker=order.market_ticker,
+                side="place_limit_buy",
+                price=order.price,
+                quantity=order.quantity,
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="DRY_RUN",
+                notes="dry_run",
+            )
+        path = REST_PORTFOLIO_ORDERS
+        url = f"{self.base_url}{path}"
+        payload = order.to_kalshi_payload(time_in_force="good_till_canceled")
+        headers = self._headers("POST", path)
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._client.post(url, json=payload, headers=headers)
+            data = resp.json()
+            if resp.status_code in (200, 201):
+                order_data = data.get("order") if isinstance(data.get("order"), dict) else data
+                order_id = order_data.get("order_id") or data.get("order_id") or ""
+                fill_qty = int(float(order_data.get("filled_count") or order_data.get("fill_count_fp") or 0))
+                fill_price = _to_cents_int(order_data.get("avg_price") or 0)
+                logger.info(
+                    "live.place_limit_buy_placed",
+                    ticker=order.market_ticker,
+                    price=order.price,
+                    qty=order.quantity,
+                    order_id=order_id,
+                )
+                return ExecutionResult(
+                    success=True,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=fill_price,
+                    fill_quantity=fill_qty,
+                    total_cost_cents=fill_price * fill_qty,
+                    order_id=order_id,
+                    status="RESTING",
+                    notes=json.dumps(data),
+                )
+            else:
+                logger.error(
+                    "live.place_limit_buy_rejected",
+                    ticker=order.market_ticker,
+                    status=resp.status_code,
+                    response=data,
+                )
+                return ExecutionResult(
+                    success=False,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=0,
+                    fill_quantity=0,
+                    total_cost_cents=0,
+                    status="REJECTED",
+                    notes=json.dumps(data),
+                )
+        except Exception as e:
+            logger.error("live.place_limit_buy_error", error=str(e))
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="REJECTED",
+                notes=str(e),
+            )
+
+    async def get_order_fill_info(self, order_id: str) -> dict:
+        """Return fill details for an order.
+
+        Returns a dict with keys:
+          status     — str ('resting', 'filled', 'cancelled', 'not_found', 'unknown')
+          fill_qty   — int, cumulative filled quantity
+          fill_price — int, average fill price in cents
+        """
+        if not order_id:
+            return {"status": "not_found", "fill_qty": 0, "fill_price": 0}
+        path = f"{REST_PORTFOLIO_ORDERS}/{order_id}"
+        url = f"{self.base_url}{path}"
+        headers = self._headers("GET", path)
+        try:
+            resp = await self._client.get(url, headers=headers)
+            if resp.status_code == 404:
+                return {"status": "not_found", "fill_qty": 0, "fill_price": 0}
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                order_data = data.get("order") if isinstance(data.get("order"), dict) else data
+                status_raw = str(order_data.get("status") or "unknown").lower()
+                fill_qty = int(float(order_data.get("filled_count") or order_data.get("fill_count_fp") or 0))
+                fill_price = _to_cents_int(order_data.get("avg_price") or 0)
+                return {"status": status_raw, "fill_qty": fill_qty, "fill_price": fill_price}
+            return {"status": "unknown", "fill_qty": 0, "fill_price": 0}
+        except Exception as e:
+            logger.error("live.get_order_fill_info_error", order_id=order_id, error=str(e))
+            return {"status": "unknown", "fill_qty": 0, "fill_price": 0}
