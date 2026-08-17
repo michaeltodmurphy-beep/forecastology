@@ -33,6 +33,9 @@ class PaperTradeExecutor(BaseExecutor):
         self.balance_cents = initial_balance_cents
         self.positions: dict[str, dict] = {}
         self.max_buy_qty = max_buy_qty
+        # Simulated resting GTC BUY orders for paper-mode chaser testing.
+        # Keyed by order_id; value: {ticker, bid_price, remaining, total_cost_reserved}
+        self._resting_buy_orders: dict[str, dict] = {}
 
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         if self.max_buy_qty is not None and order.quantity > self.max_buy_qty:
@@ -272,9 +275,114 @@ class PaperTradeExecutor(BaseExecutor):
         )
 
     async def cancel_order(self, order_id: str, market_ticker: str = "") -> bool:
-        """Paper mode: no-op cancel — always returns True."""
+        """Paper mode: cancel any resting buy order, or no-op — always returns True."""
+        if order_id in self._resting_buy_orders:
+            resting = self._resting_buy_orders.pop(order_id)
+            # Refund reserved balance
+            self.balance_cents += resting.get("total_cost_reserved", 0)
+            logger.info(
+                "paper.cancel_resting_buy",
+                order_id=order_id,
+                ticker=resting.get("ticker"),
+            )
         return True
 
     async def get_order_status(self, order_id: str) -> "Optional[str]":
-        """Paper mode: resting orders don't exist, always not_found."""
+        """Paper mode: return resting/filled/not_found for chase orders."""
+        if order_id in self._resting_buy_orders:
+            return "resting"
         return "not_found"
+
+    async def place_limit_buy(self, order) -> "ExecutionResult":
+        """Paper mode: place a resting GTC limit BUY order.
+
+        The order rests until get_order_fill_info() is called and the current
+        best ask is at or below the bid price, at which point it fills.
+        """
+        from execution.base import ExecutionResult
+        total_cost = order.price * order.quantity
+        if self.balance_cents < total_cost:
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="REJECTED",
+                notes=f"Insufficient balance for resting buy: need {total_cost}, have {self.balance_cents}",
+            )
+        self.balance_cents -= total_cost
+        oid = f"paper_resting_{int(time.time()*1000)}_{order.market_ticker}"
+        self._resting_buy_orders[oid] = {
+            "ticker": order.market_ticker,
+            "bid_price": order.price,
+            "remaining": order.quantity,
+            "total_cost_reserved": total_cost,
+        }
+        logger.info(
+            "paper.place_limit_buy",
+            ticker=order.market_ticker,
+            price=order.price,
+            qty=order.quantity,
+            order_id=oid,
+        )
+        return ExecutionResult(
+            success=True,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            order_id=oid,
+            status="RESTING",
+            notes="paper_resting_buy",
+        )
+
+    async def get_order_fill_info(self, order_id: str) -> dict:
+        """Paper mode: check if current ask has crossed our resting bid price.
+
+        If yes, fills the order and updates positions/balance.  Returns cumulative
+        fill info so the chaser loop can process incremental fills.
+        """
+        if order_id not in self._resting_buy_orders:
+            return {"status": "not_found", "fill_qty": 0, "fill_price": 0}
+        resting = self._resting_buy_orders[order_id]
+        ticker = resting["ticker"]
+        bid_price = resting["bid_price"]
+        ob = self.ticker_cache.get_orderbook(ticker)
+        if ob and ob.yes_asks and ob.yes_asks[0].price <= bid_price:
+            fill_price = ob.yes_asks[0].price
+            fill_qty = resting["remaining"]
+            # Refund the price difference (we reserved at bid, fill at ask)
+            reserved = resting["total_cost_reserved"]
+            actual_cost = fill_price * fill_qty
+            self.balance_cents += reserved - actual_cost
+            # Update paper positions
+            if ticker in self.positions:
+                pos = self.positions[ticker]
+                old_cost = pos["avg_entry_price"] * pos["quantity"]
+                new_qty = pos["quantity"] + fill_qty
+                pos["quantity"] = new_qty
+                pos["avg_entry_price"] = (old_cost + fill_price * fill_qty) // new_qty if new_qty else fill_price
+            else:
+                self.positions[ticker] = {
+                    "market_ticker": ticker,
+                    "side": "yes",
+                    "quantity": fill_qty,
+                    "avg_entry_price": fill_price,
+                }
+            del self._resting_buy_orders[order_id]
+            logger.info(
+                "paper.resting_buy_filled",
+                ticker=ticker,
+                fill_price=fill_price,
+                fill_qty=fill_qty,
+                order_id=order_id,
+            )
+            return {"status": "filled", "fill_qty": fill_qty, "fill_price": fill_price}
+        return {"status": "resting", "fill_qty": 0, "fill_price": 0}
