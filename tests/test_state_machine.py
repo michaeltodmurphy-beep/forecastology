@@ -287,6 +287,25 @@ def capture_logs(monkeypatch):
     return logged
 
 
+def freeze_state_machine_now(monkeypatch, now_utc):
+    import core.state_machine as state_machine
+
+    class FrozenDateTime(datetime.datetime):
+        current = now_utc
+
+        @classmethod
+        def now(cls, tz=None):
+            current = cls.current
+            if tz is None:
+                return current.replace(tzinfo=None) if current.tzinfo is not None else current
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=datetime.timezone.utc)
+            return current.astimezone(tz)
+
+    monkeypatch.setattr(state_machine.datetime, "datetime", FrozenDateTime)
+    return FrozenDateTime
+
+
 @pytest.mark.asyncio
 async def test_strategy_started_logs_max_spread(monkeypatch):
     logged = capture_logs(monkeypatch)
@@ -308,6 +327,7 @@ async def test_strategy_started_logs_max_spread(monkeypatch):
 
     start_log = next(kwargs for event, kwargs in logged if event == "strategy.started")
     assert start_log["max_spread"] == 7
+    assert start_log["falling_knife_decay_minutes"] == 10
     assert "hedge_trigger" not in start_log
 
 
@@ -427,11 +447,16 @@ async def test_evaluate_watchlist_blocks_falling_knife_entry(monkeypatch):
         bracket_label="knife",
         phase=Phase.MONITORING,
     )
-    bracket.falling_knife_guard = True
     strategy.brackets[bracket.market_ticker] = bracket
-    strategy.cache.update_quote(bracket.market_ticker, 79, 82)
     strategy._execute_entry = AsyncMock()
 
+    strategy.cache.update_quote(bracket.market_ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    strategy.cache.update_quote(bracket.market_ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is True
+
+    strategy.cache.update_quote(bracket.market_ticker, 79, 82)
     await strategy._evaluate_watchlist()
 
     assert bracket.crossed_buy is False
@@ -449,14 +474,23 @@ async def test_falling_knife_guard_resets_below_floor_then_allows_entry(monkeypa
         bracket_label="reset",
         phase=Phase.MONITORING,
     )
-    bracket.falling_knife_guard = True
     strategy.brackets[bracket.market_ticker] = bracket
     strategy._execute_entry = AsyncMock()
+
+    strategy.cache.update_quote(bracket.market_ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    strategy.cache.update_quote(bracket.market_ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is True
+    assert bracket.pending_knife_tick is True
+    assert bracket.last_above_ceiling_at is not None
 
     strategy.cache.update_quote(bracket.market_ticker, 80, 81)
     await strategy._evaluate_watchlist()
 
     assert bracket.falling_knife_guard is False
+    assert bracket.pending_knife_tick is False
+    assert bracket.last_above_ceiling_at is None
     strategy._execute_entry.assert_not_awaited()
 
     strategy.cache.update_quote(bracket.market_ticker, 79, 82)
@@ -482,12 +516,217 @@ async def test_falling_knife_guard_updates_for_non_monitoring_brackets(monkeypat
 
     strategy.cache.update_quote(bracket.market_ticker, 90, 91)
     await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is False
+    assert bracket.pending_knife_tick is True
+
+    strategy.cache.update_quote(bracket.market_ticker, 89, 91)
+    await strategy._evaluate_watchlist()
     assert bracket.falling_knife_guard is True
 
     strategy.cache.update_quote(bracket.market_ticker, 80, 81)
     await strategy._evaluate_watchlist()
     assert bracket.falling_knife_guard is False
+    assert bracket.pending_knife_tick is False
+    assert bracket.last_above_ceiling_at is None
     strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_single_tick_falling_knife_flicker_does_not_latch(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTSEA-26JUN22-B71.5"
+    bracket = _make_entry_bracket(ticker, "KXHIGHTSEA")
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    strategy.cache.update_quote(ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is False
+    assert bracket.pending_knife_tick is True
+
+    strategy.cache.update_quote(ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is False
+    assert bracket.pending_knife_tick is False
+    strategy._execute_entry.assert_awaited_once_with(bracket)
+    assert "phase.b.falling_knife_blocked" not in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_falling_knife_guard_decays_after_ten_minutes_below_ceiling(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTMIA-26JUN22-B81.5"
+    bracket = _make_entry_bracket(ticker, "KXHIGHTMIA")
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    frozen = freeze_state_machine_now(
+        monkeypatch,
+        datetime.datetime(2026, 8, 17, 12, 0, tzinfo=datetime.timezone.utc),
+    )
+
+    strategy.cache.update_quote(ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    frozen.current += datetime.timedelta(minutes=1)
+    strategy.cache.update_quote(ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is True
+
+    frozen.current += datetime.timedelta(minutes=11)
+    strategy.cache.update_quote(ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is False
+    strategy._execute_entry.assert_awaited_once_with(bracket)
+    assert "phase.b.falling_knife_decayed" in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_falling_knife_decay_restarts_after_above_ceiling_retouch(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXHIGHTDAL-26JUN22-B81.5"
+    bracket = _make_entry_bracket(ticker, "KXHIGHTDAL")
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    frozen = freeze_state_machine_now(
+        monkeypatch,
+        datetime.datetime(2026, 8, 17, 12, 0, tzinfo=datetime.timezone.utc),
+    )
+
+    strategy.cache.update_quote(ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    frozen.current += datetime.timedelta(minutes=1)
+    strategy.cache.update_quote(ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+    frozen.current += datetime.timedelta(minutes=4)
+    strategy.cache.update_quote(ticker, 88, 91)
+    await strategy._evaluate_watchlist()
+
+    frozen.current += datetime.timedelta(minutes=7)
+    strategy.cache.update_quote(ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is True
+    strategy._execute_entry.assert_not_awaited()
+    assert "phase.b.falling_knife_blocked" in [event for event, _ in logged]
+    assert "phase.b.falling_knife_decayed" not in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_sunrise_window_open_resets_prewindow_falling_knife_guard(monkeypatch):
+    from core.sunrise_gate import SunriseGateDecision
+
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(
+        monkeypatch,
+        entry_gate_mode="SUNRISE",
+        enable_local_settle_gate=False,
+        low_ticker_entry_halt_enabled=False,
+    )
+    ticker = "KXLOWTBOS-26JUN22-B62.5"
+    bracket = _make_entry_bracket(ticker, "KXLOWTBOS")
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    decisions = iter(
+        [
+            SunriseGateDecision(allowed=False),
+            SunriseGateDecision(allowed=False),
+            SunriseGateDecision(allowed=True, use_nws_window_fallback=False),
+        ]
+    )
+    monkeypatch.setattr(strategy._sunrise_entry_gate, "evaluate", lambda **_kwargs: next(decisions))
+
+    strategy.cache.update_quote(ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    strategy.cache.update_quote(ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is True
+    assert bracket.sunrise_window_was_open is False
+
+    strategy.cache.update_quote(ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is False
+    assert bracket.sunrise_window_was_open is True
+    strategy._execute_entry.assert_awaited_once_with(bracket)
+    assert "phase.b.falling_knife_window_reset" in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_sunrise_window_does_not_reset_midwindow_falling_knife_guard(monkeypatch):
+    from core.sunrise_gate import SunriseGateDecision
+
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(
+        monkeypatch,
+        entry_gate_mode="SUNRISE",
+        enable_local_settle_gate=False,
+        low_ticker_entry_halt_enabled=False,
+    )
+    ticker = "KXLOWTBOS-26JUN22-B63.5"
+    bracket = _make_entry_bracket(ticker, "KXLOWTBOS")
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    monkeypatch.setattr(
+        strategy._sunrise_entry_gate,
+        "evaluate",
+        lambda **_kwargs: SunriseGateDecision(allowed=True, use_nws_window_fallback=False),
+    )
+
+    strategy.cache.update_quote(ticker, 80, 81)
+    await strategy._evaluate_watchlist()
+    assert bracket.sunrise_window_was_open is True
+
+    strategy.cache.update_quote(ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    strategy.cache.update_quote(ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+    assert bracket.falling_knife_guard is True
+
+    strategy.cache.update_quote(ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is True
+    strategy._execute_entry.assert_not_awaited()
+    assert "phase.b.falling_knife_window_reset" not in [event for event, _ in logged]
+
+
+@pytest.mark.asyncio
+async def test_falling_knife_decay_can_be_disabled(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, falling_knife_decay_minutes=0)
+    ticker = "KXHIGHTPHX-26JUN22-B81.5"
+    bracket = _make_entry_bracket(ticker, "KXHIGHTPHX")
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    frozen = freeze_state_machine_now(
+        monkeypatch,
+        datetime.datetime(2026, 8, 17, 12, 0, tzinfo=datetime.timezone.utc),
+    )
+
+    strategy.cache.update_quote(ticker, 90, 91)
+    await strategy._evaluate_watchlist()
+    frozen.current += datetime.timedelta(minutes=1)
+    strategy.cache.update_quote(ticker, 89, 91)
+    await strategy._evaluate_watchlist()
+
+    frozen.current += datetime.timedelta(minutes=30)
+    strategy.cache.update_quote(ticker, 79, 82)
+    await strategy._evaluate_watchlist()
+
+    assert bracket.falling_knife_guard is True
+    strategy._execute_entry.assert_not_awaited()
+    assert "phase.b.falling_knife_decayed" not in [event for event, _ in logged]
 
 
 @pytest.mark.asyncio

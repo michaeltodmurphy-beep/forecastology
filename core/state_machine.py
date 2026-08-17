@@ -350,6 +350,51 @@ class TemperatureStrategy:
         )
 
     @staticmethod
+    def _reset_falling_knife_state(bracket: MarketBracket) -> None:
+        bracket.falling_knife_guard = False
+        bracket.pending_knife_tick = False
+        bracket.last_above_ceiling_at = None
+
+    def _update_falling_knife_guard(
+        self,
+        bracket: MarketBracket,
+        ticker: str,
+        price: int,
+        buy_trigger: Optional[int],
+        now_utc: datetime.datetime,
+    ) -> None:
+        if buy_trigger is not None and price < buy_trigger:
+            self._reset_falling_knife_state(bracket)
+            return
+
+        if price > self.config.spread_monitor_price:
+            bracket.last_above_ceiling_at = now_utc
+            if bracket.pending_knife_tick:
+                bracket.falling_knife_guard = True
+            else:
+                bracket.pending_knife_tick = True
+            return
+
+        bracket.pending_knife_tick = False
+
+        decay_minutes = int(getattr(self.config, "falling_knife_decay_minutes", 10))
+        if (
+            bracket.falling_knife_guard
+            and decay_minutes > 0
+            and bracket.last_above_ceiling_at is not None
+            and now_utc - bracket.last_above_ceiling_at > datetime.timedelta(minutes=decay_minutes)
+        ):
+            minutes_elapsed = (
+                now_utc - bracket.last_above_ceiling_at
+            ).total_seconds() / 60.0
+            self._reset_falling_knife_state(bracket)
+            logger.info(
+                "phase.b.falling_knife_decayed",
+                ticker=ticker,
+                minutes_elapsed=minutes_elapsed,
+            )
+
+    @staticmethod
     def _to_quantity_float(raw) -> float:
         if raw is None or raw == "":
             return 0.0
@@ -1325,6 +1370,7 @@ class TemperatureStrategy:
                      buy_trigger_high=self.config.buy_trigger_price_high,
                      max_spread=self.config.minimum_spread,
                      spread_monitor=self.config.spread_monitor_price,
+                     falling_knife_decay_minutes=self.config.falling_knife_decay_minutes,
                      stop_loss=self.config.stop_loss_price,
                      mode=self.config.trading_mode,
                      low_trades=self.config.low_trades,
@@ -2004,13 +2050,30 @@ class TemperatureStrategy:
                 continue
 
             bracket.last_price = price
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
 
             buy_trigger = get_buy_trigger_price(self.config, ticker)
-
-            if price > self.config.spread_monitor_price:
-                bracket.falling_knife_guard = True
-            elif buy_trigger is not None and price < buy_trigger:
-                bracket.falling_knife_guard = False
+            ticker_upper = ticker.upper()
+            is_high = "KXHIGH" in ticker_upper
+            is_low = "KXLOW" in ticker_upper
+            use_nws_window_for_low = True
+            sunrise_gate_allowed = True
+            if should_evaluate_entry and is_low and self.config.entry_gate_mode == "SUNRISE":
+                sunrise_decision = self._sunrise_entry_gate.evaluate(
+                    ticker=ticker,
+                    now_utc=now_utc,
+                )
+                if not sunrise_decision.allowed:
+                    bracket.sunrise_window_was_open = False
+                    sunrise_gate_allowed = False
+                else:
+                    if not bracket.sunrise_window_was_open:
+                        if bracket.falling_knife_guard:
+                            logger.info("phase.b.falling_knife_window_reset", ticker=ticker)
+                        self._reset_falling_knife_state(bracket)
+                        bracket.sunrise_window_was_open = True
+                    use_nws_window_for_low = sunrise_decision.use_nws_window_fallback
+            self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
 
             if not should_evaluate_entry:
                 continue
@@ -2060,11 +2123,11 @@ class TemperatureStrategy:
                 )
                 continue
 
+            if not sunrise_gate_allowed:
+                continue
+
             if spread <= self.config.minimum_spread:
                 # --- Trade-direction toggle gate ---
-                ticker_upper = ticker.upper()
-                is_high = "KXHIGH" in ticker_upper
-                is_low = "KXLOW" in ticker_upper
                 if is_high and not self.config.high_trades:
                     logger.info("phase.b.entry_blocked_by_config",
                                 ticker=ticker, reason="HIGH_TRADES=no")
@@ -2105,16 +2168,6 @@ class TemperatureStrategy:
                         logger.info("entry.blocked_local_settle_gate", **gate_ctx)
                         continue
                 # -------------------------------------------------------
-
-                use_nws_window_for_low = True
-                if is_low and self.config.entry_gate_mode == "SUNRISE":
-                    sunrise_decision = self._sunrise_entry_gate.evaluate(
-                        ticker=ticker,
-                        now_utc=datetime.datetime.now(datetime.timezone.utc),
-                    )
-                    if not sunrise_decision.allowed:
-                        continue
-                    use_nws_window_for_low = sunrise_decision.use_nws_window_fallback
 
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)

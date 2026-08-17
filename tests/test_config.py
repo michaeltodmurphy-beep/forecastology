@@ -183,6 +183,48 @@ class TestAppConfig:
         )
         assert cfg.enable_fast_sl_exit is True
 
+    def test_falling_knife_decay_minutes_default_is_ten(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        os.environ.pop("FALLING_KNIFE_DECAY_MINUTES", None)
+        from app.config import AppConfig
+
+        cfg = AppConfig.from_env()
+        assert cfg.falling_knife_decay_minutes == 10
+
+    def test_falling_knife_decay_minutes_loaded_from_env(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        os.environ["FALLING_KNIFE_DECAY_MINUTES"] = "7"
+        try:
+            from app.config import AppConfig
+
+            cfg = AppConfig.from_env()
+            assert cfg.falling_knife_decay_minutes == 7
+        finally:
+            os.environ.pop("FALLING_KNIFE_DECAY_MINUTES", None)
+
+    def test_falling_knife_decay_minutes_invalid_defaults_with_warning(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        from structlog.testing import capture_logs
+
+        os.environ["FALLING_KNIFE_DECAY_MINUTES"] = "bad"
+        try:
+            from app.config import AppConfig
+
+            with capture_logs() as logs:
+                cfg = AppConfig.from_env()
+
+            assert cfg.falling_knife_decay_minutes == 10
+            assert any(
+                e.get("event") == "config.non_negative_int_invalid"
+                and e.get("name") == "FALLING_KNIFE_DECAY_MINUTES"
+                for e in logs
+            )
+        finally:
+            os.environ.pop("FALLING_KNIFE_DECAY_MINUTES", None)
+
     def test_sl_exit_mode_defaults_to_panic_flatten(self):
         import pytest
         pytest.importorskip("pydantic_settings")
