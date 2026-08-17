@@ -270,6 +270,21 @@ def _parse_sunrise_source(raw: str | None) -> str:
     return "astral"
 
 
+def _parse_sunrise_obs_source(raw: str | None) -> str:
+    if not raw or not raw.strip():
+        return "awc"
+    normalized = raw.strip().lower()
+    if normalized in ("awc", "nws"):
+        return normalized
+    logger.warning(
+        "config.sunrise_obs_source_invalid",
+        raw=raw,
+        fallback="awc",
+        message=f"Unrecognized value for SUNRISE_OBS_SOURCE='{raw}'; defaulting to awc",
+    )
+    return "awc"
+
+
 def _parse_sunrise_obs_max_age_overrides(raw: str | None) -> dict[str, int]:
     if not raw or not raw.strip():
         return {}
@@ -400,6 +415,7 @@ class AppConfig(BaseSettings):
     sunrise_temp_baseline_minutes: int = 15
     sunrise_obs_max_age_minutes: int = 15
     sunrise_obs_max_age_overrides: Annotated[dict[str, int], NoDecode] = {}
+    sunrise_obs_source: Literal["awc", "nws"] = "awc"
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 100–250 ms.  Configurable via
@@ -738,6 +754,7 @@ class AppConfig(BaseSettings):
         sunrise_obs_max_age_overrides = _parse_sunrise_obs_max_age_overrides(
             os.getenv("SUNRISE_OBS_MAX_AGE_OVERRIDES")
         )
+        sunrise_obs_source = _parse_sunrise_obs_source(os.getenv("SUNRISE_OBS_SOURCE"))
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
         low_ticker_daily_closeout_enabled = _parse_trade_toggle(
@@ -845,6 +862,7 @@ class AppConfig(BaseSettings):
             sunrise_temp_baseline_minutes=sunrise_temp_baseline_minutes,
             sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
             sunrise_obs_max_age_overrides=sunrise_obs_max_age_overrides,
+            sunrise_obs_source=sunrise_obs_source,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
