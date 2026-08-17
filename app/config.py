@@ -342,6 +342,7 @@ class AppConfig(BaseSettings):
     buy_trigger_price_low: int
     buy_trigger_price_high: int
     spread_monitor_price: int
+    falling_knife_decay_minutes: int = 10
     minimum_spread: int
     stop_loss_price_ask: int
     rest_base_url: str = 'https://external-api.kalshi.com'
@@ -755,6 +756,11 @@ class AppConfig(BaseSettings):
             os.getenv("SUNRISE_OBS_MAX_AGE_OVERRIDES")
         )
         sunrise_obs_source = _parse_sunrise_obs_source(os.getenv("SUNRISE_OBS_SOURCE"))
+        falling_knife_decay_minutes = _parse_non_negative_int(
+            os.getenv("FALLING_KNIFE_DECAY_MINUTES"),
+            "FALLING_KNIFE_DECAY_MINUTES",
+            default=10,
+        )
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
         low_ticker_daily_closeout_enabled = _parse_trade_toggle(
@@ -863,6 +869,7 @@ class AppConfig(BaseSettings):
             sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
             sunrise_obs_max_age_overrides=sunrise_obs_max_age_overrides,
             sunrise_obs_source=sunrise_obs_source,
+            falling_knife_decay_minutes=falling_knife_decay_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],

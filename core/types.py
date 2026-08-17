@@ -85,6 +85,9 @@ class MarketBracket:
     last_checked_price: Optional[int] = None
     crossed_buy: bool = False
     falling_knife_guard: bool = False
+    pending_knife_tick: bool = False
+    last_above_ceiling_at: Optional[datetime.datetime] = None
+    sunrise_window_was_open: bool = False
     pending_entry: bool = False  # crossed 85 but spread was too wide, still waiting
     orderbook: Optional[OrderBook] = None
     position_quantity: int = 0
