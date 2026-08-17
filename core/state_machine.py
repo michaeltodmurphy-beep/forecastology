@@ -1348,6 +1348,7 @@ class TemperatureStrategy:
                 sunrise_temp_baseline_minutes=self.config.sunrise_temp_baseline_minutes,
                 sunrise_obs_max_age_minutes=self.config.sunrise_obs_max_age_minutes,
                 sunrise_obs_max_age_overrides=dict(sorted(self.config.sunrise_obs_max_age_overrides.items())),
+                sunrise_obs_source=self.config.sunrise_obs_source,
             )
 
         hedge_max = int(self.config.hedge_max_factor)

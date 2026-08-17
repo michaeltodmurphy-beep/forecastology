@@ -14,6 +14,7 @@ from app.config import AppConfig
 from core.local_time_gate import get_series_prefix, get_series_timezone
 from core.log_dedupe import DedupeLogger
 from core.station_coords import SERIES_STATION_COORDS
+from nws.awc_obs import ObsList, fetch_obs_with_fallback
 from nws.client import NWSClient
 
 try:
@@ -82,6 +83,25 @@ class SunriseEntryGate:
         if station_upper in overrides:
             return int(overrides[station_upper])
         return int(self.config.sunrise_obs_max_age_minutes)
+
+    def _fetch_station_obs(
+        self,
+        station_id: str,
+        nws_url: str,
+    ) -> tuple[ObsList, str]:
+        """Fetch station observations using the configured source with fallback.
+
+        Delegates to :func:`nws.awc_obs.fetch_obs_with_fallback`.
+        Returns ``(obs_list, source)`` where *obs_list* is sorted newest first
+        and *source* is ``"awc"`` or ``"nws"``.
+        Raises on irrecoverable fetch failure.
+        """
+        return fetch_obs_with_fallback(
+            station_id,
+            nws_client=self.nws_client,
+            nws_url=nws_url,
+            obs_source=getattr(self.config, "sunrise_obs_source", "awc"),
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -341,9 +361,12 @@ class SunriseEntryGate:
         # Fetch recent observations since baseline start
         start_iso = baseline_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
-            payload = self.nws_client._get_json(  # noqa: SLF001
-                f"https://api.weather.gov/stations/{station_id}/observations"
-                f"?start={start_iso}"
+            raw_obs, _obs_source = self._fetch_station_obs(
+                station_id,
+                nws_url=(
+                    f"https://api.weather.gov/stations/{station_id}/observations"
+                    f"?start={start_iso}"
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             self._deduped_info(
@@ -358,26 +381,15 @@ class SunriseEntryGate:
             )
             return False
 
-        features = payload.get("features") or []
-        parsed_obs: list[tuple[datetime.datetime, float]] = []
-        for item in features:
-            props = item.get("properties") or {}
-            temp_val = (props.get("temperature") or {}).get("value")
-            timestamp = props.get("timestamp")
-            if temp_val is None or not timestamp:
-                continue
-            try:
-                obs_ts = datetime.datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if obs_ts.tzinfo is None:
-                obs_ts = obs_ts.replace(tzinfo=datetime.timezone.utc)
-            obs_ts_utc = obs_ts.astimezone(datetime.timezone.utc)
-            if obs_ts_utc < baseline_start_utc:
-                continue
-            parsed_obs.append((obs_ts_utc, _c_to_f(float(temp_val))))
-
-        parsed_obs.sort(key=lambda x: x[0])
+        # Filter by baseline window and convert °C → °F; sort ascending for latch logic
+        parsed_obs: list[tuple[datetime.datetime, float]] = sorted(
+            [
+                (obs_ts_utc, _c_to_f(temp_c))
+                for obs_ts_utc, temp_c in raw_obs
+                if obs_ts_utc >= baseline_start_utc
+            ],
+            key=lambda x: x[0],
+        )
 
         if not parsed_obs:
             self._deduped_info(
@@ -572,8 +584,9 @@ class SunriseEntryGate:
             return cached[1], cached[2], dict(cached[3])
 
         try:
-            payload = self.nws_client._get_json(  # noqa: SLF001
-                f"https://api.weather.gov/stations/{station_id}/observations?limit=2"
+            parsed_obs, _obs_source = self._fetch_station_obs(
+                station_id,
+                nws_url=f"https://api.weather.gov/stations/{station_id}/observations?limit=2",
             )
         except Exception as exc:  # noqa: BLE001
             ctx = {
@@ -583,24 +596,6 @@ class SunriseEntryGate:
             }
             self._temp_cache[cache_key] = (cache_now, False, "sunrise.obs_unavailable", ctx)
             return False, "sunrise.obs_unavailable", ctx
-
-        features = payload.get("features") or []
-        parsed_obs: list[tuple[datetime.datetime, float]] = []
-        for item in features:
-            props = item.get("properties") or {}
-            temp_val = ((props.get("temperature") or {}).get("value"))
-            timestamp = props.get("timestamp")
-            if temp_val is None or not timestamp:
-                continue
-            try:
-                obs_ts = datetime.datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if obs_ts.tzinfo is None:
-                obs_ts = obs_ts.replace(tzinfo=datetime.timezone.utc)
-            parsed_obs.append((obs_ts.astimezone(datetime.timezone.utc), float(temp_val)))
-
-        parsed_obs.sort(key=lambda x: x[0], reverse=True)
         if len(parsed_obs) < 2:
             ctx = {"reason": "insufficient_observations", "observation_count": len(parsed_obs)}
             self._temp_cache[cache_key] = (cache_now, False, "sunrise.obs_unavailable", ctx)

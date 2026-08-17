@@ -69,6 +69,7 @@ def _make_config(**overrides) -> AppConfig:
         minimum_spread=4,
         stop_loss_price=35,
         entry_gate_mode="SUNRISE",
+        sunrise_obs_source="nws",  # use legacy NWS path so _FakeNWSClient._get_json works
     )
     for k, v in overrides.items():
         setattr(cfg, k, v)
