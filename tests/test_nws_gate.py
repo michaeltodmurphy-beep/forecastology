@@ -159,7 +159,12 @@ class TestTradingGateOpen:
         with patch("nws.gate.GATE_LOW_BEFORE", 120), \
              patch("nws.gate.GATE_LOW_AFTER", 45), \
              patch("nws.gate.GATE_HIGH_BEFORE", 60), \
-             patch("nws.gate.GATE_HIGH_AFTER", 30):
+             patch("nws.gate.GATE_HIGH_AFTER", 30), \
+             patch.dict(
+                 "nws.gate._station_cache",
+                 {"KATL": (33.6, -84.4, "https://example.test/hourly", "UTC")},
+                 clear=False,
+             ):
             result = self._gate_open("KATL", now, self.session)
         assert result is True
 
