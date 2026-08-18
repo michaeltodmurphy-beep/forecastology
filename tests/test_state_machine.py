@@ -7278,7 +7278,6 @@ async def test_intraday_checkpoint_no_exit_before_checkpoint_time(monkeypatch):
     strategy.cache.update_quote(ticker, 75, 80)
 
     # America/New_York: pick a UTC time that gives 11:30 local
-    import pytz
     ny_tz = datetime.timezone(datetime.timedelta(hours=-4))  # EDT
     now_local = datetime.datetime(2026, 8, 8, 11, 30, 0, tzinfo=ny_tz)
     now_utc = now_local.astimezone(datetime.timezone.utc)
