@@ -3629,6 +3629,12 @@ class TemperatureStrategy:
                 ):
                     current_price = last_price
                     price_source = "last_price"
+                elif last_price is None and bracket.last_price is not None:
+                    # Cache has no last-trade price — use the bracket's remembered
+                    # price (e.g. entry price restored at startup) as a warm-start
+                    # fallback so the position is not immediately blind after restart.
+                    current_price = bracket.last_price
+                    price_source = "last_price"
 
             if current_price is None and not zero_bid_collapse:
                 bracket._consecutive_no_price_cycles = getattr(
@@ -3653,7 +3659,7 @@ class TemperatureStrategy:
                     last_alert = getattr(bracket, "_last_unprotected_log", 0)
                     if now_warn - last_alert >= 60:
                         bracket._last_unprotected_log = now_warn
-                        logger.warning(
+                        logger.error(
                             "phase.c.held_position_unprotected",
                             ticker=ticker,
                             qty=bracket.position_quantity,

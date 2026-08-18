@@ -7605,3 +7605,125 @@ async def test_hwm_exit_flicker_ignored(monkeypatch):
     assert any(ev == "hwm.exit_flicker_ignored" for ev, _ in logged)
     assert ticker not in strategy._hwm_pending
     strategy._execute_stop_loss.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 regression: phase C must use bracket.last_price when cache is empty
+# ---------------------------------------------------------------------------
+
+
+def _make_low_bracket_holding(ticker: str, series: str, last_price: int = 0):
+    b = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="",
+        series_ticker=series,
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        falling_knife_guard=False,
+    )
+    b.position_quantity = 3
+    b.avg_entry = 65
+    b.last_price = last_price
+    return b
+
+
+@pytest.mark.asyncio
+async def test_phase_c_uses_bracket_last_price_when_cache_empty(monkeypatch):
+    """Regression Bug 2: when websocket cache and REST both return nothing,
+    phase C must fall back to bracket.last_price so the position is not
+    flagged as having no live price."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTMIA-26AUG18-B81.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 65}}
+
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=35)
+    strategy._reconciliation_complete = True
+    strategy._execute_stop_loss = AsyncMock()
+    # REST returns nothing — simulates the blind-price condition
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket_holding(ticker, "KXLOWTMIA", last_price=85)
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Cache is empty — no websocket quote has arrived yet
+
+    await strategy._evaluate_held_positions()
+
+    no_price_events = [ev for ev, _ in logged if ev == "phase.c.no_live_price"]
+    assert no_price_events == [], (
+        "phase.c.no_live_price must not fire when bracket.last_price is available"
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase_c_logs_no_live_price_when_bracket_last_price_also_missing(monkeypatch):
+    """Regression Bug 2 (complement): when cache AND bracket.last_price are None,
+    phase.c.no_live_price must still be logged."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTMIA-26AUG18-B81.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 65}}
+
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=35)
+    strategy._reconciliation_complete = True
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket_holding(ticker, "KXLOWTMIA", last_price=0)
+    bracket.last_price = None  # No known price at all
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Drive the blind-cycle counter above the threshold so the warning fires
+    bracket._consecutive_no_price_cycles = strategy.config.max_no_price_cycles + 1
+    bracket._no_price_since = 0.0  # will be treated as missing / old
+
+    await strategy._evaluate_held_positions()
+
+    no_price_events = [ev for ev, _ in logged if ev == "phase.c.no_live_price"]
+    assert no_price_events, "phase.c.no_live_price must fire when no price is available at all"
+
+
+@pytest.mark.asyncio
+async def test_phase_c_held_position_unprotected_logs_at_error_level(monkeypatch):
+    """Regression Bug 2: held_position_unprotected must be logged at ERROR level."""
+    import core.state_machine as state_machine
+
+    error_events: list[str] = []
+    warning_events: list[str] = []
+    original_error = state_machine.logger.error
+    original_warning = state_machine.logger.warning
+
+    monkeypatch.setattr(
+        state_machine.logger, "error",
+        lambda event, **kw: error_events.append(event),
+    )
+    monkeypatch.setattr(
+        state_machine.logger, "warning",
+        lambda event, **kw: warning_events.append(event),
+    )
+
+    ticker = "KXLOWTMIA-26AUG18-B81.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 65}}
+
+    strategy = make_strategy(monkeypatch, executor=executor, stop_loss_price=35)
+    strategy._reconciliation_complete = True
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket_holding(ticker, "KXLOWTMIA", last_price=0)
+    bracket.last_price = None
+    bracket._consecutive_no_price_cycles = strategy.config.max_no_price_cycles + 5
+    bracket._no_price_since = 0.0
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    await strategy._evaluate_held_positions()
+
+    assert "phase.c.held_position_unprotected" in error_events, (
+        "held_position_unprotected must be logged at ERROR, not WARNING"
+    )
+    assert "phase.c.held_position_unprotected" not in warning_events, (
+        "held_position_unprotected must NOT be logged at WARNING level"
+    )

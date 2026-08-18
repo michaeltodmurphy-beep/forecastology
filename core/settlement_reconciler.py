@@ -60,7 +60,7 @@ async def _fetch_kalshi_market_result(
         from app.signing import load_private_key, build_auth_headers
         private_key = load_private_key(private_key_path)
         path = f"/trade-api/v2/markets/{market_ticker}"
-        headers = build_auth_headers(api_key, private_key, method="GET", path=path)
+        headers = build_auth_headers(private_key, api_key, method="GET", path=path)
         url = rest_base_url.rstrip("/") + path
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)

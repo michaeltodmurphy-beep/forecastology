@@ -586,3 +586,32 @@ async def test_buy_yes_blocks_when_existing_plus_proposed_exceeds_cap(monkeypatc
     assert "position_cap_blocked" in result.notes
     cap_log = next(kwargs for event, kwargs in critical_logged if event == "hedge.cap_blocked")
     assert cap_log["action"] == "executor_position_cap_blocked_total"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 regression: backstop GTC order must not send reduce_only=True
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_place_limit_sell_gtc_no_reduce_only(monkeypatch):
+    """Regression: GTC backstop orders must NOT include reduce_only=True.
+
+    Kalshi rejects reduce_only on non-IoC orders with:
+    'reduce_only can only be used with IoC orders'
+    """
+    executor = _make_executor(
+        monkeypatch,
+        [FakeResponse(201, {"order": {"order_id": "bsp_001"}})],
+    )
+    order = OrderRequest("KXLOWTMIA-26AUG18-B81.5", OrderSide.SELL_YES, 50, 13)
+
+    result = await executor.place_limit_sell(order)
+    payload = executor._client.post_payloads[0]
+
+    assert result.success is True
+    assert result.order_id == "bsp_001"
+    assert payload["time_in_force"] == "good_till_canceled"
+    # reduce_only must be absent or False for GTC orders — Kalshi rejects True
+    assert not payload.get("reduce_only", False), (
+        "reduce_only must not be True on a GTC backstop order"
+    )
