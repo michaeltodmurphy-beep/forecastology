@@ -7319,7 +7319,7 @@ async def test_intraday_checkpoint_pending_then_confirmed(monkeypatch):
 
     # Simulate 65 s later (past the 60 s confirmation window)
     chk_key = (ticker, "12:00")
-    strategy._intraday_checkpoint_pending[chk_key] -= 65
+    strategy._intraday_checkpoint_pending[chk_key] = strategy._intraday_checkpoint_pending.get(chk_key, asyncio.get_event_loop().time()) - 65
 
     # Second call: should confirm and exit
     await strategy._run_intraday_exits(now_utc=now_utc)
@@ -7556,7 +7556,7 @@ async def test_hwm_exit_confirmed_after_two_reads(monkeypatch):
     assert any(ev == "hwm.exit_pending_confirmation" for ev, _ in logged)
 
     # Simulate 65 s later
-    strategy._hwm_pending[ticker] -= 65
+    strategy._hwm_pending[ticker] = strategy._hwm_pending.get(ticker, asyncio.get_event_loop().time()) - 65
 
     # Second call: confirmed → exit
     await strategy._run_intraday_exits(now_utc=now_utc)
