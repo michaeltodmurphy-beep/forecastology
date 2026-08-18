@@ -215,6 +215,58 @@ class SunriseEntryGate:
             )
         return SunriseGateDecision(allowed=True)
 
+    def evaluate_am_low_only(
+        self,
+        ticker: str,
+        now_utc: Optional[datetime.datetime] = None,
+    ) -> SunriseGateDecision:
+        """Evaluate only the AM-low deadline for **warm** tickers.
+
+        Warm-trade series should be able to enter *before sunrise* (so morning
+        moves are not missed) while still respecting the AM-low deadline that
+        says "the day's forecast low must occur before NWS_LOW_DEADLINE_HOUR
+        local".  This method applies only that check and skips the sunrise
+        time-window and temperature-rise latch.
+
+        Callers gate on :attr:`warm_trade_tickers` before calling this; the
+        local settle gate (``is_entry_allowed``) is still applied separately by
+        the state machine, as required.
+
+        Non-KXLOW tickers are always allowed (mirrors :meth:`evaluate`).
+        """
+        series = get_series_prefix(ticker)
+        if not series.startswith("KXLOW"):
+            return SunriseGateDecision(allowed=True)
+
+        coords = SERIES_STATION_COORDS.get(series)
+        if coords is None:
+            if series not in self._missing_coords_warned:
+                self._missing_coords_warned.add(series)
+                logger.warning("sunrise.no_coords_fallback", series=series, ticker=ticker)
+            return SunriseGateDecision(allowed=True, use_nws_window_fallback=True)
+
+        tz_name = get_series_timezone(ticker)
+        if tz_name is None:
+            return SunriseGateDecision(allowed=True, use_nws_window_fallback=True)
+        tz = ZoneInfo(tz_name)
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_local = now_utc.astimezone(tz)
+        local_date = now_local.date()
+
+        station_id, _lat, _lon = coords
+
+        # Only the AM-low deadline check applies to warm tickers. If the
+        # AM-low requirement is disabled, warm tickers are un-gated.
+        if not self.config.sunrise_require_am_low:
+            return SunriseGateDecision(allowed=True)
+
+        am_passed = self._check_am_low_forecast(
+            series, station_id, now_utc, now_local, local_date, tz
+        )
+        return SunriseGateDecision(allowed=am_passed)
+
     # ------------------------------------------------------------------
     # AM-low forecast check
     # ------------------------------------------------------------------

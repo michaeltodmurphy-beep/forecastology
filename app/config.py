@@ -341,6 +341,10 @@ class AppConfig(BaseSettings):
     monitor_start_price: int
     buy_trigger_price_low: int
     buy_trigger_price_high: int
+    # Optional warm-ticker override for LOW series (e.g. Dallas) that bypass the
+    # sunrise/NWS entry gate. 0 (default) means "use buy_trigger_price_low".
+    # Parsed by from_env() from BUY_TRIGGER_PRICE_LOW_WARM (dollars -> cents).
+    buy_trigger_price_low_warm: int = 0
     spread_monitor_price: int
     falling_knife_decay_minutes: int = 10
     minimum_spread: int
@@ -370,6 +374,11 @@ class AppConfig(BaseSettings):
     low_trades: bool = True
     high_trades: bool = True
     no_trade_tickers: Annotated[set[str], NoDecode] = set()
+    # Warm-trade series prefixes (uppercase CSV, e.g. KXLOWTDAL). These series
+    # bypass the sunrise/NWS entry gate (catching pre-sunrise moves) but still
+    # enforce the AM-low deadline (NWS_LOW_DEADLINE_HOUR) and the local settle
+    # gate. They also use their own warm buy trigger price. Parsed by from_env().
+    warm_trade_tickers: Annotated[set[str], NoDecode] = set()
     manage_external_positions: bool = False
     # ── City-local-time entry settle gate ───────────────────────────────────
     # Prevents new buy orders from being placed before the city's local clock
@@ -582,7 +591,7 @@ class AppConfig(BaseSettings):
     chase_max_minutes: int = 30
 
     @field_validator(
-        'buy_trigger_price_low', 'buy_trigger_price_high', 'spread_monitor_price', 'minimum_spread',
+        'buy_trigger_price_low', 'buy_trigger_price_high', 'buy_trigger_price_low_warm', 'spread_monitor_price', 'minimum_spread',
         'stop_loss_price_ask', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
@@ -604,7 +613,7 @@ class AppConfig(BaseSettings):
         # Already an int or float — it's already in cents
         return int(v)
 
-    @field_validator('no_trade_tickers', 'pm_tickers_close', mode='before')
+    @field_validator('no_trade_tickers', 'warm_trade_tickers', 'pm_tickers_close', mode='before')
     @classmethod
     def parse_upper_csv_set(cls, v):
         if not v:
@@ -688,6 +697,8 @@ class AppConfig(BaseSettings):
             os.getenv("ENABLE_LOCAL_SETTLE_GATE"), "ENABLE_LOCAL_SETTLE_GATE", default=True
         )
         no_trade_tickers_raw = os.getenv("NO_TRADE_TICKERS", "")
+        warm_trade_tickers_raw = os.getenv("WARM_TRADE_TICKERS", "")
+        buy_trigger_price_low_warm = os.getenv("BUY_TRIGGER_PRICE_LOW_WARM", "0")
         default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
         entry_gate_mode = _parse_entry_gate_mode(os.getenv("ENTRY_GATE_MODE"))
@@ -882,6 +893,7 @@ class AppConfig(BaseSettings):
             low_trades=low_trades,
             high_trades=high_trades,
             no_trade_tickers=no_trade_tickers_raw,
+            warm_trade_tickers=warm_trade_tickers_raw,
             manage_external_positions=manage_external_positions,
             enable_local_settle_gate=enable_local_settle_gate,
             default_entry_start_local=default_entry_start_local,
@@ -903,6 +915,7 @@ class AppConfig(BaseSettings):
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
             buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
+            buy_trigger_price_low_warm=buy_trigger_price_low_warm,
             minimum_spread=minimum_spread_raw,
             low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,
             low_ticker_closeout_time_et=low_ticker_closeout_time_et,

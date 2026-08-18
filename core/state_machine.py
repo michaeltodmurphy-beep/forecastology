@@ -69,9 +69,21 @@ def _parse_date_prefix(date_prefix: str) -> Optional[datetime.date]:
         return None
 
 
+def _is_warm_series(config: "AppConfig", market_ticker: str) -> bool:
+    """Return True if *market_ticker* belongs to a configured warm-trade series."""
+    warm = getattr(config, "warm_trade_tickers", None) or set()
+    if not warm:
+        return False
+    prefix = market_ticker.upper().split("-")[0]
+    return prefix in warm
+
+
 def get_buy_trigger_price(config: "AppConfig", market_ticker: str) -> Optional[int]:
     ticker_upper = market_ticker.upper()
     if "KXLOW" in ticker_upper:
+        warm_trigger = int(getattr(config, "buy_trigger_price_low_warm", 0) or 0)
+        if warm_trigger and _is_warm_series(config, market_ticker):
+            return warm_trigger
         return int(config.buy_trigger_price_low)
     if "KXHIGH" in ticker_upper:
         return int(config.buy_trigger_price_high)
@@ -2072,7 +2084,21 @@ class TemperatureStrategy:
             is_low = "KXLOW" in ticker_upper
             use_nws_window_for_low = True
             sunrise_gate_allowed = True
-            if should_evaluate_entry and is_low and self.config.entry_gate_mode == "SUNRISE":
+            is_warm_series = should_evaluate_entry and is_low and _is_warm_series(self.config, ticker)
+            if is_warm_series:
+                # Warm tickers: bypass the sunrise/NWS entry gate so morning
+                # (pre-sunrise) moves are not missed, but still enforce the
+                # AM-low deadline (NWS_LOW_DEADLINE_HOUR) so we only enter when
+                # the day's forecast low occurs in the local AM. The local
+                # settle gate (is_entry_allowed) is applied later and retained.
+                warm_am_decision = self._sunrise_entry_gate.evaluate_am_low_only(
+                    ticker=ticker,
+                    now_utc=now_utc,
+                )
+                if not warm_am_decision.allowed:
+                    continue
+                sunrise_gate_allowed = True
+            elif should_evaluate_entry and is_low and self.config.entry_gate_mode == "SUNRISE":
                 sunrise_decision = self._sunrise_entry_gate.evaluate(
                     ticker=ticker,
                     now_utc=now_utc,
@@ -2186,7 +2212,8 @@ class TemperatureStrategy:
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)
                 apply_nws_temp_gate = (
-                    _station is not None
+                    not is_warm_series
+                    and _station is not None
                     and (
                         not is_low
                         or self.config.entry_gate_mode == "NWS_WINDOW"
@@ -2381,24 +2408,30 @@ class TemperatureStrategy:
         _is_high = "KXHIGH" in _ticker_upper
         _is_low = "KXLOW" in _ticker_upper
         _use_nws_window_for_low_final = True
-        if _is_low and self.config.entry_gate_mode == "SUNRISE":
-            _sunrise_decision = self._sunrise_entry_gate.evaluate(
-                ticker=bracket.market_ticker,
-                now_utc=datetime.datetime.now(datetime.timezone.utc),
+        _is_warm_final = _is_low and _is_warm_series(self.config, bracket.market_ticker)
+        if _is_warm_final:
+            # Warm tickers: bypass the sunrise/NWS entry gate at this final
+            # boundary. The watchlist already enforced the AM-low deadline.
+            _apply_nws_gate_final = False
+        else:
+            if _is_low and self.config.entry_gate_mode == "SUNRISE":
+                _sunrise_decision = self._sunrise_entry_gate.evaluate(
+                    ticker=bracket.market_ticker,
+                    now_utc=datetime.datetime.now(datetime.timezone.utc),
+                )
+                if not _sunrise_decision.allowed:
+                    bracket.phase = Phase.MONITORING
+                    bracket.crossed_buy = False
+                    return
+                _use_nws_window_for_low_final = _sunrise_decision.use_nws_window_fallback
+            _apply_nws_gate_final = (
+                _gate_station is not None
+                and (
+                    not _is_low
+                    or self.config.entry_gate_mode == "NWS_WINDOW"
+                    or _use_nws_window_for_low_final
+                )
             )
-            if not _sunrise_decision.allowed:
-                bracket.phase = Phase.MONITORING
-                bracket.crossed_buy = False
-                return
-            _use_nws_window_for_low_final = _sunrise_decision.use_nws_window_fallback
-        _apply_nws_gate_final = (
-            _gate_station is not None
-            and (
-                not _is_low
-                or self.config.entry_gate_mode == "NWS_WINDOW"
-                or _use_nws_window_for_low_final
-            )
-        )
         if _apply_nws_gate_final:
             _gate_now_utc = datetime.datetime.now(datetime.timezone.utc)
             _gate_market_date = None
