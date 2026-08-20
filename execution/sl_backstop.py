@@ -21,6 +21,8 @@ the state machine before proceeding.
 """
 
 import asyncio
+import time
+import uuid
 import structlog
 from typing import Optional
 
@@ -35,10 +37,18 @@ _BACKSTOP_COI_PREFIX = "APP_BSP_"
 
 
 def backstop_client_order_id(ticker: str) -> str:
-    """Return a deterministic client_order_id for a ticker's backstop order."""
+    """Return a unique client_order_id for a ticker's backstop order.
+
+    A UUID4 suffix is appended so that each new placement has a guaranteed-
+    unique ID — Kalshi rejects re-use of a client_order_id even after the
+    original order has been cancelled.  The ``APP_BSP_`` prefix is preserved
+    so startup reconciliation can identify backstop orders by prefix match
+    via ``is_backstop_client_order_id``.
+    """
     # Sanitize ticker for use in ID (replace non-alphanum with _)
     safe = ticker.replace("-", "_").replace(".", "_")
-    return f"{_BACKSTOP_COI_PREFIX}{safe}"
+    unique_suffix = uuid.uuid4().hex[:12]
+    return f"{_BACKSTOP_COI_PREFIX}{safe}_{unique_suffix}"
 
 
 def is_backstop_client_order_id(client_order_id: str) -> bool:
