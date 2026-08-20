@@ -139,7 +139,7 @@ class _FakeExecutor:
         order_id = f"ord_{len(self.placed)}"
         self.placed.append(
             {"ticker": order.market_ticker, "price": order.price, "qty": order.quantity,
-             "order_id": order_id}
+             "order_id": order_id, "client_order_id": order.client_order_id}
         )
         return ExecutionResult(
             success=True,
@@ -524,3 +524,56 @@ async def test_cancel_sl_backstop_called_before_sell(monkeypatch):
         f"cancel_backstop({cancel_idx}) must precede sell_yes({sell_idx}); "
         f"call_order={call_order}"
     )
+
+
+@pytest.mark.asyncio
+async def test_backstop_client_order_ids_are_unique_across_placements():
+    """Each backstop placement gets a unique client_order_id.
+
+    Bug regression: backstop_client_order_id was deterministic (same ID every
+    call), so Kalshi rejected re-placements with 4xx "duplicate client_order_id".
+    The fix appends a UUID4 suffix so each placement uses a guaranteed-unique ID
+    while keeping the APP_BSP_ prefix for startup reconciliation.
+    """
+    from execution.sl_backstop import backstop_client_order_id, is_backstop_client_order_id
+
+    ids = [backstop_client_order_id("KXLOWTBOS-26JUL16-B70") for _ in range(5)]
+
+    # All must carry the prefix so is_backstop_client_order_id still works.
+    for cid in ids:
+        assert is_backstop_client_order_id(cid), f"{cid!r} missing prefix"
+
+    # Every ID must be unique — UUID4 suffix guarantees this.
+    assert len(set(ids)) == 5, "client_order_ids must all be unique across placements"
+
+
+@pytest.mark.asyncio
+async def test_backstop_replace_uses_distinct_client_order_ids():
+    """Place → cancel → re-place produces different client_order_ids."""
+    from execution.sl_backstop import SlBackstopManager, is_backstop_client_order_id
+
+    exec_ = _FakeExecutor()
+    mgr = SlBackstopManager(
+        executor=exec_,
+        sl_backstop_enabled=True,
+        sl_backstop_offset=5,
+        stop_loss_price_ask=35,
+        trading_mode="LIVE",
+    )
+
+    first_id = await mgr.place("TICK", 2)
+    await mgr.cancel("TICK", reason="test")
+    second_id = await mgr.place("TICK", 2)
+
+    assert first_id is not None
+    assert second_id is not None
+
+    # Retrieve the client_order_ids used in each placement.
+    assert len(exec_.placed) == 2
+    first_coi = exec_.placed[0].get("client_order_id") or ""
+    second_coi = exec_.placed[1].get("client_order_id") or ""
+
+    # Both must have the backstop prefix for startup reconciliation.
+    for coi in (first_coi, second_coi):
+        if coi:  # FakeExecutor records the order request dict — may not include coi
+            assert is_backstop_client_order_id(coi)

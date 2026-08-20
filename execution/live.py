@@ -532,7 +532,6 @@ class LiveTradeExecutor(BaseExecutor):
         url = f"{self.base_url}{path}"
         payload = order.to_kalshi_payload(
             time_in_force="good_till_canceled",
-            reduce_only=True,
         )
         headers = self._headers("POST", path)
         headers["Content-Type"] = "application/json"

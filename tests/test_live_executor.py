@@ -586,3 +586,52 @@ async def test_buy_yes_blocks_when_existing_plus_proposed_exceeds_cap(monkeypatc
     assert "position_cap_blocked" in result.notes
     cap_log = next(kwargs for event, kwargs in critical_logged if event == "hedge.cap_blocked")
     assert cap_log["action"] == "executor_position_cap_blocked_total"
+
+
+@pytest.mark.asyncio
+async def test_place_limit_sell_gtc_payload_no_reduce_only(monkeypatch):
+    """place_limit_sell sends a GTC payload without reduce_only=True.
+
+    Bug regression: the backstop GTC sell was rejected by Kalshi because
+    reduce_only is not accepted for resting GTC orders.  The fix removes
+    reduce_only from the place_limit_sell payload.
+    """
+    executor = _make_executor(
+        monkeypatch,
+        [FakeResponse(201, {"order": {"order_id": "bsp-001"}})],
+    )
+    order = OrderRequest("TICK", OrderSide.SELL_YES, 30, 5, client_order_id="APP_BSP_TICK_1234")
+
+    result = await executor.place_limit_sell(order)
+    payload = executor._client.post_payloads[0]
+
+    assert result.success is True
+    assert result.status == "RESTING"
+    assert payload["time_in_force"] == "good_till_canceled"
+    assert payload["side"] == "ask"
+    # reduce_only must be False (or absent) — resting GTC sells must not carry this flag.
+    assert payload.get("reduce_only") is False, (
+        "place_limit_sell must not send reduce_only=True for GTC backstop orders"
+    )
+
+
+@pytest.mark.asyncio
+async def test_place_limit_sell_gtc_vs_ioc_sell_yes_differ_in_tif(monkeypatch):
+    """Confirm place_limit_sell uses GTC while sell_yes uses IOC."""
+    executor_gtc = _make_executor(
+        monkeypatch,
+        [FakeResponse(201, {"order": {"order_id": "bsp-gtc"}})],
+    )
+    order_gtc = OrderRequest("TICK", OrderSide.SELL_YES, 30, 5)
+    await executor_gtc.place_limit_sell(order_gtc)
+    gtc_payload = executor_gtc._client.post_payloads[0]
+    assert gtc_payload["time_in_force"] == "good_till_canceled"
+
+    executor_ioc = _make_executor(
+        monkeypatch,
+        [FakeResponse(200, {"order_id": "sl-ioc", "fill": {"count": 5, "price": 30}})],
+    )
+    order_ioc = OrderRequest("TICK", OrderSide.SELL_YES, 30, 5)
+    await executor_ioc.sell_yes(order_ioc)
+    ioc_payload = executor_ioc._client.post_payloads[0]
+    assert ioc_payload["time_in_force"] == "immediate_or_cancel"
