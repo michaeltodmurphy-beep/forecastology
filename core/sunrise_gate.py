@@ -42,6 +42,7 @@ class SunriseGateDecision:
 class _TempRiseState:
     """Per-series mutable state for the temperature-rise latch."""
 
+    state_date: Optional[datetime.date] = None
     running_min_f: float = float("inf")
     latched: bool = False
     latch_baseline_f: Optional[float] = None
@@ -409,6 +410,17 @@ class SunriseEntryGate:
     ) -> bool:
         """Update the running-min / latch for *series* and return latch state."""
         state = self._rise_state.setdefault(series, _TempRiseState())
+        previous_date = state.state_date
+        if previous_date != local_date:
+            state = _TempRiseState(state_date=local_date)
+            self._rise_state[series] = state
+            if previous_date is not None:
+                logger.info(
+                    "sunrise.temp_rise_state_reset_new_day",
+                    series=series,
+                    previous_date=previous_date.isoformat(),
+                    new_date=local_date.isoformat(),
+                )
 
         # Fetch recent observations since baseline start
         start_iso = baseline_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")

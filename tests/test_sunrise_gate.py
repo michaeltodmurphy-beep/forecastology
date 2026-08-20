@@ -634,6 +634,152 @@ def test_temp_rise_latch_resets_on_new_running_minimum(monkeypatch):
     assert r2.allowed is False  # latch was reset
 
 
+def test_temp_rise_latched_state_resets_on_new_local_day(monkeypatch):
+    tz = ZoneInfo("America/New_York")
+    day_1 = datetime.date(2026, 8, 9)
+    day_2 = datetime.date(2026, 8, 10)
+    now_day_1 = datetime.datetime(2026, 8, 9, 10, 35, tzinfo=datetime.timezone.utc)
+    now_day_2 = datetime.datetime(2026, 8, 10, 10, 35, tzinfo=datetime.timezone.utc)
+    client = _FakeNWSClient(
+        obs_payload=_obs_features([
+            ("2026-08-09T09:50:00+00:00", 20.0),
+            ("2026-08-09T10:30:00+00:00", 20.56),
+        ]),
+        station_meta=(40.0, -74.0, "https://api.weather.gov/hourly", "America/New_York"),
+        forecast_periods=[],
+    )
+    gate = SunriseEntryGate(
+        _make_config(
+            sunrise_require_am_low=False,
+            sunrise_temp_rise_required=1.0,
+            sunrise_temp_baseline_minutes=15,
+            sunrise_require_temp_rising=False,
+            sunrise_strategy_time=30,
+            sunrise_entry_window_minutes=120,
+        ),
+        nws_client=client,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_get_sunrise_local",
+        lambda _series, _tz, local_date, *_args: (
+            datetime.datetime(local_date.year, local_date.month, local_date.day, 6, 0, tzinfo=tz),
+            "astral",
+        ),
+    )
+
+    result_day_1 = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_day_1)
+    assert result_day_1.allowed is True
+    assert gate._rise_state["KXLOWTNYC"].state_date == day_1
+    assert gate._rise_state["KXLOWTNYC"].latched is True
+
+    client.obs_payload = _obs_features([
+        ("2026-08-10T09:50:00+00:00", 20.0),
+        ("2026-08-10T10:30:00+00:00", 20.3),
+    ])
+    with capture_logs() as logs:
+        result_day_2 = gate.evaluate("KXLOWTNYC-26AUG10-B73.5", now_utc=now_day_2)
+
+    assert result_day_2.allowed is False
+    assert gate._rise_state["KXLOWTNYC"].state_date == day_2
+    assert gate._rise_state["KXLOWTNYC"].latched is False
+    assert any(
+        entry.get("event") == "sunrise.temp_rise_state_reset_new_day"
+        and entry.get("series") == "KXLOWTNYC"
+        and entry.get("previous_date") == day_1.isoformat()
+        and entry.get("new_date") == day_2.isoformat()
+        for entry in logs
+    )
+
+
+def test_temp_rise_running_min_resets_on_new_local_day(monkeypatch):
+    tz = ZoneInfo("America/New_York")
+    client = _FakeNWSClient(
+        obs_payload=_obs_features([
+            ("2026-08-09T09:50:00+00:00", 18.0),
+            ("2026-08-09T10:30:00+00:00", 18.1),
+        ]),
+        station_meta=(40.0, -74.0, "https://api.weather.gov/hourly", "America/New_York"),
+        forecast_periods=[],
+    )
+    gate = SunriseEntryGate(
+        _make_config(
+            sunrise_require_am_low=False,
+            sunrise_temp_rise_required=1.0,
+            sunrise_temp_baseline_minutes=15,
+            sunrise_require_temp_rising=False,
+            sunrise_strategy_time=30,
+            sunrise_entry_window_minutes=120,
+        ),
+        nws_client=client,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_get_sunrise_local",
+        lambda _series, _tz, local_date, *_args: (
+            datetime.datetime(local_date.year, local_date.month, local_date.day, 6, 0, tzinfo=tz),
+            "astral",
+        ),
+    )
+
+    first_result = gate.evaluate(
+        "KXLOWTNYC-26AUG09-B73.5",
+        now_utc=datetime.datetime(2026, 8, 9, 10, 35, tzinfo=datetime.timezone.utc),
+    )
+    assert first_result.allowed is False
+    assert gate._rise_state["KXLOWTNYC"].running_min_f == _c_to_f(18.0)
+
+    client.obs_payload = _obs_features([
+        ("2026-08-10T09:50:00+00:00", 20.0),
+        ("2026-08-10T10:30:00+00:00", 20.3),
+    ])
+    second_result = gate.evaluate(
+        "KXLOWTNYC-26AUG10-B73.5",
+        now_utc=datetime.datetime(2026, 8, 10, 10, 35, tzinfo=datetime.timezone.utc),
+    )
+    assert second_result.allowed is False
+    assert gate._rise_state["KXLOWTNYC"].running_min_f == _c_to_f(20.0)
+
+
+def test_temp_rise_latch_persists_within_same_day(monkeypatch):
+    tz = ZoneInfo("America/New_York")
+    client = _FakeNWSClient(
+        obs_payload=_obs_features([
+            ("2026-08-09T09:50:00+00:00", 20.0),
+            ("2026-08-09T10:30:00+00:00", 20.56),
+        ]),
+        station_meta=(40.0, -74.0, "https://api.weather.gov/hourly", "America/New_York"),
+        forecast_periods=[],
+    )
+    gate = SunriseEntryGate(
+        _make_config(
+            sunrise_require_am_low=False,
+            sunrise_temp_rise_required=1.0,
+            sunrise_temp_baseline_minutes=15,
+            sunrise_require_temp_rising=False,
+            sunrise_strategy_time=30,
+            sunrise_entry_window_minutes=120,
+        ),
+        nws_client=client,
+    )
+    fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)
+    monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed_sunrise, "astral"))
+
+    first_result = gate.evaluate(
+        "KXLOWTNYC-26AUG09-B73.5",
+        now_utc=datetime.datetime(2026, 8, 9, 10, 35, tzinfo=datetime.timezone.utc),
+    )
+    second_result = gate.evaluate(
+        "KXLOWTNYC-26AUG09-B73.5",
+        now_utc=datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc),
+    )
+
+    assert first_result.allowed is True
+    assert second_result.allowed is True
+    assert gate._rise_state["KXLOWTNYC"].state_date == datetime.date(2026, 8, 9)
+    assert gate._rise_state["KXLOWTNYC"].latched is True
+
+
 # ---------------------------------------------------------------------------
 # Monitoring window start/stop times
 # ---------------------------------------------------------------------------
