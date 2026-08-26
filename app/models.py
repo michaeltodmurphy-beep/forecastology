@@ -106,6 +106,9 @@ class Position(Base):
     # Order ID of the resting SL backstop order on the exchange (if placed).
     # NULL when no backstop is active.  Cleared on cancel or fill detection.
     sl_backstop_order_id = Column(String(100), nullable=True)
+    # Order ID of the resting take-profit sell order on the exchange (if placed).
+    # NULL when no profit-take order is active.  Cleared on cancel or fill.
+    profit_take_sell_order_id = Column(String(100), nullable=True)
 
 
 class PortfolioSnapshot(Base):

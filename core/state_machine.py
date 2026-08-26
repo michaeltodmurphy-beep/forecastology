@@ -20,6 +20,7 @@ from execution.base import BaseExecutor, ExecutionResult
 from execution.errors import TransientExecutionError, PermanentExecutionError
 from execution.sl_watcher import StopLossWatcher
 from execution.sl_backstop import SlBackstopManager
+from execution.profit_take_sell import ProfitTakeSellManager
 from app.database import DatabaseManager
 from app.config import AppConfig
 from app.config import _parse_intraday_schedule as _parse_intraday_schedule_cfg
@@ -241,6 +242,17 @@ class TemperatureStrategy:
                 sl_backstop_enabled=True,
                 sl_backstop_offset=int(getattr(config, "sl_backstop_offset", 5)),
                 stop_loss_price_ask=int(config.stop_loss_price_ask),
+                trading_mode=config.trading_mode,
+            )
+
+        # Resting "take-profit" limit-sell manager (opt-in via config).  Places
+        # a GTC SELL_YES order at a fixed high price (default 99¢) after entry.
+        self.profit_take: Optional[ProfitTakeSellManager] = None
+        if getattr(config, "profit_take_sell_enabled", False):
+            self.profit_take = ProfitTakeSellManager(
+                executor=executor,
+                profit_take_sell_enabled=True,
+                profit_take_sell_price=int(getattr(config, "profit_take_sell_price", 99)),
                 trading_mode=config.trading_mode,
             )
 
@@ -1177,8 +1189,6 @@ class TemperatureStrategy:
         Respects app-owned quantity semantics ΓÇö only app_owned_qty contracts
         are protected.  No-op when SL_BACKSTOP_ENABLED=false or PAPER mode.
         """
-        if self.sl_backstop is None or not self.sl_backstop.enabled:
-            return
         ticker = bracket.market_ticker
         if qty is None:
             _, app_owned_qty, _ = self._managed_exit_quantity(
@@ -1187,22 +1197,35 @@ class TemperatureStrategy:
             qty = app_owned_qty
         if qty <= 0:
             return
-        order_id = await self.sl_backstop.place(ticker, qty)
-        # Persist the order ID to the DB so restarts can find it.
-        if order_id is not None:
-            await self._persist_backstop_order_id(ticker, order_id)
+        # Place (or replace) the resting disaster backstop for the app-owned qty.
+        if self.sl_backstop is not None and self.sl_backstop.enabled:
+            bsp_id = await self.sl_backstop.place(ticker, qty)
+            if bsp_id is not None:
+                await self._persist_backstop_order_id(ticker, bsp_id)
+        # Place (or replace) the resting take-profit sell for the app-owned qty.
+        if self.profit_take is not None and self.profit_take.enabled:
+            pts_id = await self.profit_take.place(ticker, qty)
+            if pts_id is not None:
+                await self._persist_profit_take_order_id(ticker, pts_id)
 
     async def _cancel_sl_backstop(self, ticker: str, *, reason: str = "exit") -> bool:
         """Cancel the backstop order for *ticker* and await confirmation.
 
         Must be awaited and return True before an exit sell is placed to
         prevent overselling.  Returns True if no backstop is active.
+
+        Also cancels the resting take-profit sell order for the same ticker
+        so no resting order can double-sell alongside the reactive exit.
         """
-        if self.sl_backstop is None or not self.sl_backstop.enabled:
-            return True
-        ok = await self.sl_backstop.cancel(ticker, reason=reason)
-        if ok:
-            await self._persist_backstop_order_id(ticker, None)
+        ok = True
+        if self.sl_backstop is not None and self.sl_backstop.enabled:
+            ok = await self.sl_backstop.cancel(ticker, reason=reason)
+            if ok:
+                await self._persist_backstop_order_id(ticker, None)
+        if ok and self.profit_take is not None and self.profit_take.enabled:
+            ok = await self.profit_take.cancel(ticker, reason=reason)
+            if ok:
+                await self._persist_profit_take_order_id(ticker, None)
         return ok
 
     async def _persist_backstop_order_id(
@@ -1220,6 +1243,26 @@ class TemperatureStrategy:
         except Exception as exc:
             logger.warning(
                 "sl.backstop_persist_order_id_failed",
+                ticker=ticker,
+                order_id=order_id,
+                error=str(exc),
+            )
+
+    async def _persist_profit_take_order_id(
+        self, ticker: str, order_id: Optional[str]
+    ) -> None:
+        """Update Position.profit_take_sell_order_id in the DB (best-effort)."""
+        try:
+            async with await self.db.get_session() as session:
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.market_ticker == ticker)
+                    .values(profit_take_sell_order_id=order_id)
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(
+                "profit_take.persist_order_id_failed",
                 ticker=ticker,
                 order_id=order_id,
                 error=str(exc),
@@ -1575,6 +1618,20 @@ class TemperatureStrategy:
                                 order_id=existing_bsp_id,
                                 source="startup_live_positions",
                             )
+                    # Adopt any persisted take-profit sell order the same way.
+                    if self.profit_take is not None:
+                        db_pos_rec = db_by_ticker.get(ticker)
+                        existing_pts_id = (
+                            getattr(db_pos_rec, "profit_take_sell_order_id", None) or None
+                        )
+                        if existing_pts_id:
+                            self.profit_take.set_order_id(ticker, existing_pts_id)
+                            logger.info(
+                                "profit_take.orphan_adopted",
+                                ticker=ticker,
+                                order_id=existing_pts_id,
+                                source="startup_live_positions",
+                            )
                     await self._register_stop_loss_watcher(bracket)
                     logger.info("strategy.restored_live_position", ticker=ticker,
                                 qty=qty, entry=bracket.avg_entry, entry_source=entry_source,
@@ -1648,6 +1705,17 @@ class TemperatureStrategy:
                         "sl.backstop_orphan_adopted",
                         ticker=ticker,
                         order_id=existing_bsp_id,
+                        source="startup_db_positions",
+                    )
+            # Adopt any persisted take-profit sell order the same way.
+            if self.profit_take is not None:
+                existing_pts_id = getattr(pos, "profit_take_sell_order_id", None) or None
+                if existing_pts_id:
+                    self.profit_take.set_order_id(ticker, existing_pts_id)
+                    logger.info(
+                        "profit_take.orphan_adopted",
+                        ticker=ticker,
+                        order_id=existing_pts_id,
                         source="startup_db_positions",
                     )
             await self._register_stop_loss_watcher(bracket)
@@ -2645,6 +2713,8 @@ class TemperatureStrategy:
                     pos.last_price = reconciled_fill_price
                     if self.sl_backstop is not None:
                         pos.sl_backstop_order_id = self.sl_backstop.get_order_id(bracket.market_ticker)
+                    if self.profit_take is not None:
+                        pos.profit_take_sell_order_id = self.profit_take.get_order_id(bracket.market_ticker)
                 else:
                     # Insert new position
                     pos = PositionModel(
@@ -2658,6 +2728,10 @@ class TemperatureStrategy:
                         sl_backstop_order_id=(
                             self.sl_backstop.get_order_id(bracket.market_ticker)
                             if self.sl_backstop is not None else None
+                        ),
+                        profit_take_sell_order_id=(
+                            self.profit_take.get_order_id(bracket.market_ticker)
+                            if self.profit_take is not None else None
                         ),
                     )
                     session.add(pos)
@@ -3970,6 +4044,8 @@ class TemperatureStrategy:
                         pos.last_price = entry
                     if self.sl_backstop is not None:
                         pos.sl_backstop_order_id = self.sl_backstop.get_order_id(ticker)
+                    if self.profit_take is not None:
+                        pos.profit_take_sell_order_id = self.profit_take.get_order_id(ticker)
                 else:
                     pos = PositionModel(
                         market_ticker=ticker,
@@ -3982,6 +4058,10 @@ class TemperatureStrategy:
                         sl_backstop_order_id=(
                             self.sl_backstop.get_order_id(ticker)
                             if self.sl_backstop is not None else None
+                        ),
+                        profit_take_sell_order_id=(
+                            self.profit_take.get_order_id(ticker)
+                            if self.profit_take is not None else None
                         ),
                     )
                     session.add(pos)

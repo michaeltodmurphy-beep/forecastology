@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS positions (
     last_price INT DEFAULT NULL,
     unrealized_pnl INT DEFAULT NULL,
     position_ts DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    sl_backstop_order_id VARCHAR(100) DEFAULT NULL,
+    profit_take_sell_order_id VARCHAR(100) DEFAULT NULL,
     INDEX idx_market_ticker (market_ticker)
 ) ENGINE=InnoDB;
 

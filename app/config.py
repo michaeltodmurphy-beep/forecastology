@@ -541,6 +541,20 @@ class AppConfig(BaseSettings):
     sl_backstop_enabled: bool = False
     # Default 5¢ (stored as int cents; converted from dollars via validator)
     sl_backstop_offset: int = 5
+    # ── Resting "take-profit" limit-sell ─────────────────────────────────────
+    # Places a resting GTC SELL_YES limit order on the exchange at a fixed HIGH
+    # price (default 99¢) right after an entry fills.  If the market trades up
+    # to that price, the order fills automatically (zero round-trip latency),
+    # locking in the profit.  This is the mirror image of the SL backstop and is
+    # cancelled before every reactive sell to prevent overselling.
+    #
+    # PROFIT_TAKE_SELL_ENABLED=true|false  (default: false — opt-in)
+    # PROFIT_TAKE_SELL_PRICE=<dollars>     (default: 0.99 → 99¢)
+    #
+    # Parsed by from_env().
+    profit_take_sell_enabled: bool = False
+    # Default 99¢ (stored as int cents; converted from dollars via validator)
+    profit_take_sell_price: int = 99
     # ── Intraday checkpoint exits ────────────────────────────────────────────
     # At each configured local-time checkpoint, checks the YES ask for held
     # KXLOW* positions.  If the ask is below the checkpoint's threshold, a
@@ -595,7 +609,7 @@ class AppConfig(BaseSettings):
         'stop_loss_price_ask', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
-        'hwm_arm_price', 'hwm_exit_price',
+        'hwm_arm_price', 'hwm_exit_price', 'profit_take_sell_price',
         mode='before'
     )
     @classmethod
