@@ -421,6 +421,12 @@ class AppConfig(BaseSettings):
     sunrise_source: Literal["astral", "api"] = "astral"
     sunrise_require_am_low: bool = True
     nws_low_deadline_hour: int = 12
+    # Local hour (24h) at/after which the day's NWS forecast low is snapshotted
+    # ONCE per local calendar date and locked in for the rest of the day.
+    # This prevents NWS mid-day forecast drift from overwriting the real
+    # morning low (which would wrongly block otherwise-valid entries).
+    # Parsed from AM_LOW_SNAPSHOT_LOCAL_HOUR (HH or HH:MM). Default 3 (03:00).
+    am_low_snapshot_local_hour: int = 3
     sunrise_temp_rise_required: float = 1.0
     sunrise_temp_baseline_minutes: int = 15
     sunrise_obs_max_age_minutes: int = 15
@@ -760,6 +766,30 @@ class AppConfig(BaseSettings):
                 message="NWS_LOW_DEADLINE_HOUR must be 0–23; defaulting to 12",
             )
             nws_low_deadline_hour = 12
+        # AM-low snapshot local hour: "HH" or "HH:MM" -> integer hour (0-23).
+        # Default 3 = 03:00 local. The day's NWS forecast low is locked in once
+        # at/after this local hour.
+        am_low_snapshot_local_hour_raw = os.getenv("AM_LOW_SNAPSHOT_LOCAL_HOUR", "")
+        am_low_snapshot_local_hour = 3
+        if am_low_snapshot_local_hour_raw and am_low_snapshot_local_hour_raw.strip():
+            try:
+                _snap_hh = int(am_low_snapshot_local_hour_raw.strip().split(":")[0])
+                if 0 <= _snap_hh <= 23:
+                    am_low_snapshot_local_hour = _snap_hh
+                else:
+                    logger.warning(
+                        "config.am_low_snapshot_local_hour_out_of_range",
+                        raw=am_low_snapshot_local_hour_raw,
+                        fallback=3,
+                        message="AM_LOW_SNAPSHOT_LOCAL_HOUR must be a 0–23 hour; defaulting to 3",
+                    )
+            except (ValueError, IndexError):
+                logger.warning(
+                    "config.am_low_snapshot_local_hour_invalid",
+                    raw=am_low_snapshot_local_hour_raw,
+                    fallback=3,
+                    message="Invalid AM_LOW_SNAPSHOT_LOCAL_HOUR; defaulting to 3",
+                )
         sunrise_temp_rise_required_raw = os.getenv("SUNRISE_TEMP_RISE_REQUIRED")
         sunrise_temp_rise_required: float = 1.0
         if sunrise_temp_rise_required_raw is not None and sunrise_temp_rise_required_raw.strip():
@@ -919,6 +949,7 @@ class AppConfig(BaseSettings):
             sunrise_source=sunrise_source,
             sunrise_require_am_low=sunrise_require_am_low,
             nws_low_deadline_hour=nws_low_deadline_hour,
+            am_low_snapshot_local_hour=am_low_snapshot_local_hour,
             sunrise_temp_rise_required=sunrise_temp_rise_required,
             sunrise_temp_baseline_minutes=sunrise_temp_baseline_minutes,
             sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,

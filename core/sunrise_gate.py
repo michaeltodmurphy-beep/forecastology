@@ -57,8 +57,9 @@ class SunriseEntryGate:
         self.config = config
         self.nws_client = nws_client or NWSClient()
         self._sunrise_cache: dict[tuple[str, datetime.date], tuple[datetime.datetime, str]] = {}
-        # AM-low forecast cache: series -> (fetch_monotonic, passed: bool, min_temp_f, min_time_local_iso)
-        self._am_low_cache: dict[tuple[str, datetime.date], tuple[float, bool, Optional[float], Optional[str]]] = {}
+        # AM-low forecast cache: series -> (locked: bool, passed: bool,
+        #   min_temp_f, min_time_local_iso, cached_at_monotonic)
+        self._am_low_cache: dict[tuple[str, datetime.date], tuple[bool, bool, Optional[float], Optional[str], float]] = {}
         # Temp-rise latch state: series -> _TempRiseState
         self._rise_state: dict[str, _TempRiseState] = {}
         self._logged_gate_open: set[tuple[str, datetime.date]] = set()
@@ -282,21 +283,28 @@ class SunriseEntryGate:
         tz: ZoneInfo,
     ) -> bool:
         """Return True iff the NWS hourly forecast day-low is before the deadline hour."""
+        # The day's AM-low decision is snapshotted ONCE per local calendar date
+        # at/after AM_LOW_SNAPSHOT_LOCAL_HOUR (default 03:00) and then LOCKED for
+        # the rest of that day.  This prevents NWS mid-day forecast drift from
+        # overwriting the real morning low with a later-day low (which would
+        # wrongly block otherwise-valid entries).
         cache_key = (series, local_date)
         now_mono = time.monotonic()
         cached = self._am_low_cache.get(cache_key)
-        if cached is not None and now_mono - cached[0] < _AM_LOW_CACHE_TTL_SECONDS:
-            passed, min_temp_f, min_time_iso = cached[1], cached[2], cached[3]
-            logger.debug(
-                "sunrise.am_low_check",
-                series=series,
-                forecast_min_temp_f=min_temp_f,
-                min_time_local=min_time_iso,
-                deadline_hour=self.config.nws_low_deadline_hour,
-                passed=passed,
-                cached=True,
-            )
-            return passed
+        if cached is not None:
+            _locked, passed, min_temp_f, min_time_iso, _cached_at = cached
+            if _locked or (now_mono - _cached_at < _AM_LOW_CACHE_TTL_SECONDS):
+                logger.debug(
+                    "sunrise.am_low_check",
+                    series=series,
+                    forecast_min_temp_f=min_temp_f,
+                    min_time_local=min_time_iso,
+                    deadline_hour=self.config.nws_low_deadline_hour,
+                    passed=passed,
+                    cached=True,
+                    locked=_locked,
+                )
+                return passed
 
         try:
             _lat, _lon, hourly_url, _tz_name = self.nws_client._get_station_metadata(station_id)  # noqa: SLF001
@@ -309,7 +317,7 @@ class SunriseEntryGate:
                 error_class=type(exc).__name__,
                 error_message=str(exc),
             )
-            self._am_low_cache[cache_key] = (now_mono, False, None, None)
+            self._am_low_cache[cache_key] = (False, False, None, None, now_mono)
             return False
 
         try:
@@ -323,7 +331,7 @@ class SunriseEntryGate:
                 error_class=type(exc).__name__,
                 error_message=str(exc),
             )
-            self._am_low_cache[cache_key] = (now_mono, False, None, None)
+            self._am_low_cache[cache_key] = (False, False, None, None, now_mono)
             return False
 
         # Find the minimum temperature period within the LOCAL calendar day
@@ -366,7 +374,7 @@ class SunriseEntryGate:
                 reason="no_periods_for_local_date",
                 local_date=local_date.isoformat(),
             )
-            self._am_low_cache[cache_key] = (now_mono, False, None, None)
+            self._am_low_cache[cache_key] = (False, False, None, None, now_mono)
             return False
 
         deadline_hour = int(self.config.nws_low_deadline_hour)
@@ -391,7 +399,19 @@ class SunriseEntryGate:
                 deadline_hour=deadline_hour,
             )
 
-        self._am_low_cache[cache_key] = (now_mono, passed, round(min_temp_f, 1), min_time_iso)
+        # Lock the decision for the whole rest of the local date once we are at
+        # or past the configured snapshot hour (default 03:00). Before that, store
+        # it as a mutable provisional (still TTL-guarded) so the overnight window
+        # is not left blind, but it will be recomputed and frozen at the snapshot.
+        snapshot_hour = int(getattr(self.config, "am_low_snapshot_local_hour", 3) or 3)
+        lock_for_day = now_local.hour >= snapshot_hour
+        self._am_low_cache[cache_key] = (
+            lock_for_day,
+            passed,
+            round(min_temp_f, 1),
+            min_time_iso,
+            now_mono,
+        )
         return passed
 
     # ------------------------------------------------------------------
