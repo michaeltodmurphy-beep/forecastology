@@ -147,10 +147,22 @@ class ProfitTakeSellManager:
             return None
 
         async with self._lock:
-            # Cancel existing order first if there is one.
+            # Cancel existing order first if there is one.  We must NOT place a
+            # new resting sell while an old one may still be live on the book —
+            # doing so would stack multiple pending GTC sells for the same
+            # position.  Only proceed to (re)place if the old order is confirmed
+            # cancelled; otherwise keep tracking the old order id and abort.
             current_id = existing_order_id or self._order_ids.get(ticker)
             if current_id:
-                await self._cancel_one(ticker, current_id, reason="replace")
+                replaced = await self._cancel_one(ticker, current_id, reason="replace")
+                if not replaced:
+                    logger.warning(
+                        "profit_take.replace_cancel_failed_skip_place",
+                        ticker=ticker,
+                        order_id=current_id,
+                        reason="old_order_may_still_be_live",
+                    )
+                    return None
                 self._order_ids.pop(ticker, None)
 
             price = self._price
