@@ -403,7 +403,11 @@ class SunriseEntryGate:
         # or past the configured snapshot hour (default 03:00). Before that, store
         # it as a mutable provisional (still TTL-guarded) so the overnight window
         # is not left blind, but it will be recomputed and frozen at the snapshot.
-        snapshot_hour = int(getattr(self.config, "am_low_snapshot_local_hour", 3) or 3)
+        _raw = getattr(self.config, "am_low_snapshot_local_hour", "03:00") or "03:00"
+        try:
+            snapshot_hour = int(str(_raw).strip().split(":")[0])
+        except (ValueError, TypeError, IndexError):
+            snapshot_hour = 3
         lock_for_day = now_local.hour >= snapshot_hour
         self._am_low_cache[cache_key] = (
             lock_for_day,
