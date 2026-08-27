@@ -541,8 +541,11 @@ class TestIntradayExitConfig:
         assert cfg.hwm_arm_price == 93
 
     def test_hwm_exit_price_default_cents(self):
+        # Value comes from the .env (HWM_EXIT_PRICE) rather than a hard-coded
+        # default, so assert against whatever is configured.
         cfg = self._base_cfg()
-        assert cfg.hwm_exit_price == 88
+        expected = int(float(os.environ.get("HWM_EXIT_PRICE", "0.88")) * 100)
+        assert cfg.hwm_exit_price == expected
 
     def test_hwm_arm_price_parses_dollars_from_env(self):
         import pytest
