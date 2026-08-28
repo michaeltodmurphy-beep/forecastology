@@ -1699,7 +1699,7 @@ class TemperatureStrategy:
             # can cancel+replace it rather than creating a duplicate.
             if self.sl_backstop is not None:
                 existing_bsp_id = getattr(pos, "sl_backstop_order_id", None) or None
-                if existing_bsp_id:
+                if existing_bsp_id and self.sl_backstop.get_order_id(ticker) is None:
                     self.sl_backstop.set_order_id(ticker, existing_bsp_id)
                     logger.info(
                         "sl.backstop_orphan_adopted",
@@ -1710,7 +1710,7 @@ class TemperatureStrategy:
             # Adopt any persisted take-profit sell order the same way.
             if self.profit_take is not None:
                 existing_pts_id = getattr(pos, "profit_take_sell_order_id", None) or None
-                if existing_pts_id:
+                if existing_pts_id and self.profit_take.get_order_id(ticker) is None:
                     self.profit_take.set_order_id(ticker, existing_pts_id)
                     logger.info(
                         "profit_take.orphan_adopted",
@@ -3553,6 +3553,7 @@ class TemperatureStrategy:
                 logger.error("phase.c.get_positions_failed", error=str(e))
         api_positions = self._positions_api_cache
         await self._adopt_untracked_exchange_fills(api_positions)
+        await self._reconcile_resting_exit_orders()
         if not self.active_positions:
             return
 
@@ -3907,6 +3908,7 @@ class TemperatureStrategy:
                     bracket.phase = Phase.CLOSED
                     self.active_positions.pop(ticker, None)
                     self.brackets.pop(ticker, None)
+                    await self._cancel_sl_backstop(ticker, reason="position_closed")
                     logger.info("phase.c.stop_loss_zero_qty", ticker=ticker)
                     continue
                 managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
@@ -4083,6 +4085,37 @@ class TemperatureStrategy:
                     prior_phase=prior_phase,
                 )
 
+    async def _reconcile_resting_exit_orders(self) -> None:
+        """Detect fills/cancellations of resting backstop and profit-take orders.
+
+        The exchange reports when a resting limit sell (backstop or .99
+        take-profit) fills, expires, or is cancelled on its own.  The managers'
+        `check_fill` reconciles the in-memory order id with that reality so we
+        never keep a stale id that would later be cancelled in place of the real
+        live order (which would leave the live sell orphaned).  On detection we
+        also sync the DB so restart adoption sees no stale id.
+        """
+        cooldown_s = 10
+        now = asyncio.get_event_loop().time()
+        last_checks = getattr(self, "_resting_order_last_checked", {})
+        for ticker in list(self.active_positions.keys()):
+            if now - last_checks.get(ticker, 0) < cooldown_s:
+                continue
+            last_checks[ticker] = now
+            # Profit-take (.99) resting sell
+            if self.profit_take is not None and self.profit_take.enabled:
+                if self.profit_take.get_order_id(ticker) is not None:
+                    await self.profit_take.check_fill(ticker)
+                    if self.profit_take.get_order_id(ticker) is None:
+                        await self._persist_profit_take_order_id(ticker, None)
+            # Disaster backstop resting sell
+            if self.sl_backstop is not None and self.sl_backstop.enabled:
+                if self.sl_backstop.get_order_id(ticker) is not None:
+                    await self.sl_backstop.check_fill(ticker)
+                    if self.sl_backstop.get_order_id(ticker) is None:
+                        await self._persist_backstop_order_id(ticker, None)
+        self._resting_order_last_checked = last_checks
+
     async def _execute_stop_loss(
         self,
         bracket: MarketBracket,
@@ -4138,6 +4171,7 @@ class TemperatureStrategy:
             self.brackets.pop(bracket.market_ticker, None)
             self._app_owned_qty.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
+            await self._cancel_sl_backstop(bracket.market_ticker, reason="position_closed")
             return True
 
         # Create or transition the idempotency record directly to SUBMITTED.
@@ -4315,6 +4349,7 @@ class TemperatureStrategy:
             self.brackets.pop(bracket.market_ticker, None)
             self._app_owned_qty.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
+            await self._cancel_sl_backstop(bracket.market_ticker, reason="position_closed")
             if trigger_ts_ms is not None:
                 logger.info(
                     "sl.position_gone",
@@ -4368,6 +4403,7 @@ class TemperatureStrategy:
             self.brackets.pop(bracket.market_ticker, None)
             self._app_owned_qty.pop(bracket.market_ticker, None)
             await self._unregister_stop_loss_watcher(bracket.market_ticker)
+            await self._cancel_sl_backstop(bracket.market_ticker, reason="position_closed")
             logger.info("phase.c.stop_loss_executed", ticker=bracket.market_ticker,
                         action_key=action_key,
                         price=result.fill_price, proceeds=-result.total_cost_cents,
@@ -5176,6 +5212,7 @@ class TemperatureStrategy:
         self.brackets.pop(ticker, None)
         self._app_owned_qty.pop(ticker, None)
         await self._unregister_stop_loss_watcher(ticker)
+        await self._cancel_sl_backstop(ticker, reason="position_closed")
 
         asyncio.create_task(
             self._update_exit_outcome(
