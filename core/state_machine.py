@@ -13,6 +13,7 @@ from core.types import (
 from core.constants import WEATHER_CATEGORY, get_eastern_today_date_prefix
 from core.local_time_gate import is_entry_allowed, get_series_station_code, get_series_timezone
 from core.sunrise_gate import SunriseEntryGate
+from nws.daily_brief import DailyBriefGate, SERIES_CITY as DAILY_BRIEF_SERIES_CITY
 from core.log_dedupe import DedupeLogger
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
@@ -290,6 +291,7 @@ class TemperatureStrategy:
         self._nws_gate_cache: dict[tuple[str, str | None], tuple[float, bool, bool]] = {}
         self._nws_gate_cache_refresh_seconds = 30
         self._sunrise_entry_gate = SunriseEntryGate(config)
+        self._am_low_brief_gate = DailyBriefGate(config)
         self._log_dedupe = DedupeLogger(summary_interval_seconds=300)
 
         # Bounded queue for non-blocking trade-log persistence (Change B).
@@ -2183,6 +2185,26 @@ class TemperatureStrategy:
                     use_nws_window_for_low = sunrise_decision.use_nws_window_fallback
             self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
 
+            # --- AM-low daily-brief keyword gate (Low tickers only) ---
+            # When AM_LOW_FORECAST is configured, block any KXLOW entry for a
+            # series whose city's NWS **daily brief** forecast contains a
+            # keyword (case-insensitive; ANY single match gates).  Applies to
+            # all KXLOW series regardless of warm/sunrise mode.  KXHIGH* are
+            # never affected.  Fails open on fetch error.
+            am_low_forecast_blocked = False
+            am_low_forecast_matched: set[str] = set()
+            if (
+                is_low
+                and should_evaluate_entry
+                and self.config.am_low_forecast_keywords
+            ):
+                _series_prefix = ticker_upper.split("-")[0]
+                if _series_prefix in DAILY_BRIEF_SERIES_CITY:
+                    am_low_forecast_blocked, am_low_forecast_matched = (
+                        self._am_low_brief_gate.get_block(_series_prefix, now_utc=now_utc)
+                    )
+
+
             if not should_evaluate_entry:
                 continue
 
@@ -2232,6 +2254,15 @@ class TemperatureStrategy:
                 continue
 
             if not sunrise_gate_allowed:
+                continue
+            if am_low_forecast_blocked:
+                logger.info(
+                    "phase.b.entry_blocked_am_low_forecast",
+                    ticker=ticker,
+                    series_prefix=_series_prefix,
+                    matched=sorted(am_low_forecast_matched),
+                    message="AM_LOW_FORECAST daily-brief keyword gate blocked KXLOW entry",
+                )
                 continue
 
             if spread <= self.config.minimum_spread:

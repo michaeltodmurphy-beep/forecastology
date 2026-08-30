@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -22,8 +22,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.models import StationForecast
 from nws.client import NWSClient
 from nws.config import HIGH_LOW_UPDATE, NWS_USER_AGENT
+from nws.daily_brief import CITY_COORDS, SERIES_CITY
 from nws.db import get_session, init_nws_db
 from nws.stations import STATIONS
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 logger = logging.getLogger("forecastology.nws.scheduler")
 
@@ -157,16 +163,24 @@ def start_scheduler() -> None:
         misfire_grace_time=120,
     )
 
-    # Whitelist guard: assert only the forecast-update job is registered.
+    # Whitelist guard: assert only allowed forecast-data jobs are registered.
     # This prevents accidental introduction of sell/exit scheduler jobs —
     # especially any periodic ask-lowering sell trigger, which must not exist.
-    _ALLOWED_JOB_IDS = {"nws_high_low_updater"}
+    # ``daily_brief_*`` jobs are data fetches for the AM-low keyword gate and are
+    # permitted here.
+    _PREFIX_ALLOWED = ("nws_high_low_updater",)
     registered_ids = {j.id for j in _scheduler.get_jobs()}
-    unexpected = registered_ids - _ALLOWED_JOB_IDS
+    unexpected = {
+        jid
+        for jid in registered_ids
+        if not (
+            jid == _PREFIX_ALLOWED[0] or jid.startswith("daily_brief_")
+        )
+    }
     if unexpected:  # pragma: no cover
         raise RuntimeError(
             f"NWS scheduler has unexpected jobs: {unexpected}. "
-            "Only forecast-update jobs are permitted; sell/exit jobs must NOT "
+            "Only forecast/data-fetch jobs are permitted; sell/exit jobs must NOT "
             "be registered in this scheduler."
         )
 
@@ -174,6 +188,89 @@ def start_scheduler() -> None:
     logger.info(
         "nws.scheduler.started interval_minutes=%s", HIGH_LOW_UPDATE
     )
+
+
+# ---------------------------------------------------------------------------
+# Daily-brief keyword-gate scheduler
+# ---------------------------------------------------------------------------
+
+def _next_local_hour_utc(tz_name: str, hour: int, now_utc: datetime) -> datetime:
+    """Return the next UTC instant where the given *tz* has local time == *hour*:00.
+
+    If today's *hour* has not yet passed, returns today's occurrence at *hour*:00;
+    otherwise returns tomorrow's.
+    """
+    tz = ZoneInfo(tz_name)
+    now_local = now_utc.astimezone(tz)
+    candidate = datetime.combine(
+        now_local.date(), time(hour, 0), tzinfo=tz
+    )
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+
+
+def schedule_daily_brief_jobs() -> None:
+    """Register one-shot jobs that pull each city's NWS daily brief once per day.
+
+    Each job fires at that city's local ``AM_LOW_SNAPSHOT_LOCAL_HOUR``.  The
+    ``DailyBriefGate`` is independently restart-safe (lazy fetch on first query),
+    so a missed schedule never leaves trading blind.
+    """
+    global _scheduler
+    if _scheduler is None or not _scheduler.running:
+        logger.warning("nws.daily_brief.scheduler_not_running")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+
+    for series, city in SERIES_CITY.items():
+        coords = CITY_COORDS.get(city)
+        if coords is None:
+            logger.warning("nws.daily_brief.no_coords", series=series, city=city)
+            continue
+        # Resolve the timezone via core.local_time_gate.SERIES_TIMEZONE.
+        try:
+            from core.local_time_gate import SERIES_TIMEZONE
+            tz_name = SERIES_TIMEZONE.get(series)
+        except Exception:  # noqa: BLE001
+            tz_name = None
+        if tz_name is None:
+            logger.warning("nws.daily_brief.no_tz", series=series, city=city)
+            continue
+
+        run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
+        _scheduler.add_job(
+            _run_daily_brief_snapshot,
+            trigger="date",
+            run_date=run_at,
+            args=[series, city, coords[0], coords[1]],
+            id=f"daily_brief_{series}",
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+        logger.info(
+            "nws.daily_brief.scheduled", series=series, city=city,
+            local=tz_name, run_utc=run_at.isoformat(),
+        )
+
+
+def _snapshot_hour_int() -> int:
+    """Return the configured AM-low snapshot hour (int) from the env."""
+    import os
+    raw = os.getenv("AM_LOW_SNAPSHOT_LOCAL_HOUR", "")
+    try:
+        hh = int(raw.strip().split(":")[0])
+        return hh if 0 <= hh <= 23 else 3
+    except (ValueError, IndexError, TypeError, AttributeError):
+        return 3
+
+
+def _run_daily_brief_snapshot(series: str, city: str, lat: float, lon: float) -> None:
+    """APScheduler job entry: fetch + persist the daily brief for a city."""
+    from nws.daily_brief import snapshot_city
+    snapshot_city(series=series, city=city, lat=lat, lon=lon)
 
 
 def shutdown() -> None:
@@ -194,7 +291,10 @@ def bootstrap() -> None:
     Intended to be called from the application entry point (e.g. ``run.py``)
     before the main trading loop begins, so that gate data is available from
     the first second of operation.
+
+    Also schedules the per-city daily-brief keyword-gate snapshot jobs.
     """
     init_nws_db()
     run_forecast_update_job()
     start_scheduler()
+    schedule_daily_brief_jobs()

@@ -1,7 +1,7 @@
 # app/models.py
 from sqlalchemy import (
     Column, String, Integer, Float, DateTime, Enum, BigInteger, Text, JSON,
-    UniqueConstraint, Index,
+    UniqueConstraint, Index, Boolean, Date,
 )
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
@@ -296,3 +296,36 @@ class StationForecast(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class DailyForecastBlock(Base):
+    """Per-series daily AM-LOW forecast keyword-gate snapshot (one row/day).
+
+    Stores whether the NWS daily brief forecast for a city contains any of the
+    configured ``AM_LOW_FORECAST`` keywords for a given local calendar date.
+
+    One row per (series_prefix, local_date).  ``local_date`` is the city-local
+    calendar date the forecast applies to; the row key naturally resets daily.
+    Written once by the daily brief puller and read by the entry gate.
+    """
+
+    __tablename__ = "daily_forecast_block"
+    __table_args__ = (
+        UniqueConstraint(
+            "series_prefix", "local_date", name="uq_daily_forecast_block"
+        ),
+        Index("idx_dfb_series_prefix", "series_prefix"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # Series prefix, e.g. "KXLOWTATL"
+    series_prefix = Column(String(50), nullable=False, index=True)
+    # City-local calendar date the forecast applies to.
+    local_date = Column(Date, nullable=False)
+    # True if the daily brief contained any configured keyword (gate closed).
+    blocked = Column(Boolean, nullable=False, default=False)
+    # Which keywords matched, comma-separated (e.g. "thunderstorm,rain").
+    matched_keywords = Column(String(200), nullable=True)
+    # Raw daily brief forecast text (diagnostic only).
+    forecast_text = Column(Text, nullable=True)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now())

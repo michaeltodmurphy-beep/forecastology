@@ -431,6 +431,13 @@ class AppConfig(BaseSettings):
     # "HH:MM" into an int and fail (which broke config construction).
     # Default "03:00".
     am_low_snapshot_local_hour: str = "03:00"
+    # ── AM-low daily-brief keyword gate ────────────────────────────────────
+    # AM_LOW_FORECAST=keyword1,keyword2,...  (default: unset → feature disabled)
+    # When set, the NWS **daily brief** forecast for each KXLOW city is pulled
+    # once per day at AM_LOW_SNAPSHOT_LOCAL_HOUR local, and KXLOW* entry is
+    # blocked for that series day if ANY keyword appears in the forecast text
+    # (case-insensitive).  Parsed by from_env() into a lowercased set.
+    am_low_forecast_keywords: Annotated[set[str], NoDecode] = set()
     sunrise_temp_rise_required: float = 1.0
     sunrise_temp_baseline_minutes: int = 15
     sunrise_obs_max_age_minutes: int = 15
@@ -796,6 +803,25 @@ class AppConfig(BaseSettings):
                     fallback="03:00",
                     message="Invalid AM_LOW_SNAPSHOT_LOCAL_HOUR; defaulting to 03:00",
                 )
+        # AM_LOW_FORECAST = "thunderstorms,rain"  →  {"thunderstorms", "rain"}
+        # Case-insensitive; ANY single match gates KXLOW entry for that city/day.
+        am_low_forecast_keywords: set[str] = set()
+        am_low_forecast_raw = os.getenv("AM_LOW_FORECAST", "")
+        if am_low_forecast_raw and am_low_forecast_raw.strip():
+            parsed = {
+                k.strip().lower()
+                for k in am_low_forecast_raw.split(",")
+                if k.strip()
+            }
+            am_low_forecast_keywords = parsed
+            logger.info(
+                "config.am_low_forecast_configured",
+                keywords=sorted(parsed),
+                message=(
+                    "AM_LOW_FORECAST keyword gate enabled; will block KXLOW entry "
+                    "when the NWS daily brief matches any keyword"
+                ),
+            )
         sunrise_temp_rise_required_raw = os.getenv("SUNRISE_TEMP_RISE_REQUIRED")
         sunrise_temp_rise_required: float = 1.0
         if sunrise_temp_rise_required_raw is not None and sunrise_temp_rise_required_raw.strip():
@@ -956,6 +982,7 @@ class AppConfig(BaseSettings):
             sunrise_require_am_low=sunrise_require_am_low,
             nws_low_deadline_hour=nws_low_deadline_hour,
             am_low_snapshot_local_hour=am_low_snapshot_local_hour,
+            am_low_forecast_keywords=am_low_forecast_keywords,
             sunrise_temp_rise_required=sunrise_temp_rise_required,
             sunrise_temp_baseline_minutes=sunrise_temp_baseline_minutes,
             sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
