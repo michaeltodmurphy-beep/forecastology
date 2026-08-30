@@ -227,7 +227,9 @@ def schedule_daily_brief_jobs() -> None:
     for series, city in SERIES_CITY.items():
         coords = CITY_COORDS.get(city)
         if coords is None:
-            logger.warning("nws.daily_brief.no_coords", series=series, city=city)
+            logger.warning(
+                "nws.daily_brief.no_coords series=%s city=%s", series, city
+            )
             continue
         # Resolve the timezone via core.local_time_gate.SERIES_TIMEZONE.
         try:
@@ -236,7 +238,9 @@ def schedule_daily_brief_jobs() -> None:
         except Exception:  # noqa: BLE001
             tz_name = None
         if tz_name is None:
-            logger.warning("nws.daily_brief.no_tz", series=series, city=city)
+            logger.warning(
+                "nws.daily_brief.no_tz series=%s city=%s", series, city
+            )
             continue
 
         run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
@@ -251,8 +255,8 @@ def schedule_daily_brief_jobs() -> None:
             misfire_grace_time=3600,
         )
         logger.info(
-            "nws.daily_brief.scheduled", series=series, city=city,
-            local=tz_name, run_utc=run_at.isoformat(),
+            "nws.daily_brief.scheduled series=%s city=%s local=%s run_utc=%s",
+            series, city, tz_name, run_at.isoformat(),
         )
 
 
