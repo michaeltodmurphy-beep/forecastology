@@ -635,6 +635,76 @@ class LiveTradeExecutor(BaseExecutor):
             logger.error("live.cancel_order_error", order_id=order_id, error=str(e))
             return False
 
+    async def list_open_sell_orders(self, ticker: str) -> list[dict]:
+        """Return live resting SELL orders for *ticker* from the exchange.
+
+        Uses the portfolio orders endpoint.  Only sell/ask orders whose status
+        is still open are returned.  On any error this logs and returns an empty
+        list so callers fail open (existing tracked-order behaviour unchanged).
+        """
+        out: list[dict] = []
+        if not ticker:
+            return out
+        path = REST_PORTFOLIO_ORDERS
+        url = f"{self.base_url}{path}"
+        try:
+            headers = self._headers("GET", path)
+            resp = await self._client.get(
+                url, headers=headers, params={"ticker": ticker, "limit": 200}
+            )
+            if resp.status_code not in (200, 201):
+                logger.warning(
+                    "live.list_open_sell_orders_failed",
+                    ticker=ticker,
+                    status=resp.status_code,
+                )
+                return out
+            data = resp.json()
+            orders = data.get("orders") if isinstance(data.get("orders"), list) else []
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                if (o.get("ticker") or o.get("market_ticker")) != ticker:
+                    continue
+                side = (o.get("side") or o.get("action") or "").lower()
+                if side not in ("sell", "ask"):
+                    continue
+                status = (o.get("status") or "").lower()
+                if status in ("filled", "cancelled", "canceled", "expired", "settled", "not_found"):
+                    continue
+                out.append(o)
+        except Exception as e:
+            logger.warning("live.list_open_sell_orders_error", ticker=ticker, error=str(e))
+            return []
+        return out
+
+    async def cancel_open_sell_orders(self, ticker: str, client_prefix: str = "") -> int:
+        """Cancel any live resting SELL orders for *ticker* on the exchange.
+
+        Only cancels orders whose client_order_id starts with *client_prefix*
+        (when provided) so a user's manual order is never touched.  Returns the
+        number of orders cancelled.  On error this logs and returns the count
+        already cancelled.
+        """
+        cancelled = 0
+        if not ticker:
+            return 0
+        try:
+            orders = await self.list_open_sell_orders(ticker)
+        except Exception:
+            orders = []
+        for o in orders:
+            cid = o.get("client_order_id") or ""
+            if client_prefix and not cid.startswith(client_prefix):
+                continue
+            order_id = o.get("order_id") or ""
+            if not order_id:
+                continue
+            ok = await self.cancel_order(order_id, market_ticker=ticker)
+            if ok:
+                cancelled += 1
+        return cancelled
+
     async def get_order_status(self, order_id: str) -> Optional[str]:
         """Return the exchange-reported status string for an order, or None."""
         if not order_id:

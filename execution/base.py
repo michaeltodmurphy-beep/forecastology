@@ -94,6 +94,27 @@ class BaseExecutor(ABC):
         the order cannot be found or the call fails."""
         return None
 
+    async def list_open_sell_orders(self, ticker: str) -> list[dict]:
+        """Return exchange open (resting/unfilled) SELL orders for *ticker*.
+
+        Returns a list of order dicts (each at least containing the exchange
+        ``order_id``).  Default is a no-op returning an empty list; the LIVE
+        executor overrides this so placement can reconcile with the real book
+        and never stack duplicate resting sells for the same position.
+        """
+        return []
+
+    async def cancel_open_sell_orders(self, ticker: str, client_prefix: str = "") -> int:
+        """Cancel any open SELL order on the exchange for *ticker*.
+
+        If *client_prefix* is non-empty only orders whose client_order_id starts
+        with that prefix are cancelled (so we only touch this app's own resting
+        sells and never a user's manual order).  Returns the number of orders
+        cancelled.  Default is a no-op returning 0; the LIVE executor overrides
+        this to reconcile the real book before placing a replacement.
+        """
+        return 0
+
     async def place_limit_buy(self, order: "OrderRequest") -> "ExecutionResult":
         """Place a resting (GTC) limit BUY_YES order.
 
@@ -112,3 +133,4 @@ class BaseExecutor(ABC):
         Default returns unknown/zero so subclasses can opt in.
         """
         return {"status": "unknown", "fill_qty": 0, "fill_price": 0}
+

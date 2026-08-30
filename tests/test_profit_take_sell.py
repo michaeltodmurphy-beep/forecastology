@@ -113,6 +113,12 @@ class _FakeExecutor:
     async def get_order_status(self, order_id: str):
         return self.statuses.get(order_id)
 
+    async def list_open_sell_orders(self, ticker: str) -> list:
+        return []
+
+    async def cancel_open_sell_orders(self, ticker: str, client_prefix: str = "") -> int:
+        return 0
+
 
 def _mgr(exec_, enabled=True, price=99, mode="LIVE"):
     from execution.profit_take_sell import ProfitTakeSellManager
@@ -308,6 +314,12 @@ async def test_cancel_profit_take_called_before_sell(monkeypatch):
         async def cancel_order(self, order_id, market_ticker=""):
             call_order.append(f"cancel:{order_id}")
             return True
+
+        async def list_open_sell_orders(self, ticker: str):
+            return []
+
+        async def cancel_open_sell_orders(self, ticker: str, client_prefix: str = "") -> int:
+            return 0
 
         async def get_order_status(self, order_id):
             return "resting"

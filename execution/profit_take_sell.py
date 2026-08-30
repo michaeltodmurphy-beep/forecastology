@@ -165,6 +165,30 @@ class ProfitTakeSellManager:
                     return None
                 self._order_ids.pop(ticker, None)
 
+            # Reconcile with the exchange as well: cancel any live resting
+            # take-profit sell for this ticker that we may not be tracking
+            # (e.g. the DB-stored order id went stale on a restart and the real
+            # live order was left untracked).  Placing a new GTC sell while an
+            # unknown one is still resting stacks duplicates on the book, so
+            # wipe them all before (re)placing.  Fail-open on error so the
+            # normal place path is never blocked.
+            try:
+                cancelled = await self._executor.cancel_open_sell_orders(
+                    ticker, client_prefix="APP_PTS_"
+                )
+                if cancelled:
+                    logger.warning(
+                        "profit_take.reconciled_untracked_sells",
+                        ticker=ticker,
+                        cancelled=cancelled,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "profit_take.reconcile_error",
+                    ticker=ticker,
+                    error=str(exc),
+                )
+
             price = self._price
             order = OrderRequest(
                 market_ticker=ticker,
@@ -227,12 +251,32 @@ class ProfitTakeSellManager:
             return True
         async with self._lock:
             order_id = self._order_ids.get(ticker)
-            if not order_id:
-                # No profit-take active — safe to proceed.
-                return True
-            ok = await self._cancel_one(ticker, order_id, reason=reason)
-            if ok:
-                self._order_ids.pop(ticker, None)
+            ok = True
+            if order_id:
+                ok = await self._cancel_one(ticker, order_id, reason=reason)
+                if ok:
+                    self._order_ids.pop(ticker, None)
+            # Also reconcile the exchange directly: cancel any live resting
+            # take-profit sell for this ticker that may not be tracked in
+            # _order_ids (e.g. a stale DB id left a real order live).  This
+            # guarantees no lingering pending sell survives a position close.
+            try:
+                extra = await self._executor.cancel_open_sell_orders(
+                    ticker, client_prefix="APP_PTS_"
+                )
+                if extra:
+                    logger.warning(
+                        "profit_take.cancel_extra_untracked",
+                        ticker=ticker,
+                        cancelled=extra,
+                        reason=reason,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "profit_take.cancel_reconcile_error",
+                    ticker=ticker,
+                    error=str(exc),
+                )
             return ok
 
     async def cancel_orphan(self, ticker: str, order_id: str) -> None:
