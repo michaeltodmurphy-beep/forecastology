@@ -169,25 +169,62 @@ class ProfitTakeSellManager:
             # take-profit sell for this ticker that we may not be tracking
             # (e.g. the DB-stored order id went stale on a restart and the real
             # live order was left untracked).  Placing a new GTC sell while an
-            # unknown one is still resting stacks duplicates on the book, so
-            # wipe them all before (re)placing.  Fail-open on error so the
-            # normal place path is never blocked.
+            # unknown one is still resting stacks duplicates on the book.
+            #
+            # STRICT DEDUP: we only place a new .99 sell once we have CONFIRMED
+            # that zero APP_PTS_ sells are resting for this ticker.  If any prior
+            # take-profit order is still live on the book (or we cannot verify
+            # the book state), we REFUSE to place rather than stack a duplicate.
             try:
-                cancelled = await self._executor.cancel_open_sell_orders(
-                    ticker, client_prefix="APP_PTS_"
-                )
-                if cancelled:
-                    logger.warning(
-                        "profit_take.reconciled_untracked_sells",
-                        ticker=ticker,
-                        cancelled=cancelled,
-                    )
+                open_orders = await self._executor.list_open_sell_orders(ticker)
+                for o in open_orders:
+                    cid = o.get("client_order_id") or ""
+                    if not cid.startswith("APP_PTS_"):
+                        continue
+                    oid = o.get("order_id") or ""
+                    if oid:
+                        await self._cancel_one(ticker, oid, reason="dedup")
             except Exception as exc:
                 logger.warning(
                     "profit_take.reconcile_error",
                     ticker=ticker,
                     error=str(exc),
+                    action="abort_place_unknown_open_orders",
                 )
+                return None
+
+            # Confirm the book is actually clean after the cancels above.  If
+            # any APP_PTS_ sell is still resting, something prevented the cancel
+            # (exchange latency, reject) — placing now would stack a duplicate,
+            # so abort instead.
+            try:
+                after = await self._executor.list_open_sell_orders(ticker)
+            except Exception as exc:
+                logger.warning(
+                    "profit_take.reconcile_verify_error",
+                    ticker=ticker,
+                    error=str(exc),
+                    action="abort_place_cannot_verify_book",
+                )
+                return None
+            still_live = [
+                o for o in after
+                if (o.get("client_order_id") or "").startswith("APP_PTS_")
+            ]
+            if still_live:
+                logger.warning(
+                    "profit_take.dedup_abort_still_live",
+                    ticker=ticker,
+                    live_count=len(still_live),
+                    order_ids=[o.get("order_id") for o in still_live],
+                    action="abort_place_stacked_sell_prevented",
+                )
+                return None
+            logger.debug(
+                "profit_take.book_confirmed_clean",
+                ticker=ticker,
+                open_sells=len(open_orders),
+            )
 
             price = self._price
             order = OrderRequest(

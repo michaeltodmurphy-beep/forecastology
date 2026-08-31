@@ -666,12 +666,16 @@ class LiveTradeExecutor(BaseExecutor):
                     continue
                 if (o.get("ticker") or o.get("market_ticker")) != ticker:
                     continue
-                side = (o.get("side") or o.get("action") or "").lower()
-                if side not in ("sell", "ask"):
-                    continue
                 status = (o.get("status") or "").lower()
                 if status in ("filled", "cancelled", "canceled", "expired", "settled", "not_found"):
                     continue
+                # NOTE: do NOT filter by `side`.  Callers (profit-take / SL
+                # backstop) already select their own orders by client_order_id
+                # prefix, so we must return *every* still-open order for the
+                # ticker regardless of how Kalshi reports `side`/`action`
+                # (some endpoints report "side":"ask", others "yes"/"no").  A
+                # side filter here would silently hide pending sells, letting a
+                # replace/place stack duplicate resting orders.
                 out.append(o)
         except Exception as e:
             logger.warning("live.list_open_sell_orders_error", ticker=ticker, error=str(e))
