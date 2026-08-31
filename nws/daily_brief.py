@@ -118,11 +118,20 @@ def matches_any_keyword(forecast_text: str, keywords: set[str]) -> set[str]:
     return {k for k in keywords if k in lower}
 
 
-def _fetch_daily_brief_text(nws_client: NWSClient, lat: float, lon: float) -> str:
-    """Fetch and concatenate the NWS daily brief forecast text for *lat*/*lon*.
+def _fetch_daily_brief_text(
+    nws_client: NWSClient,
+    lat: float,
+    lon: float,
+    tz_name: str,
+    now_utc: datetime.datetime,
+) -> str:
+    """Fetch the NWS daily brief forecast text for *lat*/*lon* for *today*.
 
-    Uses the **daily** (non-hourly) ``/forecast`` grid endpoint.  Raises on any
-    HTTP/model failure so the caller can fail open.
+    Uses the **daily** (non-hourly) ``/forecast`` grid endpoint.  Only periods
+    whose local (city-timezone) date matches *now_utc*'s local date are included,
+    so the gate checks the **current calendar day only** — not the rest of the
+    multi-day forecast array.  Raises on any HTTP/model failure so the caller can
+    fail open.
     """
     points = nws_client._get_json(  # noqa: SLF001
         f"https://api.weather.gov/points/{round(float(lat), 4):.4f},{round(float(lon), 4):.4f}"
@@ -130,9 +139,26 @@ def _fetch_daily_brief_text(nws_client: NWSClient, lat: float, lon: float) -> st
     forecast_url = points["properties"]["forecast"]
     data = nws_client._get_json(forecast_url)  # noqa: SLF001
     periods = data.get("properties", {}).get("periods") or []
+
+    tz = ZoneInfo(tz_name)
+    today_date = now_utc.astimezone(tz).date()
+
     parts: list[str] = []
     for p in periods:
         if not isinstance(p, dict):
+            continue
+        start_raw = p.get("startTime")
+        if not start_raw:
+            continue
+        try:
+            start_dt = datetime.datetime.fromisoformat(str(start_raw))
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+            period_local = start_dt.astimezone(tz)
+        except Exception:  # noqa: BLE001
+            continue
+        # Only include periods that fall within the current local calendar day.
+        if period_local.date() != today_date:
             continue
         text = p.get("detailedForecast") or p.get("shortForecast") or ""
         if text:
@@ -217,7 +243,9 @@ class DailyBriefGate:
         # Otherwise fetch (lazy / scheduled path) and persist.
         lat, lon = coords
         try:
-            text = _fetch_daily_brief_text(self.nws_client, lat, lon)
+            text = _fetch_daily_brief_text(
+                self.nws_client, lat, lon, tz_name=tz_name, now_utc=now_utc
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "am_low_brief.fetch_failed", series=series, city=city,
@@ -373,7 +401,11 @@ def snapshot_city(series: str, city: str, lat: float, lon: float) -> bool:
         gate.config = None
         gate.nws_client = NWSClient()
         gate._cache = {}  # noqa: SLF001
-        text = _fetch_daily_brief_text(gate.nws_client, lat, lon)
+        tz_name = _series_tz_name(series) or "UTC"
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        text = _fetch_daily_brief_text(
+            gate.nws_client, lat, lon, tz_name=tz_name, now_utc=now_utc
+        )
         matched = matches_any_keyword(text, keywords)
         blocked = bool(matched)
         gate._upsert(series, _today_local(series), blocked, matched, text)  # noqa: SLF001
@@ -390,13 +422,18 @@ def snapshot_city(series: str, city: str, lat: float, lon: float) -> bool:
         return False
 
 
-def _today_local(series: str) -> datetime.date:
-    """Return the current local calendar date for a series (best-effort)."""
+def _series_tz_name(series: str) -> Optional[str]:
+    """Return the IANA timezone name for a series, or None (best-effort)."""
     try:
         from core.local_time_gate import SERIES_TIMEZONE
-        tz_name = SERIES_TIMEZONE.get(series)
+        return SERIES_TIMEZONE.get(series)
     except Exception:  # noqa: BLE001
-        tz_name = None
+        return None
+
+
+def _today_local(series: str) -> datetime.date:
+    """Return the current local calendar date for a series (best-effort)."""
+    tz_name = _series_tz_name(series)
     if tz_name:
         try:
             return datetime.datetime.now(ZoneInfo(tz_name)).date()
