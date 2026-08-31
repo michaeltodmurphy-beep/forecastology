@@ -208,8 +208,8 @@ class DailyBriefGate:
         # Try a stored DB row first (restart-safe, avoids double pull).
         stored = self._stored_row(series, local_date)
         if stored is not None:
-            blocked = stored.blocked
-            matched = self._parse_matched(stored.matched_keywords)
+            blocked, matched_keywords = stored
+            matched = self._parse_matched(matched_keywords)
             lock_for_day = now_local.hour >= _snapshot_hour(self.config)
             self._cache[cache_key] = (lock_for_day, blocked, matched, now_mono)
             return blocked, matched
@@ -256,16 +256,30 @@ class DailyBriefGate:
     # Storage helpers (best-effort; never raise into the gate)
     # ------------------------------------------------------------------
 
-    def _stored_row(self, series: str, local_date: datetime.date) -> Optional[DailyForecastBlock]:
+    def _stored_row(
+        self, series: str, local_date: datetime.date
+    ) -> Optional[Tuple[bool, Optional[str]]]:
+        """Return ``(blocked, matched_keywords)`` for a series/day, or None.
+
+        The scalar attributes are read out *inside* the session.  Returning the
+        ORM object outside the ``with`` block would detach it, and accessing an
+        (expired) attribute on a detached instance raises ``DetachedInstanceError``.
+        """
         try:
             with get_session() as session:
-                return (
+                row = (
                     session.query(DailyForecastBlock)
                     .filter(
                         DailyForecastBlock.series_prefix == series,
                         DailyForecastBlock.local_date == local_date,
                     )
                     .one_or_none()
+                )
+                if row is None:
+                    return None
+                return (
+                    bool(row.blocked),
+                    str(row.matched_keywords) if row.matched_keywords else None,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.debug("am_low_brief.db_read_failed", series=series, error=str(exc))
