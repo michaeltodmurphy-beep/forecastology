@@ -2185,6 +2185,18 @@ class TemperatureStrategy:
                     use_nws_window_for_low = sunrise_decision.use_nws_window_fallback
             self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
 
+            am_low_forecast_blocked = False
+            if (
+                is_low
+                and should_evaluate_entry
+                and self.config.am_low_forecast_keywords
+            ):
+                _series_prefix = ticker_upper.split("-")[0]
+                if _series_prefix in DAILY_BRIEF_SERIES_CITY:
+                    am_low_forecast_blocked, am_low_forecast_matched = (
+                        self._am_low_brief_gate.get_block(_series_prefix, now_utc=now_utc)
+                    )
+
             if not should_evaluate_entry:
                 continue
 
@@ -2234,6 +2246,16 @@ class TemperatureStrategy:
                 continue
 
             if not sunrise_gate_allowed:
+                continue
+
+            if am_low_forecast_blocked:
+                logger.info(
+                    "phase.b.entry_blocked_am_low_forecast",
+                    ticker=ticker,
+                    series_prefix=_series_prefix,
+                    matched=sorted(am_low_forecast_matched),
+                    message="AM-low daily-brief keyword match blocked entry",
+                )
                 continue
 
             if spread <= self.config.minimum_spread:
