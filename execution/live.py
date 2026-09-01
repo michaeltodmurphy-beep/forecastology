@@ -649,7 +649,7 @@ class LiveTradeExecutor(BaseExecutor):
         url = f"{self.base_url}{path}"
         try:
             headers = self._headers("GET", path)
-            resp = await self._client.get(
+                              resp = await self._client.get(
                 url, headers=headers, params={"ticker": ticker, "limit": 200}
             )
             if resp.status_code not in (200, 201):
