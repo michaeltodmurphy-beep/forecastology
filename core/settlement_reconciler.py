@@ -199,15 +199,25 @@ async def _reconcile_one_market(
     bracket_temp = parse_bracket_temp(market_ticker)
 
     # ── Determine outcome ────────────────────────────────────────────────────
+    # Realized P&L already locked in by earlier SELL/STOP_LOSS fills.  When only
+    # part of a position is exited and the remainder settles, we must add this
+    # leg back; otherwise an early exit (typically a partial stop-loss loss) is
+    # silently dropped from the aggregate P&L.
     outcome: Optional[TradeOutcomeStatus] = None
     realized_pnl: Optional[int] = None
+
+    exited_qty = min(total_buy_qty, total_exit_qty)
+    if exited_qty > 0 and exit_price_avg is not None:
+        partial_exit_pnl = _compute_pnl(entry_price_avg, exit_price_avg, exited_qty)
+    else:
+        partial_exit_pnl = 0
 
     if exit_trades and net_qty <= 0:
         # Fully exited via SELL/STOP_LOSS
         # Use the last exit action to classify
         last_exit_action = exit_trades[-1].action
         outcome = _classify_exit_outcome(last_exit_action)
-        exit_qty_used = min(total_buy_qty, total_exit_qty)
+        exit_qty_used = exited_qty
         realized_pnl = _compute_pnl(entry_price_avg, exit_price_avg, exit_qty_used)
 
     elif market_date is not None and market_date < today:
@@ -220,16 +230,8 @@ async def _reconcile_one_market(
         )
         if result == "yes":
             outcome = TradeOutcomeStatus.SETTLED_WIN
-            settle_price = 100
-            realized_pnl = _compute_pnl(entry_price_avg, settle_price, min(total_buy_qty, net_qty))
-            exit_price_avg = settle_price
-            total_exit_qty = net_qty
         elif result == "no":
             outcome = TradeOutcomeStatus.SETTLED_LOSS
-            settle_price = 0
-            realized_pnl = _compute_pnl(entry_price_avg, settle_price, min(total_buy_qty, net_qty))
-            exit_price_avg = settle_price
-            total_exit_qty = net_qty
         else:
             logger.info(
                 "reconciler.market_unresolved",
@@ -239,6 +241,19 @@ async def _reconcile_one_market(
             )
             # Leave as OPEN or keep existing
             outcome = existing.outcome if existing else TradeOutcomeStatus.OPEN
+
+        if result in ("yes", "no"):
+            settle_price = 100 if result == "yes" else 0
+            remaining_qty = max(min(total_buy_qty, net_qty), 0)
+            remaining_pnl = (
+                _compute_pnl(entry_price_avg, settle_price, remaining_qty)
+                if remaining_qty > 0 else 0
+            )
+            # Blend the already-realized early-exit leg (partial_exit_pnl) with
+            # the settlement leg so an early stop-loss is not dropped.
+            realized_pnl = partial_exit_pnl + remaining_pnl
+            total_exit_qty = exited_qty + remaining_qty
+            exit_price_avg = settle_price
 
     else:
         # Market still open/today — leave OPEN

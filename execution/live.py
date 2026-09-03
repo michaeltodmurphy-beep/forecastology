@@ -396,11 +396,18 @@ class LiveTradeExecutor(BaseExecutor):
                      event_count=len(event_tickers))
         return all_markets
 
-    async def get_fills(self, ticker: Optional[str] = None, limit: int = 200, max_pages: int = 5) -> list[dict]:
+    async def get_fills(self, ticker: Optional[str] = None, limit: int = 200, max_pages: int = 25) -> list[dict]:
         """Fetch fills from /trade-api/v2/portfolio/fills.
 
         If `ticker` is provided, only that market's fills are returned, paginating
-        via cursor up to `max_pages` pages (a single bracket rarely exceeds one page).
+        via cursor up to `max_pages` pages.  The default of 25 pages (~5k fills
+        for a single ticker) is deliberately generous: a temperature bracket that
+        is rebuilt many times across a day can accumulate a large fill history,
+        and ownership / cost-basis reconstruction must see *every* APP-OWNED fill
+        (not just the most recent pages) or a genuinely app-owned position could
+        be misclassified as external on restart.  Iteration still stops early
+        whenever Kalshi returns an empty page or an empty cursor, so the higher
+        ceiling only actually costs requests on genuinely long histories.
         NO caching: always fetches fresh so cost basis is never stale.
         """
         path = "/trade-api/v2/portfolio/fills"
