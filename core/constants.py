@@ -21,6 +21,7 @@ SERIES_LIST = [
     "KXHIGHTMIN", "KXLOWTMIN",
     "KXHIGHTNOLA", "KXLOWTNOLA",
     "KXHIGHNY", "KXLOWTNYC",
+    "KXLOWTEWR", "KXLOWTTTN",   # NYC-area (incl. Newark, Trenton)
     "KXHIGHTOKC", "KXLOWTOKC",
     "KXHIGHPHIL", "KXLOWTPHIL",
     "KXHIGHTPHX", "KXLOWTPHX",
@@ -28,6 +29,7 @@ SERIES_LIST = [
     "KXHIGHTSFO", "KXLOWTSFO",
     "KXHIGHTSEA", "KXLOWTSEA",
     "KXHIGHTDC", "KXLOWTDC",
+    "KXLOWTSDF", "KXLOWTSAN",    # Louisville, San Diego
 ]
 
 def get_eastern_today_date_prefix(days_offset: int = 0) -> str:

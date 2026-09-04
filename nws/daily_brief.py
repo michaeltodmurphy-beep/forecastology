@@ -63,6 +63,10 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "San Francisco": (37.6188, -122.3758),
     "Seattle": (47.4436, -122.3029),
     "Washington DC": (38.8921, -77.0199),
+    "Newark": (40.7357, -74.1724),
+    "Louisville": (38.2527, -85.7585),
+    "Trenton": (40.2206, -74.7597),
+    "San Diego": (32.7157, -117.1611),
 }
 
 # Series prefix → city name.  Keys mirror core/local_time_gate.py SERIES_CITY.
@@ -87,6 +91,10 @@ SERIES_CITY: dict[str, str] = {
     "KXLOWTSATX": "San Antonio",
     "KXLOWTSEA": "Seattle",
     "KXLOWTSFO": "San Francisco",
+    "KXLOWTEWR": "Newark",
+    "KXLOWTSDF": "Louisville",
+    "KXLOWTTTN": "Trenton",
+    "KXLOWTSAN": "San Diego",
 }
 
 
