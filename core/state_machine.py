@@ -3926,7 +3926,18 @@ class TemperatureStrategy:
                 # no live tick and cannot act; Phase C is the only safety net.
                 # For PANIC_FLATTEN with websocket source: always defer to watcher
                 # because the watcher uses ask/bid stop-loss thresholds directly.
-                if self.stop_loss_watcher is not None and price_source == "websocket" and not zero_bid_collapse:
+                # Only defer to the WebSocket-driven StopLossWatcher when the
+                # watcher is actually holding/registered for this ticker.  If the
+                # ticker is NOT registered with the watcher (e.g. an external/
+                # manual position, or a prior path already unregistered it), the
+                # watcher would silently ignore the tick and never fire -- so
+                # Phase C must fall through and act directly.
+                if (
+                    self.stop_loss_watcher is not None
+                    and self.stop_loss_watcher.has_position(ticker)
+                    and price_source == "websocket"
+                    and not zero_bid_collapse
+                ):
                     continue
                 if bracket.position_quantity <= 0:
                     bracket.phase = Phase.CLOSED

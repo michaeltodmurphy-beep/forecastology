@@ -123,6 +123,16 @@ class StopLossWatcher:
         if removed is not None:
             logger.info("sl.position_unregistered", ticker=ticker)
 
+    def has_position(self, ticker: str) -> bool:
+        """Return whether the watcher is responsible for a given ticker.
+
+        Phase C consults this before standing down for a WebSocket-driven
+        stop-loss trigger.  If a held ticker is NOT registered with the
+        watcher, Phase C must act directly instead of deferring (the watcher
+        would silently ignore an unregistered ticker).
+        """
+        return ticker in self._positions
+
     async def on_market_update(
         self,
         ticker: str,
