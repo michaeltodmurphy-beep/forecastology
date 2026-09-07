@@ -10,17 +10,17 @@ Only observation fetches live here; forecast fetches remain in nws/client.py.
 from __future__ import annotations
 
 import datetime
-import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import requests
+import structlog
 
 from nws.config import NWS_USER_AGENT
 
 if TYPE_CHECKING:
     from nws.client import NWSClient
 
-logger = logging.getLogger("forecastology.nws.awc_obs")
+logger = structlog.get_logger(__name__)
 
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar"
 
@@ -162,7 +162,7 @@ def fetch_obs_with_fallback(
     Raises on NWS fetch failure (let caller handle).
     """
     if obs_source == "nws":
-        logger.debug("sunrise.obs_fetch source=nws station=%s", station_id)
+        logger.debug("sunrise.obs_fetch", source="nws", station=station_id)
         obs = parse_nws_obs_payload(nws_client._get_json(nws_url))  # noqa: SLF001
         _maybe_log_source_change(station_id, "nws")
         return obs, "nws"

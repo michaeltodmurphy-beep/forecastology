@@ -102,7 +102,7 @@ class SunriseEntryGate:
             station_id,
             nws_client=self.nws_client,
             nws_url=nws_url,
-            obs_source=getattr(self.config, "sunrise_obs_source", "awc"),
+            obs_source="nws",
         )
 
     # ------------------------------------------------------------------
