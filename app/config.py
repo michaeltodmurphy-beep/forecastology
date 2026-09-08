@@ -443,6 +443,14 @@ class AppConfig(BaseSettings):
     sunrise_obs_max_age_minutes: int = 15
     sunrise_obs_max_age_overrides: Annotated[dict[str, int], NoDecode] = {}
     sunrise_obs_source: Literal["awc", "nws"] = "awc"
+    # ── Observed-feed "day already dipped below bracket" entry guard ────────
+    # BLOCK_ENTRY_WHEN_BELOW_BRACKET=yes|no  (default: yes / true)
+    # When enabled, a LOW 'daily temp stays >= X°F' bracket is not entered once
+    # the live NWS 5-min obs feed has already dipped below X°F (the bracket
+    # temperature parsed from the ticker) sometime during the local trading day.
+    # A "93% confidence" market is worthless when the observed feed has already
+    # breached the line we'd be betting on.  Parsed by from_env().
+    block_entry_when_below_bracket: bool = True
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 100–250 ms.  Configurable via
@@ -857,6 +865,11 @@ class AppConfig(BaseSettings):
             os.getenv("SUNRISE_OBS_MAX_AGE_OVERRIDES")
         )
         sunrise_obs_source = _parse_sunrise_obs_source(os.getenv("SUNRISE_OBS_SOURCE"))
+        block_entry_when_below_bracket = _parse_trade_toggle(
+            os.getenv("BLOCK_ENTRY_WHEN_BELOW_BRACKET"),
+            "BLOCK_ENTRY_WHEN_BELOW_BRACKET",
+            default=True,
+        )
         falling_knife_decay_minutes = _parse_non_negative_int(
             os.getenv("FALLING_KNIFE_DECAY_MINUTES"),
             "FALLING_KNIFE_DECAY_MINUTES",
@@ -988,6 +1001,7 @@ class AppConfig(BaseSettings):
             sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
             sunrise_obs_max_age_overrides=sunrise_obs_max_age_overrides,
             sunrise_obs_source=sunrise_obs_source,
+            block_entry_when_below_bracket=block_entry_when_below_bracket,
             falling_knife_decay_minutes=falling_knife_decay_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,

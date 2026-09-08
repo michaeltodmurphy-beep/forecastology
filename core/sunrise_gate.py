@@ -44,6 +44,13 @@ class _TempRiseState:
 
     state_date: Optional[datetime.date] = None
     running_min_f: float = float("inf")
+    # NEW: running minimum of observed °F over the whole local trading day
+    # (since local midnight). Used to refuse entry into a LOW 'stays >= X°F'
+    # bracket once the live 5-min feed has already dipped below X°F today.
+    min_since_local_midnight_f: float = float("inf")
+    # Monotonic timestamp (time.monotonic) of last obs refresh for the
+    # below-bracket day-min tracker, so the sync obs fetch is rate-limited.
+    day_min_obs_refreshed_mono: float = 0.0
     latched: bool = False
     latch_baseline_f: Optional[float] = None
     latch_current_f: Optional[float] = None
@@ -268,6 +275,115 @@ class SunriseEntryGate:
             series, station_id, now_utc, now_local, local_date, tz
         )
         return SunriseGateDecision(allowed=am_passed)
+
+    # ------------------------------------------------------------------
+    # "Day has already dipped below bracket temperature" guard
+    # ------------------------------------------------------------------
+
+    def day_has_dipped_below(
+        self,
+        ticker: str,
+        bracket_temp_f: float,
+        now_utc: Optional[datetime.datetime] = None,
+    ) -> tuple[bool, dict]:
+        """Return True if the NWS 5-min obs feed has dipped below *bracket_temp_f*
+        since local midnight (the trading day's start).
+
+        When True this signals the LOW ``stays >= X°F`` bracket has already been
+        breached by the *observed* feed today, so an "N% confidence" market is
+        not nearly as safe as the crowd thinks.  Callers should refuse entry.
+
+        Returns ``(blocked, ctx)`` where *ctx* carries diagnostics.  Fails
+        OPEN (returns False) if observations cannot be fetched, so a transient
+        feed outage does not stall legitimate entries.
+        """
+        ctx: dict = {"below": False, "blocked": False, "day_min_f": None}
+
+        series = get_series_prefix(ticker)
+        if series is None or not series.startswith("KXLOW"):
+            return False, ctx
+        coords = SERIES_STATION_COORDS.get(series)
+        tz_name = get_series_timezone(ticker)
+        if coords is None or tz_name is None:
+            return False, ctx
+        station_id = coords[0]
+        tz = ZoneInfo(tz_name)
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_local = now_utc.astimezone(tz)
+        local_date = now_local.date()
+
+        state = self._rise_state.setdefault(series, _TempRiseState())
+        if state.state_date != local_date:
+            # Cross-day reset for the day-min tracker (do not reuse yesterday's min).
+            state = _TempRiseState(state_date=local_date)
+            self._rise_state[series] = state
+
+        # Rate-limit the (synchronous, blocking) obs fetch so a ~1s watchlist
+        # cycle never hammers NWS.  Refresh at most every 60 s per series.
+        now_mono = time.monotonic()
+        max_age_sec = 60.0
+        should_refresh = (
+            state.min_since_local_midnight_f == float("inf")
+            or (now_mono - state.day_min_obs_refreshed_mono) >= max_age_sec
+        )
+
+        if should_refresh:
+            start_local = datetime.datetime.combine(local_date, datetime.time.min)
+            # Obs fetched from NWS are UTC-timestamped.  Asking for the UTC
+            # instant that corresponds to local midnight is sufficient.
+            start_utc = start_local.astimezone(tz).astimezone(datetime.timezone.utc)
+            start_iso = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                raw_obs, _src = self._fetch_station_obs(
+                    station_id,
+                    nws_url=(
+                        f"https://api.weather.gov/stations/{station_id}/observations"
+                        f"?start={start_iso}"
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "gate.obs_dip_fetch_error",
+                    series=series,
+                    station=station_id,
+                    error_class=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                # Fail open: do not advance the refresh timestamp so we retry on
+                # a subsequent cycle rather than waiting the full 60 s cadence.
+                # It also leaves the existing day-min value (which may predate
+                # the outage) intact.
+            else:
+                for obs_ts_utc, temp_c in raw_obs:
+                    local_ts = obs_ts_utc.astimezone(tz)
+                    if local_ts.date() != local_date:
+                        continue
+                    obs_f = _c_to_f(float(temp_c))
+                    if obs_f < state.min_since_local_midnight_f:
+                        state.min_since_local_midnight_f = obs_f
+                state.day_min_obs_refreshed_mono = now_mono
+
+        ctx["day_min_f"] = (
+            round(state.min_since_local_midnight_f, 2)
+            if state.min_since_local_midnight_f != float("inf")
+            else None
+        )
+        if ctx["day_min_f"] is not None:
+            below = state.min_since_local_midnight_f < bracket_temp_f
+            ctx["below"] = below
+            ctx["blocked"] = below
+            if below:
+                logger.info(
+                    "gate.blocked_below_bracket",
+                    series=series,
+                    station=station_id,
+                    ticker=ticker,
+                    day_min_f=float(ctx["day_min_f"]),
+                    bracket_temp_f=bracket_temp_f,
+                )
+        return ctx["blocked"], ctx
 
     # ------------------------------------------------------------------
     # AM-low forecast check
