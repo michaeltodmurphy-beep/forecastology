@@ -453,19 +453,19 @@ class AppConfig(BaseSettings):
     block_entry_when_below_bracket: bool = True
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
-    # independently of entry scanning.  Range: 100–250 ms.  Configurable via
-    # HELD_POSITIONS_LOOP_INTERVAL_MS env var.  Default 250 ms is intentionally
-    # conservative; lower values increase SL check frequency at the cost of more
-    # CPU/asyncio scheduling overhead.
-    held_positions_loop_interval_ms: int = 250
+    # independently of entry scanning.  Range: 50–250 ms.  Configurable via
+    # HELD_POSITIONS_LOOP_INTERVAL_MS env var.  Default is 100 ms; lower
+    # values increase SL check frequency at the cost of more CPU/asyncio
+    # scheduling overhead.
+    held_positions_loop_interval_ms: int = 100
     max_no_price_cycles: int = 10
     stop_loss_max_unfilled_attempts: int = 3
     enable_fast_sl_exit: bool | None = None
     # Minimum seconds between non-bypass stop-loss attempts for the same bracket.
     # Watcher/fast paths always pass bypass_cooldown=True and are unaffected.
     sl_execute_cooldown_seconds: int = 5
-    sl_worker_interval_ms: int = 250
-    sl_exit_retry_interval_ms: int = 300
+    sl_worker_interval_ms: int = 100
+    sl_exit_retry_interval_ms: int = 120
     sl_exit_max_attempts: int = 3
     sl_exit_aggressive_offset_ticks: int = 2
     sl_exit_max_slippage: int = 20
@@ -480,8 +480,8 @@ class AppConfig(BaseSettings):
     # Panic-flatten sell price floor in cents (default 1¢). A sell at 1¢ becomes
     # immediately marketable — Kalshi fills it at the best available bid.
     sl_panic_sell_price: int = 1
-    # Retry interval (ms) between panic-flatten re-submissions (default 250ms).
-    sl_panic_retry_ms: int = 250
+    # Retry interval (ms) between panic-flatten re-submissions.
+    sl_panic_retry_ms: int = 100
     # Max retry attempts for panic-flatten exit (default 5).
     sl_panic_max_retries: int = 5
     # Maximum age (ms) of a cached YES ask quote before it is considered stale
