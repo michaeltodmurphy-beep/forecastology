@@ -595,6 +595,22 @@ class TestIntradayExitConfig:
         finally:
             os.environ.pop("INTRADAY_EXIT_ENTRY_GRACE_MINUTES", None)
 
+    def test_intraday_exit_spread_default_zero(self):
+        cfg = self._base_cfg()
+        assert cfg.intraday_exit_spread == 0
+
+    def test_intraday_exit_spread_from_env(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["INTRADAY_EXIT_SPREAD"] = "10"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.intraday_exit_spread == 10
+        finally:
+            os.environ.pop("INTRADAY_EXIT_SPREAD", None)
+
 
 class TestSunriseEntryGateConfig:
     def setup_method(self):

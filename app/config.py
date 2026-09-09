@@ -600,6 +600,14 @@ class AppConfig(BaseSettings):
     intraday_exit_enabled: bool = True
     intraday_exit_schedule: str = _INTRADAY_EXIT_SCHEDULE_DEFAULT
     intraday_exit_entry_grace_minutes: int = 90
+    # INTRADAY_EXIT_SPREAD=0..99  (default: 0 = disabled / unlimited)
+    #   Max allowed ask-bid spread (in cents) before a scheduled intraday
+    #   checkpoint exit will actually sell a held KXLOW* position.  On each
+    #   exit evaluation, if the live (yes_ask - yes_bid) exceeds this value
+    #   (e.g. ask 90 / bid 78 -> spread 12 > 10), the exit is deferred and
+    #   re-evaluated on the next ~30 s cycle instead of selling into a thin
+    #   or widened book.  0 disables the gate entirely.
+    intraday_exit_spread: int = 0
     # ── High-water-mark deterioration exit (opt-in) ──────────────────────────
     # Once a held KXLOW* position's ask has reached HWM_ARM_PRICE after local
     # noon, arms a deterioration trigger: if the ask subsequently drops to
@@ -955,6 +963,11 @@ class AppConfig(BaseSettings):
             "INTRADAY_EXIT_ENTRY_GRACE_MINUTES",
             default=90,
         )
+        intraday_exit_spread = _parse_non_negative_int(
+            os.getenv("INTRADAY_EXIT_SPREAD"),
+            "INTRADAY_EXIT_SPREAD",
+            default=0,
+        )
         hwm_exit_enabled = _parse_trade_toggle(
             os.getenv("HWM_EXIT_ENABLED"),
             "HWM_EXIT_ENABLED",
@@ -1031,6 +1044,7 @@ class AppConfig(BaseSettings):
             intraday_exit_enabled=intraday_exit_enabled,
             intraday_exit_schedule=intraday_exit_schedule,
             intraday_exit_entry_grace_minutes=intraday_exit_entry_grace_minutes,
+            intraday_exit_spread=intraday_exit_spread,
             hwm_exit_enabled=hwm_exit_enabled,
             hwm_arm_price=hwm_arm_price,
             hwm_exit_price=hwm_exit_price,

@@ -4935,6 +4935,7 @@ class TemperatureStrategy:
             getattr(self.config, "intraday_exit_schedule", None)
         )
         grace_minutes = int(getattr(self.config, "intraday_exit_entry_grace_minutes", 90))
+        intraday_spread_limit = int(getattr(self.config, "intraday_exit_spread", 0))
         hwm_arm_price = int(getattr(self.config, "hwm_arm_price", 93))
         hwm_exit_price = int(getattr(self.config, "hwm_exit_price", 88))
         # Seconds between first below-threshold read and confirmation read.
@@ -5024,6 +5025,29 @@ class TemperatureStrategy:
                         self._intraday_checkpoint_pending.pop(chk_key, None)
                         continue
 
+                    # INTRADAY_EXIT_SPREAD gate: only sell if the live ask-bid
+                    # spread is within the configured limit.  If the spread is too
+                    # wide (a gapped/thin book), defer this cycle and re-evaluate
+                    # on the next ~30 s cycle instead of dumping into a weak bid.
+                    # The position is never permanently skipped; it sells as soon
+                    # as the spread tightens within limit.
+                    if (
+                        intraday_spread_limit > 0
+                        and yes_ask is not None
+                        and yes_bid is not None
+                        and (yes_ask - yes_bid) > intraday_spread_limit
+                    ):
+                        self._intraday_checkpoint_pending.pop(chk_key, None)
+                        logger.info(
+                            "intraday.exit_skipped_wide_spread",
+                            ticker=ticker,
+                            checkpoint=chk_time_str,
+                            yes_ask=yes_ask,
+                            yes_bid=yes_bid,
+                            spread=(yes_ask - yes_bid) if (yes_ask is not None and yes_bid is not None) else None,
+                            spread_limit=intraday_spread_limit,
+                        )
+                        continue
                     # Ask is below threshold
                     if in_grace:
                         logger.info(

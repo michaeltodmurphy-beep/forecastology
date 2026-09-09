@@ -7328,6 +7328,79 @@ async def test_intraday_checkpoint_pending_then_confirmed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_intraday_checkpoint_skips_when_spread_too_wide(monkeypatch):
+    """Spread above INTRADAY_EXIT_SPREAD: defer, do not enter pending or exit."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, intraday_exit_enabled=True, intraday_exit_spread=10)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Ask 82 < 85 threshold, but bid 70 gives spread 12 > 10 -> too wide
+    strategy.cache.update_quote(ticker, 70, 82)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    assert any(ev == "intraday.exit_skipped_wide_spread" for ev, _ in logged)
+    assert not any(ev == "intraday.exit_confirmed" for ev, _ in logged)
+    assert not any(ev == "intraday.exit_pending_confirmation" for ev, _ in logged)
+    chk_key = (ticker, "12:00")
+    assert chk_key not in strategy._intraday_checkpoint_pending
+    assert chk_key not in strategy._intraday_checkpoint_eval_dates
+    strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_intraday_checkpoint_defer_is_not_permanent(monkeypatch):
+    """Wide spread defers; once the spread tightens within limit, the exit fires."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(monkeypatch, executor=executor, intraday_exit_enabled=True, intraday_exit_spread=10)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTBOS")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    # Cycle 1: wide spread (ask 82 / bid 70, spread 12 > 10) -> deferred
+    strategy.cache.update_quote(ticker, 70, 82)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert any(ev == "intraday.exit_skipped_wide_spread" for ev, _ in logged)
+    strategy._execute_stop_loss.assert_not_awaited()
+    chk_key = (ticker, "12:00")
+    assert chk_key not in strategy._intraday_checkpoint_eval_dates
+
+    # Cycle 2: spread tightens (ask 82 / bid 80, spread 2 <= 10) -> pending set
+    strategy.cache.update_quote(ticker, 80, 82)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert any(ev == "intraday.exit_pending_confirmation" for ev, _ in logged)
+    strategy._execute_stop_loss.assert_not_awaited()
+
+    # 65 s later, still below threshold within spread -> confirmed exit
+    strategy._intraday_checkpoint_pending[chk_key] = strategy._intraday_checkpoint_pending[chk_key] - 65
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert any(ev == "intraday.exit_confirmed" for ev, _ in logged)
+    strategy._execute_stop_loss.assert_awaited_once()
+
+@pytest.mark.asyncio
 async def test_intraday_checkpoint_flicker_ignored(monkeypatch):
     """Ask recovers above threshold before 60 s: confirmation is cleared, no exit."""
     logged = capture_logs(monkeypatch)
