@@ -835,3 +835,99 @@ class SunriseEntryGate:
 
         self._temp_cache[cache_key] = (cache_now, True, "sunrise.gate_open", check_ctx)
         return True, "sunrise.gate_open", check_ctx
+
+
+    def forecast_dips_below_bracket(
+        self,
+        ticker: str,
+        bracket_temp_f: float,
+        now_utc: Optional[datetime.datetime] = None,
+    ) -> tuple[bool, dict]:
+        """FORECAST analog of :meth:`day_has_dipped_below` (default = OFF).
+
+        Returns (blocked, ctx) where blocked is True when the NWS hourly
+        FORECAST minimum over the remaining LOCAL hours of the current trading
+        day (from now through the next market-close boundary -- ~01:00 local;
+        00:00 for Phoenix) is projected below *bracket_temp_f* + a fixed 1F
+        cushion.  Callers gate this on the (default-off) config toggle.  Fails
+        OPEN (False) on any fetch/parse/unavailable input so a transient NWS
+        outage never stalls a legitimate entry.
+        """
+        ctx: dict = {"blocked": False, "projected_min_f": None, "ticker": ticker}
+        series = get_series_prefix(ticker)
+        if series is None or not series.startswith("KXLOW"):
+            return False, ctx
+        coords = SERIES_STATION_COORDS.get(series)
+        tz_name = get_series_timezone(ticker)
+        if (coords is None) or (tz_name is None):
+            return False, ctx
+        station_id = coords[0]
+        ctx["station_code"] = station_id
+        try:
+            station_tz = ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001
+            return False, ctx
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=datetime.timezone.utc)
+        now_utc = now_utc.astimezone(datetime.timezone.utc)
+        now_local = now_utc.astimezone(station_tz)
+        ctx["tz_name"] = tz_name
+        ctx["local_time"] = now_local.isoformat()
+
+        # Next market-close boundary in station-local time.
+        is_phoenix = station_id == "KPHX"
+        close_clock = datetime.time(0, 0) if is_phoenix else datetime.time(1, 0)
+        cand = datetime.datetime.combine(now_local.date(), close_clock, tzinfo=station_tz)
+        if cand <= now_local:
+            cand = cand + datetime.timedelta(days=1)
+        close_local = cand
+
+        try:
+            _lat, _lon, hourly_url, _tz = self.nws_client._get_station_metadata(station_id)  # noqa: SLF001
+            periods = self.nws_client._get_hourly_periods(hourly_url)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "sunrise.forecast_dip_unavailable",
+                station=station_id,
+                error_class=type(exc).__name__,
+            )
+            return False, ctx
+
+        projected: Optional[float] = None
+        for period in periods or []:
+            start_str = period.get("startTime")
+            temp = period.get("temperature")
+            if (start_str is None) or (temp is None):
+                continue
+            try:
+                period_local = datetime.datetime.fromisoformat(start_str).astimezone(station_tz)
+            except (TypeError, ValueError):
+                continue
+            if (period_local <= now_local) or (period_local >= close_local):
+                continue
+            try:
+                val = float(temp)
+            except (TypeError, ValueError):
+                continue
+            if str(period.get("temperatureUnit", "F")).upper() == "C":
+                val = _c_to_f(val)
+            if (projected is None) or (val < projected):
+                projected = val
+
+        ctx["projected_min_f"] = None if projected is None else round(projected, 2)
+        if projected is None:
+            return False, ctx
+        if projected < (bracket_temp_f + 1.0):
+            ctx["blocked"] = True
+            ctx["bracket_temp_f"] = bracket_temp_f
+            logger.info(
+                "sunrise.blocked_forecast_dip_below_bracket",
+                series=series,
+                station=station_id,
+                ticker=ticker,
+                projected_min_f=float(ctx["projected_min_f"]),
+                bracket_temp_f=bracket_temp_f,
+            )
+        return ctx["blocked"], ctx

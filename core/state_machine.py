@@ -2323,6 +2323,28 @@ class TemperatureStrategy:
                                 day_min_f=_below_ctx.get('day_min_f'),
                             )
                             continue
+                # --- FORECAST overnight-dip-below-bracket gate (Low only) ----------
+                if (
+                    is_low
+                    and getattr(self.config, 'block_entry_when_forecast_dips_below_bracket', False)
+                ):
+                    from core.trade_outcome_utils import parse_bracket_temp as _parse_bracket_temp_fc
+                    _fc_bracket_f = _parse_bracket_temp_fc(ticker)
+                    if _fc_bracket_f is not None:
+                        _fc_blocked, _fc_ctx = self._sunrise_entry_gate.forecast_dips_below_bracket(
+                            ticker,
+                            _fc_bracket_f,
+                            now_utc=now_utc,
+                        )
+                        if _fc_blocked:
+                            logger.info(
+                                'entry.blocked_forecast_dips_below_bracket',
+                                ticker=ticker,
+                                bracket_temp_f=_fc_bracket_f,
+                                projected_min_f=_fc_ctx.get('projected_min_f'),
+                            )
+                            continue
+                # ------------------------------------------------------------------
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)
                 apply_nws_temp_gate = (
