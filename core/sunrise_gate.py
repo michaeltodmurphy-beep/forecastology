@@ -14,6 +14,7 @@ from app.config import AppConfig
 from core.local_time_gate import get_series_prefix, get_series_timezone
 from core.log_dedupe import DedupeLogger
 from core.station_coords import SERIES_STATION_COORDS
+from core.trade_outcome_utils import parse_bracket_kind
 from nws.awc_obs import ObsList, fetch_obs_with_fallback
 from nws.client import NWSClient
 
@@ -286,12 +287,21 @@ class SunriseEntryGate:
         bracket_temp_f: float,
         now_utc: Optional[datetime.datetime] = None,
     ) -> tuple[bool, dict]:
-        """Return True if the NWS 5-min obs feed has dipped below *bracket_temp_f*
+        """Return True if the NWS 5-min obs feed has breached *bracket_temp_f*
         since local midnight (the trading day's start).
 
-        When True this signals the LOW ``stays >= X°F`` bracket has already been
-        breached by the *observed* feed today, so an "N% confidence" market is
-        not nearly as safe as the crowd thinks.  Callers should refuse entry.
+        When True this signals the LOW bracket has already been breached by the
+        *observed* feed today, so an "N% confidence" market is not nearly as
+        safe as the crowd thinks.  Callers should refuse entry.
+
+        The boundary is bracket-kind-aware (see
+        :func:`core.trade_outcome_utils.parse_bracket_kind`):
+
+          - ``T<n>`` ("strictly greater than n"): the market needs the low to
+            be strictly above *n*, so an observed minimum EQUAL to *n* already
+            fails -- block when ``day_min <= bracket_temp_f``.
+          - ``B<n>`` ("greater-than-or-equal-to n"): equality still satisfies
+            the market -- block only when ``day_min < bracket_temp_f``.
 
         Returns ``(blocked, ctx)`` where *ctx* carries diagnostics.  Fails
         OPEN (returns False) if observations cannot be fetched, so a transient
@@ -371,9 +381,23 @@ class SunriseEntryGate:
             else None
         )
         if ctx["day_min_f"] is not None:
-            below = state.min_since_local_midnight_f < bracket_temp_f
+            # Bracket-kind-aware boundary.  Kalshi encodes the settlement
+            # inequality in the bracket prefix:
+            #   T<n>  ("strictly greater than n"): a reading EQUAL to n already
+            #         fails to satisfy the market, so block on day_min <= n.
+            #   B<n>  ("greater-than-or-equal-to n"): equality still satisfies
+            #         the market, so block only on day_min < n.
+            # Collapsing both to a single "<" comparison let a T-bracket entry
+            # through when the observed minimum merely touched the line.
+            bracket_kind = parse_bracket_kind(ticker)
+            inclusive = bracket_kind == "B"
+            if inclusive:
+                below = state.min_since_local_midnight_f < bracket_temp_f
+            else:
+                below = state.min_since_local_midnight_f <= bracket_temp_f
             ctx["below"] = below
             ctx["blocked"] = below
+            ctx["bracket_kind"] = bracket_kind
             if below:
                 logger.info(
                     "gate.blocked_below_bracket",
@@ -382,6 +406,7 @@ class SunriseEntryGate:
                     ticker=ticker,
                     day_min_f=float(ctx["day_min_f"]),
                     bracket_temp_f=bracket_temp_f,
+                    bracket_kind=bracket_kind,
                 )
         return ctx["blocked"], ctx
 
@@ -848,10 +873,18 @@ class SunriseEntryGate:
         Returns (blocked, ctx) where blocked is True when the NWS hourly
         FORECAST minimum over the remaining LOCAL hours of the current trading
         day (from now through the next market-close boundary -- ~01:00 local;
-        00:00 for Phoenix) is projected below *bracket_temp_f* + a fixed 1F
-        cushion.  Callers gate this on the (default-off) config toggle.  Fails
-        OPEN (False) on any fetch/parse/unavailable input so a transient NWS
-        outage never stalls a legitimate entry.
+        00:00 for Phoenix) is not safely above the market line.
+
+        The boundary is bracket-kind-aware:
+
+          - ``T<n>`` ("strictly greater than n"): the market needs the low to be
+            strictly above *n*, so block when ``projected <= n + cushion``.
+          - ``B<n>`` ("greater-than-or-equal-to n"): block when
+            ``projected < n + cushion``.
+
+        The cushion is a fixed 1°F.  Callers gate this on the (default-off)
+        config toggle.  Fails OPEN (False) on any fetch/parse/unavailable input
+        so a transient NWS outage never stalls a legitimate entry.
         """
         ctx: dict = {"blocked": False, "projected_min_f": None, "ticker": ticker}
         series = get_series_prefix(ticker)
@@ -919,7 +952,25 @@ class SunriseEntryGate:
         ctx["projected_min_f"] = None if projected is None else round(projected, 2)
         if projected is None:
             return False, ctx
-        if projected < (bracket_temp_f + 1.0):
+
+        # Bracket-kind-aware forecast boundary.  The rule is "block unless the
+        # remaining-hours forecast minimum is safely ABOVE the market line".
+        #   T<n> ("strictly greater than n"): the market needs the low > n, so
+        #       require projected > n + cushion.  Equality is not enough.
+        #   B<n> ("greater-than-or-equal-to n"): the market needs the low >= n,
+        #       so require projected >= n + cushion.
+        # Cushion is 1°F by default (matches the original behavior for B), but
+        # for T brackets we require strictly greater than n + cushion.  This
+        # closes the gap where a forecast merely touching the line slipped an
+        # exclusive-bracket entry through.
+        bracket_kind = parse_bracket_kind(ticker)
+        threshold = bracket_temp_f + 1.0
+        if bracket_kind == "T":
+            blocked = projected <= threshold
+        else:
+            blocked = projected < threshold
+        ctx["bracket_kind"] = bracket_kind
+        if blocked:
             ctx["blocked"] = True
             ctx["bracket_temp_f"] = bracket_temp_f
             logger.info(
@@ -929,5 +980,6 @@ class SunriseEntryGate:
                 ticker=ticker,
                 projected_min_f=float(ctx["projected_min_f"]),
                 bracket_temp_f=bracket_temp_f,
+                bracket_kind=bracket_kind,
             )
         return ctx["blocked"], ctx

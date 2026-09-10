@@ -70,6 +70,36 @@ def parse_bracket_temp(market_ticker: str) -> Optional[float]:
         return None
 
 
+def parse_bracket_kind(market_ticker: str) -> Optional[str]:
+    """Return the bracket inequality kind for *market_ticker*'s last segment.
+
+    Kalshi encodes the settlement inequality in the bracket prefix letter:
+
+      - ``T`` → **strictly greater than** the line (e.g. ``T75`` = "low > 75").
+        A market settles YES only when the value is strictly above the line, so
+        an observed value of *exactly* the line is a LOSS.
+      - ``B`` → **greater-than-or-equal-to** the line (e.g. ``B75`` = "low >= 75";
+        Kalshi's "below range" brackets are written as ``B`` on the lower edge).
+        An observed value *equal* to the line is a WIN.
+
+    Returns ``"T"``, ``"B"``, or ``None`` when the segment cannot be parsed.
+
+    This exists because the entry gates must treat the boundary differently for
+    the two kinds: a ``T`` line is exclusive (``> X``), a ``B`` line is
+    inclusive (``>= X``).  Collapsing both to a single number loses the
+    strict-inequality boundary and lets a ``T`` entry through when the observed
+    (or forecast) minimum merely *touches* the line.
+    """
+    parts = market_ticker.split("-")
+    if len(parts) < 3:
+        return None
+    bracket_seg = parts[-1]
+    m = _BRACKET_RE.match(bracket_seg)
+    if m is None:
+        return None
+    return bracket_seg[0].upper()
+
+
 # ---------------------------------------------------------------------------
 # Family detection
 # ---------------------------------------------------------------------------

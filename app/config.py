@@ -446,8 +446,11 @@ class AppConfig(BaseSettings):
     # ── Observed-feed "day already dipped below bracket" entry guard ────────
     # BLOCK_ENTRY_WHEN_BELOW_BRACKET=yes|no  (default: yes / true)
     # When enabled, a LOW 'daily temp stays >= X°F' bracket is not entered once
-    # the live NWS 5-min obs feed has already dipped below X°F (the bracket
+    # the live NWS 5-min obs feed has already breached X°F (the bracket
     # temperature parsed from the ticker) sometime during the local trading day.
+    # The boundary is bracket-kind-aware:
+    #   T<n> ("strictly greater than n") → block when day_min <= n.
+    #   B<n> ("greater-than-or-equal-to n") → block when day_min < n.
     # A "93% confidence" market is worthless when the observed feed has already
     # breached the line we'd be betting on.  Parsed by from_env().
     block_entry_when_below_bracket: bool = True
@@ -455,9 +458,12 @@ class AppConfig(BaseSettings):
     # FORECAST analog of the flag above: when enabled, a LOW 'daily temp
     # stays >= X F' bracket is also refused when the NWS HOURLY FORECAST minimum
     # for the remaining local hours of the market's trading day (through the
-    # next-day close, ~01:00 local / 00:00 Phoenix) is projected at-or-below
-    # the bracket line plus a fixed 1F cushion.  Default OFF (& fail-open) so the running bot's
-    # behavior is unchanged until explicitly enabled.  Parsed by from_env().
+    # next-day close, ~01:00 local / 00:00 Phoenix) is not safely above the line
+    # plus a fixed 1F cushion.  The boundary is bracket-kind-aware:
+    #   T<n> ("strictly greater than n") → block when projected <= n + cushion.
+    #   B<n> ("greater-than-or-equal-to n") → block when projected < n + cushion.
+    # Default OFF (& fail-open) so the running bot's behavior is unchanged until
+    # explicitly enabled.  Parsed by from_env().
     block_entry_when_forecast_dips_below_bracket: bool = False
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs

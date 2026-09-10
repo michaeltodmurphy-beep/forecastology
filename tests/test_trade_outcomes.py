@@ -67,6 +67,7 @@ def test_trade_outcome_columns_exist():
 # ---------------------------------------------------------------------------
 
 from core.trade_outcome_utils import entry_price_bucket, parse_bracket_temp, detect_family
+from core.trade_outcome_utils import parse_bracket_kind
 
 
 @pytest.mark.parametrize("price,expected", [
@@ -103,6 +104,20 @@ def test_entry_price_bucket(price, expected):
 def test_parse_bracket_temp(ticker, expected):
     result = parse_bracket_temp(ticker)
     assert result == expected
+
+
+@pytest.mark.parametrize("ticker,expected", [
+    ("KXLOWTBOS-26JUL16-B52.5",  "B"),
+    ("KXLOWTPHX-26JUL16-B60",    "B"),
+    ("KXLOWTLAX-26SEP10-T75",    "T"),
+    ("KXHIGHTATL-26JUL16-T95",   "T"),
+    ("KXLOWTCHI-26JUN24-T84",    "T"),
+    ("BADTICKER",                None),
+    ("NO-BRACKET",               None),
+    ("A-B",                      None),
+])
+def test_parse_bracket_kind(ticker, expected):
+    assert parse_bracket_kind(ticker) == expected
 
 
 # ---------------------------------------------------------------------------

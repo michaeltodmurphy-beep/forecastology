@@ -932,6 +932,63 @@ def test_kxhigh_series_always_allowed():
     assert result.allowed is True
 
 
+# ---------------------------------------------------------------------------
+# day_has_dipped_below: bracket-kind-aware boundary (T exclusive / B inclusive)
+# ---------------------------------------------------------------------------
+
+def _gate_for_day_min(obs_payload):
+    """Build a gate wired so day_has_dipped_below can read obs from the fake client."""
+    cfg = _make_config(sunrise_obs_source="nws")
+    client = _FakeNWSClient(obs_payload=obs_payload)
+    return SunriseEntryGate(cfg, nws_client=client)
+
+
+# now_utc firmly inside the KXLOWTNYC/LAX local day (2026-08-09): 14:00 UTC = 10:00 EDT.
+_NOW_DIP = datetime.datetime(2026, 8, 9, 14, 0, tzinfo=datetime.timezone.utc)
+
+
+def test_day_has_dipped_below_B_inclusive_equality_allows():
+    """B<n> line: observation EQUAL to the line is NOT below -> not blocked."""
+    # 20.0C = 68.0F exactly. B68 -> equality is a WIN -> not blocked.
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 20.0)])
+    gate = _gate_for_day_min(obs)
+    blocked, ctx = gate.day_has_dipped_below("KXLOWTNYC-26AUG09-B68", 68.0, now_utc=_NOW_DIP)
+    assert blocked is False
+    assert ctx["bracket_kind"] == "B"
+    assert ctx["day_min_f"] == 68.0
+
+
+def test_day_has_dipped_below_B_inclusive_below_blocks():
+    """B<n> line: observation strictly below the line blocks."""
+    # 19.4C = 66.92F < 68 -> blocked
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 19.4)])
+    gate = _gate_for_day_min(obs)
+    blocked, ctx = gate.day_has_dipped_below("KXLOWTNYC-26AUG09-B68", 68.0, now_utc=_NOW_DIP)
+    assert blocked is True
+    assert ctx["bracket_kind"] == "B"
+
+
+def test_day_has_dipped_below_T_exclusive_equality_blocks():
+    """T<n> line (strictly greater): observation EQUAL to the line already fails -> block."""
+    # 20.0C = 68.0F exactly. T68 requires low > 68, so 68.0 is a LOSS -> block.
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 20.0)])
+    gate = _gate_for_day_min(obs)
+    blocked, ctx = gate.day_has_dipped_below("KXLOWTLAX-26AUG09-T68", 68.0, now_utc=_NOW_DIP)
+    assert blocked is True
+    assert ctx["bracket_kind"] == "T"
+    assert ctx["day_min_f"] == 68.0
+
+
+def test_day_has_dipped_below_T_exclusive_above_allows():
+    """T<n> line: observation strictly above the line is safe -> not blocked."""
+    # 21.0C = 69.8F > 68 -> safe
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 21.0)])
+    gate = _gate_for_day_min(obs)
+    blocked, ctx = gate.day_has_dipped_below("KXLOWTLAX-26AUG09-T68", 68.0, now_utc=_NOW_DIP)
+    assert blocked is False
+    assert ctx["bracket_kind"] == "T"
+
+
 def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):
     """In NWS_WINDOW mode the state machine does not call evaluate(); gate is inert."""
     # The evaluate method itself allows non-KXLOW series. NWS_WINDOW bypasses the
