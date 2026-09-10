@@ -2326,6 +2326,7 @@ class TemperatureStrategy:
                 # --- FORECAST overnight-dip-below-bracket gate (Low only) ----------
                 if (
                     is_low
+                    and self.config.entry_gate_mode == "SUNRISE"
                     and getattr(self.config, 'block_entry_when_forecast_dips_below_bracket', False)
                 ):
                     try:

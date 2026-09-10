@@ -38,8 +38,10 @@ class _FakeNWSClient:
         self.station_meta = station_meta or (0.0, 0.0, "https://api.weather.gov/hourly", "UTC")
         self.raise_obs = raise_obs
         self.raise_meta = raise_meta
+        self.fetched_urls: list[str] = []
 
     def _get_json(self, url: str):
+        self.fetched_urls.append(url)
         if self.raise_obs:
             raise RuntimeError("obs fetch error")
         return self.obs_payload
@@ -987,6 +989,25 @@ def test_day_has_dipped_below_T_exclusive_above_allows():
     blocked, ctx = gate.day_has_dipped_below("KXLOWTLAX-26AUG09-T68", 68.0, now_utc=_NOW_DIP)
     assert blocked is False
     assert ctx["bracket_kind"] == "T"
+
+
+def test_day_has_dipped_below_obs_start_is_station_local_midnight_utc():
+    """Regression: the obs fetch ?start= must be station-local midnight in UTC,
+    independent of the host machine TZ (previously used a naive datetime)."""
+    import re as _re
+
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 20.0)])
+    cfg = _make_config(sunrise_obs_source="nws")
+    client = _FakeNWSClient(obs_payload=obs)
+    gate = SunriseEntryGate(cfg, nws_client=client)
+    # KXLOWTLAX -> America/Los_Angeles; 2026-08-09 is PDT (UTC-7).
+    gate.day_has_dipped_below("KXLOWTLAX-26AUG09-T68", 68.0, now_utc=_NOW_DIP)
+
+    assert client.fetched_urls, "expected an obs fetch URL to be captured"
+    m = _re.search(r"start=([0-9T:\-]+Z)", client.fetched_urls[0])
+    assert m is not None, f"no start= param in {client.fetched_urls[0]!r}"
+    # Local midnight 2026-08-09 00:00 PDT == 2026-08-09 07:00 UTC.
+    assert m.group(1) == "2026-08-09T07:00:00Z"
 
 
 def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):

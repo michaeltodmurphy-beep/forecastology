@@ -340,10 +340,13 @@ class SunriseEntryGate:
         )
 
         if should_refresh:
-            start_local = datetime.datetime.combine(local_date, datetime.time.min)
-            # Obs fetched from NWS are UTC-timestamped.  Asking for the UTC
-            # instant that corresponds to local midnight is sufficient.
-            start_utc = start_local.astimezone(tz).astimezone(datetime.timezone.utc)
+            # Obs fetched from NWS are UTC-timestamped. Anchor the window at
+            # local midnight IN THE STATION'S TIMEZONE (tz-aware) so the offset
+            # does not depend on the host machine's TZ, then convert to UTC.
+            start_local = datetime.datetime.combine(
+                local_date, datetime.time.min, tzinfo=tz
+            )
+            start_utc = start_local.astimezone(datetime.timezone.utc)
             start_iso = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
                 raw_obs, _src = self._fetch_station_obs(
