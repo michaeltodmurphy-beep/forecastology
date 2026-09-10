@@ -251,6 +251,11 @@ def make_config(**overrides):
         sl_panic_max_retries=3,
         sl_panic_max_quote_age_ms=30000,
         no_trade_tickers=set(),
+        # Time-of-day-dependent entry gates: disable by default so tests are
+        # deterministic regardless of when the suite runs. Tests that exercise
+        # these gates pass an explicit override.
+        low_ticker_entry_halt_enabled=False,
+        low_ticker_daily_closeout_enabled=False,
     )
     for key, value in overrides.items():
         setattr(config, key, value)
