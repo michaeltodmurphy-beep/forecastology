@@ -629,6 +629,10 @@ async def test_sunrise_window_open_resets_prewindow_falling_knife_guard(monkeypa
         entry_gate_mode="SUNRISE",
         enable_local_settle_gate=False,
         low_ticker_entry_halt_enabled=False,
+        # Exercises the sunrise-window / falling-knife reset logic, not the
+        # observed bracket gate. Disable that gate explicitly so the outcome
+        # does not depend on ambient .env (BLOCK_ENTRY_WHEN_BELOW_BRACKET).
+        block_entry_when_below_bracket=False,
     )
     ticker = "KXLOWTBOS-26JUN22-B62.5"
     bracket = _make_entry_bracket(ticker, "KXLOWTBOS")
