@@ -2301,58 +2301,6 @@ class TemperatureStrategy:
                         continue
                 # -------------------------------------------------------
 
-                # --- Observed day-already-dipped-below-bracket gate (Low only) ----------
-                if (
-                    is_low
-                    and self.config.entry_gate_mode == "SUNRISE"
-                    and getattr(self.config, 'block_entry_when_below_bracket', False)
-                ):
-                    from core.trade_outcome_utils import parse_bracket_temp
-                    _bracket_temp_f = parse_bracket_temp(ticker)
-                    if _bracket_temp_f is not None:
-                        _, _below_ctx = self._sunrise_entry_gate.day_has_dipped_below(
-                            ticker,
-                            _bracket_temp_f,
-                            now_utc=now_utc,
-                        )
-                        if _below_ctx.get('blocked'):
-                            logger.info(
-                                'entry.blocked_day_min_below_bracket',
-                                ticker=ticker,
-                                bracket_temp_f=_bracket_temp_f,
-                                day_min_f=_below_ctx.get('day_min_f'),
-                            )
-                            continue
-                # --- FORECAST overnight-dip-below-bracket gate (Low only) ----------
-                if (
-                    is_low
-                    and self.config.entry_gate_mode == "SUNRISE"
-                    and getattr(self.config, 'block_entry_when_forecast_dips_below_bracket', False)
-                ):
-                    try:
-                        from core.trade_outcome_utils import parse_bracket_temp as _parse_bracket_temp_fc
-                        _fc_bracket_f = _parse_bracket_temp_fc(ticker)
-                        if _fc_bracket_f is not None:
-                            _fc_blocked, _fc_ctx = self._sunrise_entry_gate.forecast_dips_below_bracket(
-                                ticker,
-                                _fc_bracket_f,
-                                now_utc=now_utc,
-                            )
-                            if _fc_blocked:
-                                logger.info(
-                                    'entry.blocked_forecast_dips_below_bracket',
-                                    ticker=ticker,
-                                    bracket_temp_f=_fc_bracket_f,
-                                    projected_min_f=_fc_ctx.get('projected_min_f'),
-                                )
-                                continue
-                    except Exception as _fc_exc:  # noqa: BLE001
-                        logger.warning(
-                            'entry.forecast_dips_gate_error_fail_open',
-                            ticker=ticker,
-                            error_class=type(_fc_exc).__name__,
-                        )
-                # ------------------------------------------------------------------
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)
                 apply_nws_temp_gate = (
@@ -4965,7 +4913,6 @@ class TemperatureStrategy:
             getattr(self.config, "intraday_exit_schedule", None)
         )
         grace_minutes = int(getattr(self.config, "intraday_exit_entry_grace_minutes", 90))
-        intraday_spread_limit = int(getattr(self.config, "intraday_exit_spread", 0))
         hwm_arm_price = int(getattr(self.config, "hwm_arm_price", 93))
         hwm_exit_price = int(getattr(self.config, "hwm_exit_price", 88))
         # Seconds between first below-threshold read and confirmation read.
@@ -5055,29 +5002,6 @@ class TemperatureStrategy:
                         self._intraday_checkpoint_pending.pop(chk_key, None)
                         continue
 
-                    # INTRADAY_EXIT_SPREAD gate: only sell if the live ask-bid
-                    # spread is within the configured limit.  If the spread is too
-                    # wide (a gapped/thin book), defer this cycle and re-evaluate
-                    # on the next ~30 s cycle instead of dumping into a weak bid.
-                    # The position is never permanently skipped; it sells as soon
-                    # as the spread tightens within limit.
-                    if (
-                        intraday_spread_limit > 0
-                        and yes_ask is not None
-                        and yes_bid is not None
-                        and (yes_ask - yes_bid) > intraday_spread_limit
-                    ):
-                        self._intraday_checkpoint_pending.pop(chk_key, None)
-                        logger.info(
-                            "intraday.exit_skipped_wide_spread",
-                            ticker=ticker,
-                            checkpoint=chk_time_str,
-                            yes_ask=yes_ask,
-                            yes_bid=yes_bid,
-                            spread=(yes_ask - yes_bid) if (yes_ask is not None and yes_bid is not None) else None,
-                            spread_limit=intraday_spread_limit,
-                        )
-                        continue
                     # Ask is below threshold
                     if in_grace:
                         logger.info(
