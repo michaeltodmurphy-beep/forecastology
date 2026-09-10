@@ -451,6 +451,14 @@ class AppConfig(BaseSettings):
     # A "93% confidence" market is worthless when the observed feed has already
     # breached the line we'd be betting on.  Parsed by from_env().
     block_entry_when_below_bracket: bool = True
+    # BLOCK_ENTRY_WHEN_FORECAST_DIPS_BELOW_BRACKET=yes|no  (default: no / false)
+    # FORECAST analog of the flag above: when enabled, a LOW 'daily temp
+    # stays >= X F' bracket is also refused when the NWS HOURLY FORECAST minimum
+    # for the remaining local hours of the market's trading day (through the
+    # next-day close, ~01:00 local / 00:00 Phoenix) is projected at-or-below
+    # the bracket line plus a fixed 1F cushion.  Default OFF (& fail-open) so the running bot's
+    # behavior is unchanged until explicitly enabled.  Parsed by from_env().
+    block_entry_when_forecast_dips_below_bracket: bool = False
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 50–250 ms.  Configurable via
@@ -878,6 +886,11 @@ class AppConfig(BaseSettings):
             "BLOCK_ENTRY_WHEN_BELOW_BRACKET",
             default=True,
         )
+        block_entry_when_forecast_dips_below_bracket = _parse_trade_toggle(
+            os.getenv("BLOCK_ENTRY_WHEN_FORECAST_DIPS_BELOW_BRACKET"),
+            "BLOCK_ENTRY_WHEN_FORECAST_DIPS_BELOW_BRACKET",
+            default=False,
+        )
         falling_knife_decay_minutes = _parse_non_negative_int(
             os.getenv("FALLING_KNIFE_DECAY_MINUTES"),
             "FALLING_KNIFE_DECAY_MINUTES",
@@ -1015,6 +1028,7 @@ class AppConfig(BaseSettings):
             sunrise_obs_max_age_overrides=sunrise_obs_max_age_overrides,
             sunrise_obs_source=sunrise_obs_source,
             block_entry_when_below_bracket=block_entry_when_below_bracket,
+            block_entry_when_forecast_dips_below_bracket=block_entry_when_forecast_dips_below_bracket,
             falling_knife_decay_minutes=falling_knife_decay_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
