@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -31,6 +32,28 @@ _AM_LOW_CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 def _c_to_f(celsius: float) -> float:
     return celsius * _CELSIUS_TO_F_FACTOR + 32.0
+
+
+def _round_f_half_up(temp_f: float) -> int:
+    """Round a Fahrenheit temperature to the nearest whole degree, ties up.
+
+    NWS publishes its 5-minute observations already rounded to the nearest
+    whole degree, and Kalshi settles on that whole-number value.  A raw
+    Celsius->Fahrenheit conversion can land on a decimal (e.g. 21.0C -> 69.8F)
+    that the exchange would have reported as 70; applying half-up rounding here
+    reproduces the published whole-degree value the market actually uses.
+    """
+    return int(math.floor(temp_f + 0.5))
+
+
+def _bracket_line_int(bracket_temp_f: float) -> int:
+    """Return the whole-degree integer the bracket line represents.
+
+    Kalshi low markets use half-integer split points between whole degrees
+    (e.g. a "B70.5" bracket covers the whole-degree values 70 and 71).  The
+    effective integer boundary is therefore `floor(line)`: 70.5 -> 70.
+    """
+    return int(math.floor(bracket_temp_f))
 
 
 @dataclass(frozen=True)
@@ -373,7 +396,10 @@ class SunriseEntryGate:
                     local_ts = obs_ts_utc.astimezone(tz)
                     if local_ts.date() != local_date:
                         continue
-                    obs_f = _c_to_f(float(temp_c))
+                    # NWS/Kalshi report whole degrees; round the converted value
+                    # (e.g. 69.8F -> 70F) so the running minimum matches the
+                    # settled whole-number low the market actually uses.
+                    obs_f = _round_f_half_up(_c_to_f(float(temp_c)))
                     if obs_f < state.min_since_local_midnight_f:
                         state.min_since_local_midnight_f = obs_f
                 state.day_min_obs_refreshed_mono = now_mono
@@ -393,11 +419,17 @@ class SunriseEntryGate:
             # Collapsing both to a single "<" comparison let a T-bracket entry
             # through when the observed minimum merely touched the line.
             bracket_kind = parse_bracket_kind(ticker)
+            # Compare whole-degree integers.  The observed minimum is already a
+            # whole number; the bracket line is a half-integer split point
+            # (B70.5 covers the whole-degree values 70 and 71), so floor it to the
+            # representative integer before comparing.
+            day_min_int = int(state.min_since_local_midnight_f)
+            line_int = _bracket_line_int(bracket_temp_f)
             inclusive = bracket_kind == "B"
             if inclusive:
-                below = state.min_since_local_midnight_f < bracket_temp_f
+                below = day_min_int < line_int
             else:
-                below = state.min_since_local_midnight_f <= bracket_temp_f
+                below = day_min_int <= line_int
             ctx["below"] = below
             ctx["blocked"] = below
             ctx["bracket_kind"] = bracket_kind

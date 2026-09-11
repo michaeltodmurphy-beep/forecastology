@@ -1010,6 +1010,46 @@ def test_day_has_dipped_below_obs_start_is_station_local_midnight_utc():
     assert m.group(1) == "2026-08-09T07:00:00Z"
 
 
+def test_day_has_dipped_below_rounds_obs_half_up_to_whole_degrees():
+    """Regression (DC B70.5 bug): a raw 21.0C = 69.8F reading must round to the
+    whole-degree 70 the exchange publishes.  For a B70.5 bracket ({70, 71}) a
+    day-min of 70 is a WIN, so the gate must NOT block."""
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 21.0)])  # 69.8F -> 70F
+    gate = _gate_for_day_min(obs)
+    blocked, ctx = gate.day_has_dipped_below("KXLOWTDC-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP)
+    assert blocked is False
+    assert ctx["day_min_f"] == 70
+    assert ctx["bracket_kind"] == "B"
+
+
+def test_day_has_dipped_below_blocks_true_breach_after_rounding():
+    """A genuinely-below reading still blocks after rounding: 19.4C = 66.92F
+    rounds to 67, which is below the B70.5 boundary (70)."""
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 19.4)])  # 66.92F -> 67F
+    gate = _gate_for_day_min(obs)
+    blocked, ctx = gate.day_has_dipped_below("KXLOWTDC-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP)
+    assert blocked is True
+    assert ctx["day_min_f"] == 67
+
+
+def test_day_has_dipped_below_half_integer_bracket_covers_two_integers():
+    """B70.5 covers whole degrees {70, 71}: a 70 is allowed, a 69 is blocked."""
+    obs_70 = _obs_features([("2026-08-09T13:50:00+00:00", 21.0)])  # -> 70
+    gate_70 = _gate_for_day_min(obs_70)
+    blocked_70, _ = gate_70.day_has_dipped_below(
+        "KXLOWTDC-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP
+    )
+    assert blocked_70 is False
+
+    obs_69 = _obs_features([("2026-08-09T13:50:00+00:00", 20.5)])  # 68.9F -> 69
+    gate_69 = _gate_for_day_min(obs_69)
+    blocked_69, ctx_69 = gate_69.day_has_dipped_below(
+        "KXLOWTDC-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP
+    )
+    assert blocked_69 is True
+    assert ctx_69["day_min_f"] == 69
+
+
 def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):
     """In NWS_WINDOW mode the state machine does not call evaluate(); gate is inert."""
     # The evaluate method itself allows non-KXLOW series. NWS_WINDOW bypasses the
