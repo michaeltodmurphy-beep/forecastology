@@ -906,9 +906,11 @@ class SunriseEntryGate:
         """FORECAST analog of :meth:`day_has_dipped_below` (default = OFF).
 
         Returns (blocked, ctx) where blocked is True when the NWS hourly
-        FORECAST minimum over the remaining LOCAL hours of the current trading
-        day (from now through the next market-close boundary -- ~01:00 local;
-        00:00 for Phoenix) is not safely above the market line.
+        FORECAST minimum over the overnight window -- 21:00 local through
+        01:00 local of the market's night (inclusive of both endpoints;
+        00:00 for Phoenix, which closes at local midnight) -- is not safely
+        above the market line.  This mirrors the "9 PM through 1 AM" rule the
+        strategy is defined on.
 
         The boundary is bracket-kind-aware:
 
@@ -944,13 +946,33 @@ class SunriseEntryGate:
         ctx["tz_name"] = tz_name
         ctx["local_time"] = now_local.isoformat()
 
-        # Next market-close boundary in station-local time.
+        # Overnight-dip window in station-local time.  The strategy's rule is
+        # "take the coldest stretch of the night -- 21:00 through 01:00 local
+        # -- and require the NWS hourly FORECAST minimum over that band to be
+        # at least bracket + 1".  Phoenix has no DST and Kalshi closes it at
+        # local midnight, so its band ends at 00:00 instead of 01:00.
+        #
+        # The band is a FIXED clock window, NOT "now -> close".  The previous
+        # implementation scanned forward from `now` and dropped every period at
+        # or after 01:00 local (`period_local >= close_local`), which silently
+        # EXCLUDED the 01:00 forecast hour -- the coldest hour of the night.
+        # KMSP on 2026-09-13 forecast 55F at 00:00 and 53F at 01:00; the 53F
+        # was discarded and only 55F was seen, so a B53.5 bracket (threshold
+        # 54.5) was NOT blocked even though 53 < 54.5.  Anchoring to the fixed
+        # 21:00->01:00 band and including the 01:00 hour fixes that.
         is_phoenix = station_id == "KPHX"
-        close_clock = datetime.time(0, 0) if is_phoenix else datetime.time(1, 0)
-        cand = datetime.datetime.combine(now_local.date(), close_clock, tzinfo=station_tz)
-        if cand <= now_local:
-            cand = cand + datetime.timedelta(days=1)
-        close_local = cand
+        start_clock = datetime.time(0, 0) if is_phoenix else datetime.time(21, 0)
+        end_clock = datetime.time(0, 0) if is_phoenix else datetime.time(1, 0)
+
+        # Anchor the band to the market's overnight night.  `end_clock` is a
+        # smaller clock time than `start_clock` (21:00 -> 01:00), so the band
+        # ends on the FOLLOWING calendar day.
+        start_local = datetime.datetime.combine(
+            now_local.date(), start_clock, tzinfo=station_tz
+        )
+        end_local = datetime.datetime.combine(
+            now_local.date() + datetime.timedelta(days=1), end_clock, tzinfo=station_tz
+        )
 
         try:
             _lat, _lon, hourly_url, _tz = self.nws_client._get_station_metadata(station_id)  # noqa: SLF001
@@ -973,7 +995,10 @@ class SunriseEntryGate:
                 period_local = datetime.datetime.fromisoformat(start_str).astimezone(station_tz)
             except (TypeError, ValueError):
                 continue
-            if (period_local <= now_local) or (period_local >= close_local):
+            # Include both ends of the band: 21:00 is an evening forecast hour
+            # on the market day and 01:00 is the coldest hour of the night.
+            # Only periods strictly OUTSIDE [start_local, end_local] are skipped.
+            if (period_local < start_local) or (period_local > end_local):
                 continue
             try:
                 val = float(temp)

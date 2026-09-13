@@ -1050,6 +1050,163 @@ def test_day_has_dipped_below_half_integer_bracket_covers_two_integers():
     assert ctx_69["day_min_f"] == 69
 
 
+# ---------------------------------------------------------------------------
+# forecast_dips_below_bracket: overnight 21:00->01:00 band (inclusive of 01:00)
+# ---------------------------------------------------------------------------
+
+
+def _overnight_pkt(local_hour: int, temp_f: float, day: int, tz: ZoneInfo) -> dict:
+    """Build an NWS hourly period starting at *local_hour* on *day* in *tz*."""
+    t = datetime.datetime(2026, 9, day, local_hour, 0, tzinfo=tz)
+    return {"startTime": t.isoformat(), "temperature": temp_f, "temperatureUnit": "F"}
+
+
+def _gate_for_forecast(periods, tz_str):
+    """Build a gate whose fake NWS client serves *periods* for the forecast scan."""
+    client = _FakeNWSClient(
+        forecast_periods=periods,
+        station_meta=(44.88, -93.22, "https://api.weather.gov/hourly", tz_str),
+    )
+    return SunriseEntryGate(_make_config(), nws_client=client)
+
+
+# now_utc = 2026-09-13 11:57Z == 06:57 CDT -- the exact minute the live bot
+# entered KXLOWTMIN-26SEP13-B53.5 after the sunrise gate opened.
+_KMSP_NOW_UTC = datetime.datetime(2026, 9, 13, 11, 57, tzinfo=datetime.timezone.utc)
+_TZ_CPT = ZoneInfo("America/Chicago")  # CDT (UTC-5) in September
+
+
+def test_forecast_dip_blocks_kmsp_b_53_5_overnight_53f():
+    """Regression (Minneapolis 2026-09-13): the overnight forecast dipped to 53F
+    at 01:00 local.  A B53.5 bracket (threshold 53.5 + 1 = 54.5) MUST block, but
+    the old code dropped the 01:00 period (`period_local >= close_local`) and saw
+    only 55F, letting the entry through."""
+    periods = [
+        _overnight_pkt(21, 60.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(22, 58.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(23, 56.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(0, 55.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 53.0, day=14, tz=_TZ_CPT),  # the 01:00 hour that was dropped
+        _overnight_pkt(2, 52.0, day=14, tz=_TZ_CPT),
+    ]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is True
+    # The scan must have seen the 01:00 (53F) period as the minimum.
+    assert ctx["projected_min_f"] == 53.0
+    assert ctx["bracket_kind"] == "B"
+
+
+def test_forecast_dip_includes_01_00_hour_when_it_is_the_minimum():
+    """The 01:00 local period is INCLUSIVE in the band.  A single 01:00 dip to 53F
+    against B53.5 must block even when every other overnight hour is warm."""
+    periods = [
+        _overnight_pkt(21, 62.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(0, 60.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 53.0, day=14, tz=_TZ_CPT),  # boundary hour, must count
+    ]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is True
+    assert ctx["projected_min_f"] == 53.0
+
+
+def test_forecast_dip_allows_when_overnight_min_is_comfortable():
+    """B53.5 needs the overnight min >= 54.5.  A 56F floor is safe (open)."""
+    periods = [
+        _overnight_pkt(21, 60.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(0, 57.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 56.0, day=14, tz=_TZ_CPT),
+    ]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["projected_min_f"] == 56.0
+
+
+def test_forecast_dip_boundary_exact_threshold_allows_for_b():
+    """B bracket is inclusive: min == bracket + cushion exactly is allowed."""
+    periods = [
+        _overnight_pkt(0, 54.5, day=14, tz=_TZ_CPT),
+    ]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    blocked, _ = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is False
+
+
+def test_forecast_dip_ignores_hours_outside_the_overnight_band():
+    """Hours BEFORE 21:00 or AFTER 01:00 local are outside the window.  A cold
+    20:00 reading must not count, and a harmless 03:00 reading must not either."""
+    periods = [
+        _overnight_pkt(20, 40.0, day=13, tz=_TZ_CPT),  # before band -> ignored
+        _overnight_pkt(23, 60.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(0, 60.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 60.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(3, 30.0, day=14, tz=_TZ_CPT),   # after band -> ignored
+    ]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["projected_min_f"] == 60.0
+
+
+def test_forecast_dip_t_bracket_uses_strict_inequality():
+    """T<n> requires the low STRICTLY above n + cushion: equality blocks."""
+    periods = [_overnight_pkt(1, 54.5, day=14, tz=_TZ_CPT)]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    # T53.5 -> threshold 54.5; projected == 54.5 => blocked (strict).
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-T53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is True
+    assert ctx["bracket_kind"] == "T"
+
+
+def test_forecast_dip_phoenix_band_ends_at_midnight():
+    """Phoenix (KPHX) closes at local midnight, so its band is 00:00->00:00 --
+    the 01:00 hour must NOT be counted for Phoenix."""
+    tz = ZoneInfo("America/Phoenix")
+    # now = 2026-09-13 20:00 MST == 2026-09-14 03:00 UTC.
+    now_utc = datetime.datetime(2026, 9, 14, 3, 0, tzinfo=datetime.timezone.utc)
+    periods = [
+        _overnight_pkt(22, 60.0, day=13, tz=tz),
+        _overnight_pkt(0, 60.0, day=14, tz=tz),   # midnight = band end (inclusive)
+        _overnight_pkt(1, 40.0, day=14, tz=tz),   # 01:00 -> OUTSIDE band for PHX
+    ]
+    gate = _gate_for_forecast(periods, "America/Phoenix")
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTPHX-26SEP13-B53.5", 53.5, now_utc=now_utc
+    )
+    # The 01:00 cold reading is excluded for Phoenix -> min seen is 60 -> allowed.
+    assert blocked is False
+    assert ctx["projected_min_f"] == 60.0
+
+
+def test_forecast_dip_fails_open_when_forecast_unavailable():
+    """A fetch error must fail OPEN (never block) so an NWS outage cannot stall
+    legitimate entries."""
+    client = _FakeNWSClient(
+        forecast_periods=None,  # _get_hourly_periods raises
+        station_meta=(44.88, -93.22, "https://api.weather.gov/hourly", "America/Chicago"),
+    )
+    gate = SunriseEntryGate(_make_config(), nws_client=client)
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["projected_min_f"] is None
+
+
 def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):
     """In NWS_WINDOW mode the state machine does not call evaluate(); gate is inert."""
     # The evaluate method itself allows non-KXLOW series. NWS_WINDOW bypasses the
