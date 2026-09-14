@@ -294,6 +294,13 @@ class TemperatureStrategy:
         self._am_low_brief_gate = DailyBriefGate(config)
         self._log_dedupe = DedupeLogger(summary_interval_seconds=300)
 
+        # Gate ledger (observability ONLY): a deduped, per-ticker lifecycle
+        # record of which entry gates a candidate PASSED or was BLOCKED by.
+        # Emits ``phase.b.decision`` lines on verdict CHANGE only (reusing the
+        # DedupeLogger fingerprint pattern).  Purely additive — it never
+        # affects any gate condition, evaluation order, or state mutation.
+        self._gate_dedupe = DedupeLogger(summary_interval_seconds=300)
+
         # Bounded queue for non-blocking trade-log persistence (Change B).
         # Trade logging is non-critical; drops are acceptable when the queue
         # is saturated so that DB writes never block the WS reader / SL path.
@@ -377,6 +384,48 @@ class TemperatureStrategy:
             dedupe_key,
             day=self._ticker_market_day(dedupe_key),
             **fields,
+        )
+
+    def _record_gate(
+        self,
+        ticker: str,
+        gate: str,
+        verdict: str,
+        *,
+        gate_type: str = "continuous",
+        parent: str = "",
+        terminal: bool = False,
+        **payload,
+    ) -> None:
+        """Record a ticker passing/blocking an entry gate for the Gate Ledger.
+
+        OBSERVABILITY ONLY.  This emits a ``phase.b.decision`` line the first
+        time a (ticker, gate) pair reaches a given (verdict, payload) state,
+        and again only when that state changes.  It never reads or mutates
+        trading state and must never be used to alter a decision.
+
+        Args:
+            ticker:    market ticker the decision applies to.
+            gate:      fully-qualified gate id, e.g. ``sunrise.temp_rise_1deg``.
+            verdict:   ``PASS`` | ``BLOCKED`` | ``OPEN`` | ``SKIPPED``.
+            gate_type: ``once`` (resolved once/day) or ``continuous``.
+            parent:    parent gate id when this is a child gate (e.g. ``sunrise``).
+            terminal:  True when this verdict is final for the trading day.
+            **payload: extra facts (numbers, reason strings) for the report.
+        """
+        self._gate_dedupe.log(
+            logger,
+            "info",
+            "phase.b.decision",
+            ticker,
+            day=self._ticker_market_day(ticker),
+            ticker=ticker,
+            gate=gate,
+            gate_type=gate_type,
+            verdict=verdict,
+            parent=parent,
+            terminal=terminal,
+            **payload,
         )
 
     @staticmethod
@@ -2166,7 +2215,16 @@ class TemperatureStrategy:
                     now_utc=now_utc,
                 )
                 if not warm_am_decision.allowed:
+                    self._record_gate(
+                        ticker, "sunrise.am_low_before_9am", "BLOCKED",
+                        gate_type="once", parent="sunrise", terminal=True,
+                        reason="am_low_deadline", warm=True,
+                    )
                     continue
+                self._record_gate(
+                    ticker, "sunrise.am_low_before_9am", "PASS",
+                    gate_type="once", parent="sunrise", warm=True,
+                )
                 sunrise_gate_allowed = True
             elif should_evaluate_entry and is_low and self.config.entry_gate_mode == "SUNRISE":
                 sunrise_decision = self._sunrise_entry_gate.evaluate(
@@ -2176,6 +2234,15 @@ class TemperatureStrategy:
                 if not sunrise_decision.allowed:
                     bracket.sunrise_window_was_open = False
                     sunrise_gate_allowed = False
+                    # Ledger: the sunrise gate blocked.  The specific CHILD that
+                    # failed is named by the gate's own ``sunrise.*`` logs
+                    # (Option Z - no strategy-file edits); here we record the
+                    # parent verdict plus the propagated flag for the report.
+                    self._record_gate(
+                        ticker, "sunrise", "BLOCKED",
+                        gate_type="once", parent="",
+                        reason="sunrise_gate_closed",
+                    )
                 else:
                     if not bracket.sunrise_window_was_open:
                         if bracket.falling_knife_guard:
@@ -2183,6 +2250,10 @@ class TemperatureStrategy:
                         self._reset_falling_knife_state(bracket)
                         bracket.sunrise_window_was_open = True
                     use_nws_window_for_low = sunrise_decision.use_nws_window_fallback
+                    self._record_gate(
+                        ticker, "sunrise", "OPEN",
+                        gate_type="once", parent="",
+                    )
             self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
 
             am_low_forecast_blocked = False
@@ -2221,12 +2292,25 @@ class TemperatureStrategy:
                 continue
 
             if price < buy_trigger:
+                self._record_gate(
+                    ticker, "price_trigger", "BLOCKED",
+                    gate_type="continuous", price=price, buy_trigger=buy_trigger,
+                )
                 logger.debug("phase.b.below_trigger", ticker=ticker, price=price,
                              buy_trigger=buy_trigger)
                 continue
+            self._record_gate(
+                ticker, "price_trigger", "PASS",
+                gate_type="continuous", price=price, buy_trigger=buy_trigger,
+            )
 
             if price > self.config.spread_monitor_price:
                 # Price above the maximum we're willing to enter; log and skip
+                self._record_gate(
+                    ticker, "price_ceiling", "BLOCKED",
+                    gate_type="continuous", price=price,
+                    max_price=self.config.spread_monitor_price,
+                )
                 self._log_deduped_info(
                     "phase.b.missed_entry",
                     ticker,
@@ -2235,8 +2319,17 @@ class TemperatureStrategy:
                     max_price=self.config.spread_monitor_price,
                 )
                 continue
+            self._record_gate(
+                ticker, "price_ceiling", "PASS",
+                gate_type="continuous", price=price,
+                max_price=self.config.spread_monitor_price,
+            )
 
             if bracket.falling_knife_guard:
+                self._record_gate(
+                    ticker, "falling_knife", "BLOCKED",
+                    gate_type="continuous", price=price,
+                )
                 self._log_deduped_info(
                     "phase.b.falling_knife_blocked",
                     ticker,
@@ -2244,11 +2337,27 @@ class TemperatureStrategy:
                     price=price,
                 )
                 continue
+            self._record_gate(
+                ticker, "falling_knife", "PASS",
+                gate_type="continuous", price=price,
+            )
 
             if not sunrise_gate_allowed:
+                # Parent sunrise already recorded above; make the deferral
+                # explicit in the ledger so a blocked sunrise is never silent.
+                self._record_gate(
+                    ticker, "sunrise", "BLOCKED",
+                    gate_type="once", parent="", reason="sunrise_gate_closed",
+                )
                 continue
 
             if am_low_forecast_blocked:
+                self._record_gate(
+                    ticker, "am_low_keyword", "BLOCKED",
+                    gate_type="once", terminal=True,
+                    series_prefix=_series_prefix,
+                    matched=sorted(am_low_forecast_matched),
+                )
                 logger.info(
                     "phase.b.entry_blocked_am_low_forecast",
                     ticker=ticker,
@@ -2257,8 +2366,18 @@ class TemperatureStrategy:
                     message="AM-low daily-brief keyword match blocked entry",
                 )
                 continue
+            if is_low and should_evaluate_entry and self.config.am_low_forecast_keywords:
+                self._record_gate(
+                    ticker, "am_low_keyword", "PASS",
+                    gate_type="once",
+                )
 
             if spread <= self.config.minimum_spread:
+                self._record_gate(
+                    ticker, "spread", "PASS",
+                    gate_type="continuous", price=price, spread=spread,
+                    minimum_spread=self.config.minimum_spread,
+                )
                 # --- Trade-direction toggle gate ---
                 if is_high and not self.config.high_trades:
                     logger.info("phase.b.entry_blocked_by_config",
@@ -2339,6 +2458,12 @@ class TemperatureStrategy:
                                 now_utc=now_utc,
                             )
                             if _fc_blocked:
+                                self._record_gate(
+                                    ticker, "overnight_9pm_1am_low", "BLOCKED",
+                                    gate_type="continuous",
+                                    bracket_temp_f=_fc_bracket_f,
+                                    projected_min_f=_fc_ctx.get('projected_min_f'),
+                                )
                                 logger.info(
                                     'entry.blocked_forecast_dips_below_bracket',
                                     ticker=ticker,
@@ -2346,12 +2471,25 @@ class TemperatureStrategy:
                                     projected_min_f=_fc_ctx.get('projected_min_f'),
                                 )
                                 continue
+                            self._record_gate(
+                                ticker, "overnight_9pm_1am_low", "PASS",
+                                gate_type="continuous",
+                                bracket_temp_f=_fc_bracket_f,
+                            )
                     except Exception as _fc_exc:  # noqa: BLE001
                         logger.warning(
                             'entry.forecast_dips_gate_error_fail_open',
                             ticker=ticker,
                             error_class=type(_fc_exc).__name__,
                         )
+                elif is_low and self.config.entry_gate_mode == "SUNRISE":
+                    # Ledger (B2): the overnight 9pm-1am low gate is disabled by
+                    # config.  Record it explicitly so the report shows "SKIPPED
+                    # (gate disabled)" instead of silently omitting the gate.
+                    self._record_gate(
+                        ticker, "overnight_9pm_1am_low", "SKIPPED",
+                        gate_type="continuous", reason="gate_disabled",
+                    )
                 # ------------------------------------------------------------------
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)
@@ -2529,6 +2667,11 @@ class TemperatureStrategy:
                 else:
                     await self._execute_entry(bracket)
             else:
+                self._record_gate(
+                    ticker, "spread", "BLOCKED",
+                    gate_type="continuous", price=price, spread=spread,
+                    minimum_spread=self.config.minimum_spread,
+                )
                 self._log_deduped_info(
                     "phase.b.spread_too_wide",
                     ticker,
