@@ -2320,6 +2320,13 @@ async def test_successive_stop_losses_advance_counter_and_double_size(monkeypatc
       - after the third SL count=3 → no more recovery buy (cap reached)
       - stop_loss_count is incremented exactly once per stop-loss
     """
+    # Pin the Eastern current-day to the ticker market date so the
+    # stale-market-date settlement path does not prune these positions
+    # when the test is run long after the ticker market day.
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: '26JUN25',
+    )
     series_ticker = "KXLOWTBOS"
     date_prefix = "26JUN25"
     # Each SL uses a distinct bracket ticker to avoid stale STOP_LOSS OrderAction conflicts
@@ -2952,6 +2959,13 @@ async def test_no_live_price_with_healthy_last_known_only_alerts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_position_absent_from_api_not_deleted_without_settlement(monkeypatch):
+    # Pin the Eastern current-day to the ticker market date so the
+    # stale-market-date settlement path does not prune these positions
+    # when the test is run long after the ticker market day.
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: '26JUN24',
+    )
     logged = capture_logs(monkeypatch)
     ticker = "KXHIGHNY-26JUN24-B82.5"
     db = InMemoryDB([
@@ -3258,6 +3272,13 @@ async def test_stale_date_absent_but_rest_reports_open_is_retained(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_absent_position_reappears_resumes_normally(monkeypatch):
+    # Pin the Eastern current-day to the ticker market date so the
+    # stale-market-date settlement path does not prune these positions
+    # when the test is run long after the ticker market day.
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: '26JUN24',
+    )
     ticker = "KXHIGHTSEA-26JUN24-B87.5"
     executor = FakeExecutor()
     executor.positions = {}
@@ -6055,6 +6076,13 @@ async def test_trade_toggle_both_disabled_blocks_all_entries(monkeypatch):
 @pytest.mark.asyncio
 async def test_trade_toggle_does_not_affect_sl_exit_for_existing_positions(monkeypatch):
     """HIGH_TRADES=no must NOT prevent stop-loss execution for existing HIGH positions."""
+    # Pin the Eastern current-day to the ticker market date so the
+    # stale-market-date settlement path does not prune these positions
+    # when the test is run long after the ticker market day.
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: '26JUN22',
+    )
     ticker = "KXHIGHLAX-26JUN22-B71.5"
     executor = FakeExecutor()
     executor.sell_success = True
@@ -6179,6 +6207,13 @@ async def test_settle_gate_disabled_does_not_block(monkeypatch):
 @pytest.mark.asyncio
 async def test_settle_gate_does_not_affect_sl_exit(monkeypatch):
     """Gate enabled (blocked time) must NOT prevent stop-loss for existing positions."""
+    # Pin the Eastern current-day to the ticker market date so the
+    # stale-market-date settlement path does not prune these positions
+    # when the test is run long after the ticker market day.
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: '26JUN25',
+    )
     import core.state_machine as _sm
     ticker = "KXLOWTNYC-26JUN25-B72"
     executor = FakeExecutor()
@@ -6477,6 +6512,13 @@ async def test_panic_revalidation_abort_rolls_back_counter_and_next_entry_is_bas
 
 @pytest.mark.asyncio
 async def test_successful_stop_loss_still_advances_counter(monkeypatch):
+    # Pin the Eastern current-day to the ticker market date so the
+    # stale-market-date settlement path does not prune these positions
+    # when the test is run long after the ticker market day.
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: '26JUN25',
+    )
     ticker = "KXLOWTBOS-26JUN25-B73.5"
     executor = FakeExecutor()
     executor.positions = {}
