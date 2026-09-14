@@ -3752,6 +3752,50 @@ class TemperatureStrategy:
                 await self._remove_active_position(ticker, bracket)
                 continue
 
+            # Option A (stale-date ghost cleanup): a held ticker that the live
+            # positions API no longer lists (position_absent) AND whose market
+            # date is strictly before today (Eastern) has already settled and
+            # will never return a usable price.  Without this, such positions
+            # cycle Phase C forever as "blind" ghosts and spam
+            # phase.c.unprotected_escalation.  This mirrors the exact predicate
+            # _restore_positions_inner already trusts to skip stale positions at
+            # startup, so it adds no settlement-timing logic (it compares dates,
+            # not times -- no 1am/Phoenix clock math).
+            #
+            # Safety rails:
+            #   - Only when position_absent (Kalshi did not list the ticker); a
+            #     still-listed market is never pruned here.
+            #   - Not during mass_absence (transient positions-API outage guard).
+            #   - Only when REST did NOT return data (rest_data is None/empty).
+            #     If REST reported a status (e.g. {"status": "open"}) we retain
+            #     the position -- existing behavior/tests preserved.
+            #   - Fail closed: if the date cannot be parsed, do not prune.
+            if (
+                position_absent
+                and not mass_absence
+                and not rest_data
+            ):
+                parsed_ticker = parse_series_and_date(ticker)
+                market_date = (
+                    _parse_date_prefix(parsed_ticker[1]) if parsed_ticker is not None else None
+                )
+                today_eastern = _parse_date_prefix(get_eastern_today_date_prefix())
+                if (
+                    market_date is not None
+                    and today_eastern is not None
+                    and market_date < today_eastern
+                ):
+                    logger.info(
+                        "phase.c.position_settled",
+                        ticker=ticker,
+                        qty=bracket.position_quantity,
+                        source="stale_market_date",
+                        market_date=str(market_date),
+                        today_eastern=str(today_eastern),
+                    )
+                    await self._remove_active_position(ticker, bracket)
+                    continue
+
             if current_price is None:
                 last_price = self.cache.get_last_price(ticker)
                 if (

@@ -3070,6 +3070,193 @@ async def test_positions_api_mass_absence_skips_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stale_date_ghost_pruned_when_absent_and_no_rest(monkeypatch):
+    """Option A: a held ticker whose market date is strictly before today
+    (Eastern) and which the positions API no longer lists is pruned even when
+    REST returns nothing.  This is the KXLOWTSEA-26SEP13-B54.5 ghost case that
+    otherwise cycles Phase C forever and spams phase.c.unprotected_escalation.
+    """
+    logged = capture_logs(monkeypatch)
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: "26SEP14",
+    )
+    ticker = "KXLOWTSEA-26SEP13-B54.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTSEA",
+            side="yes",
+            quantity=15,
+            avg_entry_price=100,
+            last_price=100,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    executor.positions = {}  # API no longer lists the settled market
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    # REST returns nothing for a dead market (404/empty -> None).
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXLOWTSEA")
+    bracket.position_quantity = 15
+    bracket.avg_entry = 100
+    bracket._last_seen_in_api = asyncio.get_event_loop().time() - 31
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_last_price(ticker, 100)
+
+    await strategy._evaluate_held_positions()
+
+    assert ticker not in strategy.active_positions
+    assert ticker not in strategy.brackets
+    assert db.store[PositionModel] == []
+    strategy._execute_stop_loss.assert_not_awaited()
+    settled_log = next(kwargs for event, kwargs in logged if event == "phase.c.position_settled")
+    assert settled_log["source"] == "stale_market_date"
+    assert settled_log["qty"] == 15
+    # No blind escalation should have been emitted for a pruned ghost.
+    assert not any(ev == "phase.c.unprotected_escalation" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_stale_date_ghost_pruned_for_phoenix_parity(monkeypatch):
+    """Option A uses ticker date vs. Eastern today, not local wall-clock time,
+    so Phoenix (local-midnight settlement) is pruned identically to other cities.
+    """
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: "26SEP14",
+    )
+    ticker = "KXLOWTPHX-26SEP13-B75.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTPHX",
+            side="yes",
+            quantity=4,
+            avg_entry_price=90,
+            last_price=90,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    executor.positions = {}
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXLOWTPHX")
+    bracket.position_quantity = 4
+    bracket._last_seen_in_api = asyncio.get_event_loop().time() - 31
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_last_price(ticker, 90)
+
+    await strategy._evaluate_held_positions()
+
+    assert ticker not in strategy.active_positions
+    assert ticker not in strategy.brackets
+    assert db.store[PositionModel] == []
+
+
+@pytest.mark.asyncio
+async def test_today_dated_absent_position_not_pruned_without_rest(monkeypatch):
+    """A ticker dated TODAY is never pruned by the stale-date path, even when the
+    positions API is momentarily missing it and REST returns nothing.  Only a
+    strictly-past market date is eligible.  Guards against premature cleanup of a
+    market whose local day has not yet closed.
+    """
+    logged = capture_logs(monkeypatch)
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: "26SEP14",
+    )
+    ticker = "KXLOWTSEA-26SEP14-B60.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTSEA",
+            side="yes",
+            quantity=3,
+            avg_entry_price=70,
+            last_price=70,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    executor.positions = {}
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_held_bracket(ticker, "KXLOWTSEA")
+    bracket.position_quantity = 3
+    bracket._last_seen_in_api = asyncio.get_event_loop().time() - 31
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_last_price(ticker, 70)
+
+    await strategy._evaluate_held_positions()
+
+    assert ticker in strategy.active_positions
+    assert ticker in strategy.brackets
+    assert len(db.store[PositionModel]) == 1
+    assert not any(
+        kwargs.get("source") == "stale_market_date"
+        for event, kwargs in logged
+        if event == "phase.c.position_settled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_date_absent_but_rest_reports_open_is_retained(monkeypatch):
+    """If REST affirmatively reports the market as open, the stale-date path must
+    NOT prune it -- preserving the existing
+    test_position_absent_from_api_not_deleted_without_settlement contract.
+    """
+    monkeypatch.setattr(
+        "core.state_machine.get_eastern_today_date_prefix",
+        lambda days_offset=0: "26SEP14",
+    )
+    ticker = "KXLOWTSEA-26SEP13-B54.5"
+    db = InMemoryDB([
+        PositionModel(
+            market_ticker=ticker,
+            event_ticker="EVT1",
+            series_ticker="KXLOWTSEA",
+            side="yes",
+            quantity=15,
+            avg_entry_price=100,
+            last_price=100,
+            position_ts=datetime.datetime.utcnow(),
+        )
+    ])
+    executor = FakeExecutor()
+    executor.positions = {}
+    strategy = make_strategy(monkeypatch, executor=executor, db=db, stop_loss_price=50)
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"status": "open"})
+
+    bracket = _make_held_bracket(ticker, "KXLOWTSEA")
+    bracket.position_quantity = 15
+    bracket._last_seen_in_api = asyncio.get_event_loop().time() - 31
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_last_price(ticker, 100)
+
+    await strategy._evaluate_held_positions()
+
+    assert ticker in strategy.active_positions
+    assert len(db.store[PositionModel]) == 1
+
+
+@pytest.mark.asyncio
 async def test_absent_position_reappears_resumes_normally(monkeypatch):
     ticker = "KXHIGHTSEA-26JUN24-B87.5"
     executor = FakeExecutor()
