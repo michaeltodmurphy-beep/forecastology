@@ -87,7 +87,7 @@ def configure_logging(*, log_file: str, log_max_bytes: int, log_backup_count: in
     if log_path.parent and str(log_path.parent) != ".":
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        pre_chain = [
+    pre_chain = [
         structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
         structlog.stdlib.add_log_level,
     ]
@@ -115,12 +115,15 @@ def configure_logging(*, log_file: str, log_max_bytes: int, log_backup_count: in
         backupCount=log_backup_count,
     )
     rotating_file_handler.setFormatter(file_formatter)
-
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(rotating_file_handler)
+
+    # httpx logs every outbound HTTP request at INFO, which floods the log.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     structlog.configure(
         processors=[
