@@ -62,6 +62,8 @@ SUNRISE_CHILD_EVENTS = {
 _LINE_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
 # key=value where value is a quoted string or a run of non-space chars.
 _KV_RE = re.compile(r"""([\w.]+)=("[^"]*"|'[^']*'|\S+)""")
+# ANSI SGR/erase escape sequences (present in legacy colored log lines).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mK]")
 
 
 @dataclass
@@ -90,7 +92,10 @@ def _iter_log_lines(log_glob: str) -> Iterable[tuple[str, str]]:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
-                    yield path, line.rstrip("\n")
+                    # Strip ANSI escapes: legacy log lines were written with
+                    # color codes (e.g. \x1b[36mgate\x1b[0m=...) which would
+                    # otherwise corrupt key=value parsing.
+                    yield path, _ANSI_RE.sub("", line.rstrip("\n"))
         except OSError:
             continue
 
@@ -127,7 +132,11 @@ def _match_line(line: str, ticker_u: str, day: str) -> bool:
     line_day = _ts_of(line)[:10]
     if line_day:
         return line_day == day
-    return day in line
+    # Lines without a parseable timestamp (e.g. older phase.b.decision lines
+    # emitted before the logger added a timestamp) cannot be date-filtered.
+    # Accept them: the ticker string usually carries the date (e.g.
+    # KXLOWTATL-26SEP15-B70.5), so the day is still effectively scoped.
+    return True
 
 
 def collect(ticker: str, day: str, log_glob: str) -> tuple[list[GateRow], list[SunriseChild]]:
