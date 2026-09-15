@@ -87,23 +87,34 @@ def configure_logging(*, log_file: str, log_max_bytes: int, log_backup_count: in
     if log_path.parent and str(log_path.parent) != ".":
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    processor_formatter = structlog.stdlib.ProcessorFormatter(
-        foreign_pre_chain=[
-            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
-            structlog.stdlib.add_log_level,
-        ],
+        pre_chain = [
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
+        structlog.stdlib.add_log_level,
+    ]
+
+    # Colored renderer for the live terminal stream.
+    stream_formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=pre_chain,
         processor=structlog.dev.ConsoleRenderer(),
     )
 
+    # Plain (uncolored) renderer for the log file so it contains no ANSI
+    # escape sequences.  ConsoleRenderer emits color codes even when output
+    # is redirected to a file, which corrupts grep/awk pipelines over the log.
+    file_formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=pre_chain,
+        processor=structlog.dev.ConsoleRenderer(colors=False),
+    )
+
     stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(processor_formatter)
+    stream_handler.setFormatter(stream_formatter)
 
     rotating_file_handler = RotatingFileHandler(
         filename=str(log_path),
         maxBytes=log_max_bytes,
         backupCount=log_backup_count,
     )
-    rotating_file_handler.setFormatter(processor_formatter)
+    rotating_file_handler.setFormatter(file_formatter)
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
@@ -123,3 +134,4 @@ def configure_logging(*, log_file: str, log_max_bytes: int, log_backup_count: in
         cache_logger_on_first_use=True,
     )
     return rotating_file_handler
+
