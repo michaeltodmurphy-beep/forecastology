@@ -1235,8 +1235,11 @@ def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):
 # ---------------------------------------------------------------------------
 
 _TZ_SEA = ZoneInfo("America/Los_Angeles")
-# 2026-08-09 06:57 PDT == 13:57 UTC (the Seattle morning entry moment).
-_SEA_NOW_UTC = datetime.datetime(2026, 8, 9, 13, 57, tzinfo=datetime.timezone.utc)
+# 2026-09-09 06:57 PDT == 13:57 UTC (the Seattle morning entry moment).
+# NOTE: _overnight_pkt() hard-codes the YEAR-MONTH as 2026-09, so the local_date
+# derived from now_utc MUST also be in September for the window to match the
+# periods.  (An August now_utc here made every period fall outside the window.)
+_SEA_NOW_UTC = datetime.datetime(2026, 9, 9, 13, 57, tzinfo=datetime.timezone.utc)
 
 
 def _sea_gate(periods, monkeypatch, sunrise_local=None):
@@ -1246,7 +1249,7 @@ def _sea_gate(periods, monkeypatch, sunrise_local=None):
         station_meta=(47.45, -122.31, "https://api.weather.gov/hourly", "America/Los_Angeles"),
     )
     gate = SunriseEntryGate(_make_config(), nws_client=client)
-    fixed = sunrise_local or datetime.datetime(2026, 8, 9, 5, 59, tzinfo=_TZ_SEA)
+    fixed = sunrise_local or datetime.datetime(2026, 9, 9, 5, 59, tzinfo=_TZ_SEA)
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed, "astral"))
     return gate
 
@@ -1339,8 +1342,8 @@ def test_morning_forecast_dip_includes_deadline_hour(monkeypatch):
 def test_morning_forecast_dip_converts_celsius(monkeypatch):
     """A Celsius-unit forecast is converted to F before comparison.
     11.0C = 51.8F -> 52 -> below B54 -> blocked."""
-    periods = [
-        {"startTime": datetime.datetime(2026, 8, 9, 7, 0, tzinfo=_TZ_SEA).isoformat(),
+        periods = [
+        {"startTime": datetime.datetime(2026, 9, 9, 7, 0, tzinfo=_TZ_SEA).isoformat(),
          "temperature": 11.0, "temperatureUnit": "C"},
     ]
     gate = _sea_gate(periods, monkeypatch)
@@ -1357,8 +1360,8 @@ def test_morning_forecast_dip_fails_open_when_forecast_unavailable(monkeypatch):
         forecast_periods=None,  # _get_hourly_periods raises
         station_meta=(47.45, -122.31, "https://api.weather.gov/hourly", "America/Los_Angeles"),
     )
-    gate = SunriseEntryGate(_make_config(), nws_client=client)
-    fixed = datetime.datetime(2026, 8, 9, 5, 59, tzinfo=_TZ_SEA)
+        gate = SunriseEntryGate(_make_config(), nws_client=client)
+    fixed = datetime.datetime(2026, 9, 9, 5, 59, tzinfo=_TZ_SEA)
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed, "astral"))
     blocked, ctx = gate.morning_forecast_dips_below_bracket(
         "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
