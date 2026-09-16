@@ -940,7 +940,8 @@ async def test_chaser_max_minutes_termination(monkeypatch):
     db = InMemoryDB()
     # chase_max_minutes=0 → max_seconds=0 → elapsed (≥0) always satisfies elapsed >= 0
     strategy = make_strategy(
-        monkeypatch, db=db, executor=executor, partial_fill_chase=True
+        monkeypatch, db=db, executor=executor, partial_fill_chase=True,
+        chase_until_gate_close=False,
     )
     strategy.config.chase_max_minutes = 0
     strategy.cache = cache
@@ -1327,3 +1328,306 @@ async def test_paper_executor_cancel_resting_buy():
     assert oid not in exec_._resting_buy_orders
     # Balance refunded
     assert exec_.balance_cents == 10_000
+
+
+# ===========================================================================
+# take-at-ceiling: lift the ask when it is at/below the ceiling
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_chaser_take_at_ceiling_lifts_ask(monkeypatch):
+    """CHASE_TAKE_AT_CEILING=yes: when ask <= ceiling the chaser lifts at the ask."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    cache = TickerCache()
+    # best_bid 88, ask 90 (<= ceiling 94) -> should rest a marketable bid at 90
+    cache.quotes[ticker] = (88, 90)
+
+    executor = FakeExecutor()
+    place_calls = []
+
+    async def tracked_place(order):
+        place_calls.append(order.price)
+        return ExecutionResult(
+            success=True, market_ticker=order.market_ticker, side="yes",
+            price=order.price, quantity=order.quantity,
+            fill_price=0, fill_quantity=0, total_cost_cents=0,
+            order_id="oid-1", status="RESTING",
+        )
+
+    executor.place_limit_buy = tracked_place
+
+    import core.state_machine as sm_mod
+    calls = {"n": 0}
+
+    async def sleep_twice(secs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(sm_mod.asyncio, "sleep", sleep_twice)
+
+    db = InMemoryDB()
+    strategy = make_strategy(
+        monkeypatch, db=db, executor=executor, partial_fill_chase=True,
+        chase_take_at_ceiling=True, spread_monitor_price=94,
+    )
+    strategy.cache = cache
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=7, avg_entry=90,
+    )
+
+    try:
+        await strategy._partial_fill_chase_loop(bracket, remaining=5, intended_quantity=12)
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    assert place_calls and place_calls[0] == 90
+
+
+@pytest.mark.asyncio
+async def test_chaser_no_take_when_disabled(monkeypatch):
+    """CHASE_TAKE_AT_CEILING=no: never cross the spread (pure maker)."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    cache = TickerCache()
+    cache.quotes[ticker] = (88, 90)
+
+    executor = FakeExecutor()
+    place_calls = []
+
+    async def tracked_place(order):
+        place_calls.append(order.price)
+        return ExecutionResult(
+            success=True, market_ticker=order.market_ticker, side="yes",
+            price=order.price, quantity=order.quantity,
+            fill_price=0, fill_quantity=0, total_cost_cents=0,
+            order_id="oid-1", status="RESTING",
+        )
+
+    executor.place_limit_buy = tracked_place
+
+    import core.state_machine as sm_mod
+    calls = {"n": 0}
+
+    async def sleep_twice(secs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(sm_mod.asyncio, "sleep", sleep_twice)
+
+    db = InMemoryDB()
+    strategy = make_strategy(
+        monkeypatch, db=db, executor=executor, partial_fill_chase=True,
+        chase_take_at_ceiling=False, spread_monitor_price=94,
+    )
+    strategy.cache = cache
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=7, avg_entry=90,
+    )
+
+    try:
+        await strategy._partial_fill_chase_loop(bracket, remaining=5, intended_quantity=12)
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    # Pure maker: bid at best_bid + 1 (89), never crossing to the 90 ask.
+    assert place_calls and place_calls[0] == 89
+
+
+# ===========================================================================
+# until-gate-close: duration cap is ignored (chase keeps working)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_chaser_until_gate_close_ignores_max_minutes(monkeypatch):
+    """CHASE_UNTIL_GATE_CLOSE=yes: chaser does NOT exit on the duration cap."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    cache = TickerCache()
+    cache.quotes[ticker] = (88, 92)
+
+    executor = FakeExecutor()
+
+    logged = []
+    import core.state_machine as sm_mod
+    real_info = sm_mod.logger.info
+    sm_mod.logger.info = lambda e, **kw: logged.append((e, kw))
+
+    db = InMemoryDB()
+    # duration cap of 0 would fire immediately if it were honoured
+    strategy = make_strategy(
+        monkeypatch, db=db, executor=executor, partial_fill_chase=True,
+        chase_until_gate_close=True,
+    )
+    strategy.config.chase_max_minutes = 0
+    strategy.cache = cache
+
+    # Stop the loop after two gate checks via the gate itself.
+    gate_calls = {"n": 0}
+    orig_gate = strategy._chase_entry_gate_open
+
+    async def gate_then_close(bkt):
+        gate_calls["n"] += 1
+        return gate_calls["n"] < 2
+
+    strategy._chase_entry_gate_open = gate_then_close
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=7, avg_entry=90,
+    )
+
+    await strategy._partial_fill_chase_loop(bracket, remaining=5, intended_quantity=12)
+
+    sm_mod.logger.info = real_info
+    reasons = [kw.get("reason") for e, kw in logged if e == "chase.cancelled"]
+    assert "max_minutes_exceeded" not in reasons
+    assert "entry_gate_closed" in reasons
+
+
+# ===========================================================================
+# ownership / phase guard: stop chasing once the position is gone
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_chaser_stops_when_position_closed(monkeypatch):
+    """Chaser exits immediately if the bracket is no longer HOLDING."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    cache = TickerCache()
+    cache.quotes[ticker] = (88, 92)
+
+    executor = FakeExecutor()
+    place_calls = []
+
+    async def tracked_place(order):
+        place_calls.append(order.price)
+        return ExecutionResult(
+            success=True, market_ticker=order.market_ticker, side="yes",
+            price=order.price, quantity=order.quantity,
+            fill_price=0, fill_quantity=0, total_cost_cents=0,
+            order_id="oid-1", status="RESTING",
+        )
+
+    executor.place_limit_buy = tracked_place
+
+    logged = []
+    import core.state_machine as sm_mod
+    real_info = sm_mod.logger.info
+    sm_mod.logger.info = lambda e, **kw: logged.append((e, kw))
+
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, db=db, executor=executor, partial_fill_chase=True)
+    strategy.cache = cache
+
+    # Already closed (e.g. settled / stop-lossed) before the chaser runs.
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.CLOSED,
+        position_quantity=7, avg_entry=90,
+    )
+
+    await strategy._partial_fill_chase_loop(bracket, remaining=5, intended_quantity=12)
+
+    sm_mod.logger.info = real_info
+    assert place_calls == [], "chaser must not place orders for a closed position"
+    assert any(kw.get("reason") == "position_no_longer_held" for e, kw in logged if e == "chase.cancelled")
+
+
+# ===========================================================================
+# restart resume: re-arm the chaser for an underfilled restored position
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_resume_chaser_on_startup_for_underfilled(monkeypatch):
+    """A restored HOLDING position below target gets its chaser re-armed."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, db=db, partial_fill_chase=True)
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=7, avg_entry=90,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 7
+
+    started = {"called": False, "remaining": None, "target": None}
+
+    async def fake_start(bkt, remaining, intended_qty):
+        started["called"] = True
+        started["remaining"] = remaining
+        started["target"] = intended_qty
+
+    strategy._maybe_start_chaser = fake_start
+    # Gate open (nws gate patched to True in make_strategy).
+
+    await strategy._resume_chasers_for_underfilled_positions()
+
+    assert started["called"], "chaser not resumed for underfilled restored position"
+    assert started["target"] == 12
+    assert started["remaining"] == 5
+
+
+@pytest.mark.asyncio
+async def test_resume_chaser_skips_when_at_target(monkeypatch):
+    """A restored position already at INITIAL_CONTRACT_COUNT is not chased."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, db=db, partial_fill_chase=True)
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=12, avg_entry=90,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 12
+
+    started = {"called": False}
+
+    async def fake_start(bkt, remaining, intended_qty):
+        started["called"] = True
+
+    strategy._maybe_start_chaser = fake_start
+
+    await strategy._resume_chasers_for_underfilled_positions()
+
+    assert not started["called"]
+
+
+@pytest.mark.asyncio
+async def test_resume_chaser_disabled_when_feature_off(monkeypatch):
+    """No resume when PARTIAL_FILL_CHASE is disabled."""
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, db=db, partial_fill_chase=False)
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=7, avg_entry=90,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 7
+
+    started = {"called": False}
+
+    async def fake_start(bkt, remaining, intended_qty):
+        started["called"] = True
+
+    strategy._maybe_start_chaser = fake_start
+
+    await strategy._resume_chasers_for_underfilled_positions()
+
+    assert not started["called"]
