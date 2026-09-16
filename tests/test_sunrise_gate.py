@@ -1224,3 +1224,153 @@ def test_nws_window_mode_does_not_invoke_sunrise_gate(monkeypatch):
         gate.evaluate("KXHIGHTATL-26AUG09-B95", now_utc=now_utc)
     except Exception as exc:  # noqa: BLE001
         raise AssertionError(f"Unexpected exception from evaluate: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# morning_forecast_dips_below_bracket: sunrise -> NWS_LOW_DEADLINE_HOUR band
+#
+# Motivating case: Seattle (KSEA) entry just after sunrise into B54 while the
+# 07:00 local NWS hourly forecast was 53F.  KSEA -> America/Los_Angeles (PDT,
+# UTC-7 in August).
+# ---------------------------------------------------------------------------
+
+_TZ_SEA = ZoneInfo("America/Los_Angeles")
+# 2026-08-09 06:57 PDT == 13:57 UTC (the Seattle morning entry moment).
+_SEA_NOW_UTC = datetime.datetime(2026, 8, 9, 13, 57, tzinfo=datetime.timezone.utc)
+
+
+def _sea_gate(periods, monkeypatch, sunrise_local=None):
+    """Build a KSEA gate with a fixed sunrise so the morning band is deterministic."""
+    client = _FakeNWSClient(
+        forecast_periods=periods,
+        station_meta=(47.45, -122.31, "https://api.weather.gov/hourly", "America/Los_Angeles"),
+    )
+    gate = SunriseEntryGate(_make_config(), nws_client=client)
+    fixed = sunrise_local or datetime.datetime(2026, 8, 9, 5, 59, tzinfo=_TZ_SEA)
+    monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed, "astral"))
+    return gate
+
+
+def test_morning_forecast_dip_blocks_seattle_b54_forecast_53f(monkeypatch):
+    """Regression (Seattle): entry into B54 while the 07:00 hourly forecast was
+    53F MUST block -- 53 < 54 even though the intraday 5-min obs supported 54."""
+    periods = [
+        _overnight_pkt(6, 55.0, day=9, tz=_TZ_SEA),
+        _overnight_pkt(7, 53.0, day=9, tz=_TZ_SEA),  # the 07:00 hour that mattered
+        _overnight_pkt(8, 54.0, day=9, tz=_TZ_SEA),
+    ]
+    gate = _sea_gate(periods, monkeypatch)
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is True
+    assert ctx["forecast_min_int"] == 53
+    assert ctx["bracket_kind"] == "B"
+
+
+def test_morning_forecast_dip_allows_seattle_b54_forecast_54f(monkeypatch):
+    """B bracket is inclusive: a forecast of exactly 54F for B54 is NOT blocked."""
+    periods = [
+        _overnight_pkt(6, 56.0, day=9, tz=_TZ_SEA),
+        _overnight_pkt(7, 54.0, day=9, tz=_TZ_SEA),
+        _overnight_pkt(9, 57.0, day=9, tz=_TZ_SEA),
+    ]
+    gate = _sea_gate(periods, monkeypatch)
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["forecast_min_int"] == 54
+
+
+def test_morning_forecast_dip_blocked_logs_event(monkeypatch):
+    """The block path emits sunrise.blocked_morning_forecast_dip_below_bracket."""
+    periods = [_overnight_pkt(7, 53.0, day=9, tz=_TZ_SEA)]
+    gate = _sea_gate(periods, monkeypatch)
+    with capture_logs() as logs:
+        gate.morning_forecast_dips_below_bracket(
+            "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+        )
+    events = [e.get("event") for e in logs]
+    assert "sunrise.blocked_morning_forecast_dip_below_bracket" in events
+
+
+def test_morning_forecast_dip_t_bracket_uses_strict_inequality(monkeypatch):
+    """T<n> requires the low STRICTLY above n: forecast == n blocks."""
+    periods = [_overnight_pkt(7, 54.0, day=9, tz=_TZ_SEA)]
+    gate = _sea_gate(periods, monkeypatch)
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-T54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is True
+    assert ctx["bracket_kind"] == "T"
+
+
+def test_morning_forecast_dip_ignores_hours_outside_window(monkeypatch):
+    """Hours before sunrise or after the 12:00 deadline are outside the window.
+    A cold 03:00 reading and a cold 14:00 reading must not count."""
+    periods = [
+        _overnight_pkt(3, 40.0, day=9, tz=_TZ_SEA),   # before sunrise -> ignored
+        _overnight_pkt(7, 58.0, day=9, tz=_TZ_SEA),   # in window, warm
+        _overnight_pkt(11, 60.0, day=9, tz=_TZ_SEA),  # in window (<= 12:00)
+        _overnight_pkt(14, 30.0, day=9, tz=_TZ_SEA),  # after deadline -> ignored
+    ]
+    gate = _sea_gate(periods, monkeypatch)
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["forecast_min_int"] == 58
+
+
+def test_morning_forecast_dip_includes_deadline_hour(monkeypatch):
+    """The 12:00 deadline hour is INCLUSIVE: a dip exactly at 12:00 blocks."""
+    periods = [
+        _overnight_pkt(9, 58.0, day=9, tz=_TZ_SEA),
+        _overnight_pkt(12, 53.0, day=9, tz=_TZ_SEA),  # boundary hour, must count
+    ]
+    gate = _sea_gate(periods, monkeypatch)
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is True
+
+
+def test_morning_forecast_dip_converts_celsius(monkeypatch):
+    """A Celsius-unit forecast is converted to F before comparison.
+    11.0C = 51.8F -> 52 -> below B54 -> blocked."""
+    periods = [
+        {"startTime": datetime.datetime(2026, 8, 9, 7, 0, tzinfo=_TZ_SEA).isoformat(),
+         "temperature": 11.0, "temperatureUnit": "C"},
+    ]
+    gate = _sea_gate(periods, monkeypatch)
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is True
+    assert ctx["forecast_min_int"] == 52
+
+
+def test_morning_forecast_dip_fails_open_when_forecast_unavailable(monkeypatch):
+    """A forecast fetch error must fail OPEN (never block)."""
+    client = _FakeNWSClient(
+        forecast_periods=None,  # _get_hourly_periods raises
+        station_meta=(47.45, -122.31, "https://api.weather.gov/hourly", "America/Los_Angeles"),
+    )
+    gate = SunriseEntryGate(_make_config(), nws_client=client)
+    fixed = datetime.datetime(2026, 8, 9, 5, 59, tzinfo=_TZ_SEA)
+    monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed, "astral"))
+    blocked, ctx = gate.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["projected_min_f"] is None
+
+
+def test_morning_forecast_dip_non_kxlow_allowed(monkeypatch):
+    """Non-KXLOW tickers are never blocked by this gate."""
+    gate = _sea_gate([], monkeypatch)
+    blocked, _ = gate.morning_forecast_dips_below_bracket(
+        "KXHIGHTSEA-26AUG09-B95", 95.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked is False

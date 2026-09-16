@@ -1043,3 +1043,151 @@ class SunriseEntryGate:
                 bracket_kind=bracket_kind,
             )
         return ctx["blocked"], ctx
+
+    def morning_forecast_dips_below_bracket(
+        self,
+        ticker: str,
+        bracket_temp_f: float,
+        now_utc: Optional[datetime.datetime] = None,
+    ) -> tuple[bool, dict]:
+        """MORNING analog of :meth:`forecast_dips_below_bracket`.
+
+        Returns (blocked, ctx) where blocked is True when the NWS hourly
+        FORECAST minimum over the MORNING window -- sunrise through
+        ``NWS_LOW_DEADLINE_HOUR`` (default 12:00 noon) local, INCLUSIVE of both
+        endpoints -- is below the market line.  This reuses the same NWS hourly
+        forecast feed as the overnight 9pm-1am gate, but anchored to the
+        morning hours right after sunrise.
+
+        Motivating case (Seattle/KSEA): an entry just after sunrise into a
+        ``B54`` bracket.  The intraday 5-min obs feed still supported 54, but
+        the 07:00 local NWS hourly forecast was 53 -- below the bracket -- so
+        the entry should be refused.
+
+        The boundary is bracket-kind-aware and STRICT (no cushion):
+
+          - ``T<n>`` ("strictly greater than n"): the market needs the low to be
+            strictly above *n*, so block when ``forecast <= n``.
+          - ``B<n>`` ("greater-than-or-equal-to n"): equality still satisfies
+            the market, so block only when ``forecast < n``.
+
+        Forecast temps are rounded to whole degrees (half-up) before comparison
+        so they match the settled whole-number values the market uses.
+
+        Fails OPEN (returns False) on any fetch/parse/unavailable input so a
+        transient NWS outage never stalls a legitimate entry.  Callers gate this
+        on the (default-off) config toggle
+        ``block_entry_when_morning_forecast_dips_below_bracket``.
+        """
+        ctx: dict = {"blocked": False, "projected_min_f": None, "ticker": ticker}
+        series = get_series_prefix(ticker)
+        if series is None or not series.startswith("KXLOW"):
+            return False, ctx
+        coords = SERIES_STATION_COORDS.get(series)
+        tz_name = get_series_timezone(ticker)
+        if (coords is None) or (tz_name is None):
+            return False, ctx
+        station_id = coords[0]
+        lat, lon = coords[1], coords[2]
+        ctx["station_code"] = station_id
+        try:
+            station_tz = ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001
+            return False, ctx
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=datetime.timezone.utc)
+        now_utc = now_utc.astimezone(datetime.timezone.utc)
+        now_local = now_utc.astimezone(station_tz)
+        local_date = now_local.date()
+        ctx["tz_name"] = tz_name
+        ctx["local_time"] = now_local.isoformat()
+
+        # Morning window in station-local time: sunrise -> NWS_LOW_DEADLINE_HOUR.
+        # Both endpoints are INCLUSIVE (hourly periods; the 07:00 hour that
+        # mattered in the Seattle case is captured).
+        try:
+            sunrise_local, _src = self._get_sunrise_local(
+                series, station_tz, local_date, lat, lon
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "sunrise.morning_forecast_dip_unavailable",
+                station=station_id,
+                reason="sunrise_error",
+                error_class=type(exc).__name__,
+            )
+            return False, ctx
+
+        deadline_hour = int(self.config.nws_low_deadline_hour)
+        start_local = sunrise_local
+        end_local = datetime.datetime.combine(
+            local_date, datetime.time(deadline_hour, 0), tzinfo=station_tz
+        )
+        ctx["window_start_local"] = start_local.isoformat()
+        ctx["window_end_local"] = end_local.isoformat()
+
+        try:
+            _lat, _lon, hourly_url, _tz = self.nws_client._get_station_metadata(station_id)  # noqa: SLF001
+            periods = self.nws_client._get_hourly_periods(hourly_url)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "sunrise.morning_forecast_dip_unavailable",
+                station=station_id,
+                error_class=type(exc).__name__,
+            )
+            return False, ctx
+
+        projected: Optional[float] = None
+        for period in periods or []:
+            start_str = period.get("startTime")
+            temp = period.get("temperature")
+            if (start_str is None) or (temp is None):
+                continue
+            try:
+                period_local = datetime.datetime.fromisoformat(start_str).astimezone(station_tz)
+            except (TypeError, ValueError):
+                continue
+            # Include both ends of the window; skip only periods strictly outside.
+            if (period_local < start_local) or (period_local > end_local):
+                continue
+            try:
+                val = float(temp)
+            except (TypeError, ValueError):
+                continue
+            if str(period.get("temperatureUnit", "F")).upper() == "C":
+                val = _c_to_f(val)
+            if (projected is None) or (val < projected):
+                projected = val
+
+        ctx["projected_min_f"] = None if projected is None else round(projected, 2)
+        if projected is None:
+            return False, ctx
+
+        # Bracket-kind-aware STRICT boundary (no cushion).  Compare whole-degree
+        # integers: the forecast is rounded half-up (matches settled values); the
+        # bracket line is a half-integer split point, so floor it to the
+        # representative integer before comparing.
+        bracket_kind = parse_bracket_kind(ticker)
+        forecast_int = _round_f_half_up(projected)
+        line_int = _bracket_line_int(bracket_temp_f)
+        if bracket_kind == "T":
+            blocked = forecast_int <= line_int
+        else:  # "B" (inclusive): equality still satisfies the market
+            blocked = forecast_int < line_int
+        ctx["bracket_kind"] = bracket_kind
+        ctx["forecast_min_int"] = forecast_int
+        if blocked:
+            ctx["blocked"] = True
+            ctx["bracket_temp_f"] = bracket_temp_f
+            logger.info(
+                "sunrise.blocked_morning_forecast_dip_below_bracket",
+                series=series,
+                station=station_id,
+                ticker=ticker,
+                projected_min_f=float(ctx["projected_min_f"]),
+                bracket_temp_f=bracket_temp_f,
+                bracket_kind=bracket_kind,
+            )
+        return ctx["blocked"], ctx

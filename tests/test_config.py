@@ -626,6 +626,7 @@ class TestSunriseEntryGateConfig:
             "SUNRISE_TEMP_BASELINE_MINUTES",
             "SUNRISE_OBS_MAX_AGE_MINUTES",
             "SUNRISE_OBS_MAX_AGE_OVERRIDES",
+            "BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET",
         ):
             os.environ.pop(key, None)
 
@@ -646,6 +647,19 @@ class TestSunriseEntryGateConfig:
         assert cfg.sunrise_temp_baseline_minutes == 15
         assert cfg.sunrise_obs_max_age_minutes == 15
         assert cfg.sunrise_obs_max_age_overrides == {}
+        assert cfg.block_entry_when_morning_forecast_dips_below_bracket is False
+
+    def test_morning_forecast_dip_toggle_parses(self):
+        os.environ["BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET"] = "yes"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.block_entry_when_morning_forecast_dips_below_bracket is True
+
+    def test_morning_forecast_dip_toggle_malformed_defaults_false(self):
+        os.environ["BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET"] = "maybe"
+        from app.config import AppConfig
+        cfg = AppConfig.from_env()
+        assert cfg.block_entry_when_morning_forecast_dips_below_bracket is False
 
     def test_valid_sunrise_mode_values(self):
         os.environ["ENTRY_GATE_MODE"] = "sunrise"

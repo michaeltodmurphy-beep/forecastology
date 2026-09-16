@@ -83,9 +83,9 @@ hr
 # Events that carry ticker= and are emitted during entry evaluation.
 # (below_trigger is DEBUG; it only appears if the bot runs at DEBUG level.)
 REASON_RE='phase\.b\.(below_trigger|missed_entry|falling_knife_blocked|entry_blocked_am_low_forecast|entry_blocked_by_config|entry_blocked_existing_position|entry_blocked_unknown_family|spread_too_wide|recovery_cap_reached)'\
-'|entry\.(blocked_low_after_2200_et|blocked_local_settle_gate|blocked_nws_temp_gate|blocked_nws_temp_gate_no_data|blocked_nws_temp_gate_error|blocked_day_min_below_bracket|blocked_unknown_family|blocked_nws_gate_final)'\
+'|entry\.(blocked_low_after_2200_et|blocked_local_settle_gate|blocked_nws_temp_gate|blocked_nws_temp_gate_no_data|blocked_nws_temp_gate_error|blocked_day_min_below_bracket|blocked_forecast_dips_below_bracket|blocked_morning_forecast_dip_below_bracket|blocked_unknown_family|blocked_nws_gate_final)'\
 '|hedge\.cap_blocked'\
-'|gate\.blocked_below_bracket|sunrise\.(gate_blocked|am_low_blocked|temp_rising_blocked|temp_rise_latched|obs_unavailable|gate_window_closed)'
+'|gate\.blocked_below_bracket|sunrise\.(gate_blocked|am_low_blocked|temp_rising_blocked|temp_rise_latched|obs_unavailable|gate_window_closed|blocked_morning_forecast_dip_below_bracket)'
 
 echo "${BOLD}Reason tally:${RST}"
 tally=$(day_ticker_lines | grep -oE "$REASON_RE" | sort | uniq -c | sort -rn)
@@ -131,6 +131,10 @@ loggrep "^${DATE} .*am_low_brief\.evaluated.*series=${SERIES_U}\b" \
 
 echo "${DIM}-- day-min / below-bracket observed gate --${RST}"
 day_ticker_lines | grep -E 'day_min_below_bracket|gate\.blocked_below_bracket' | tail -3
+
+echo "${DIM}-- overnight 9pm-1am / morning forecast-dip gates --${RST}"
+day_ticker_lines | grep -E 'blocked_forecast_dips_below_bracket|blocked_morning_forecast_dip_below_bracket' \
+  | grep -oE 'projected_min_f=[^ ]*' | sort | uniq -c | tail -5
 
 echo "${DIM}-- low-ticker ET halt / local settle gate --${RST}"
 day_ticker_lines | grep -E 'blocked_low_after_2200_et|blocked_local_settle_gate' | tail -3

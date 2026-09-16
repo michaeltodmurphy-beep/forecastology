@@ -2535,6 +2535,61 @@ class TemperatureStrategy:
                         gate_type="continuous", reason="gate_disabled",
                     )
                 # ------------------------------------------------------------------
+                # --- FORECAST morning-dip-below-bracket gate (Low only) ----------
+                # Sunrise -> NWS_LOW_DEADLINE_HOUR (default 12:00 noon) local.  A
+                # LOW 'stays >= X F' bracket is refused when the NWS hourly
+                # forecast minimum over that morning window is below the line --
+                # even when the intraday 5-min obs feed still supports it.
+                # Motivating case: Seattle entry just after sunrise into B54 while
+                # the 07:00 hourly forecast was 53F.
+                if (
+                    is_low
+                    and self.config.entry_gate_mode == "SUNRISE"
+                    and getattr(self.config, 'block_entry_when_morning_forecast_dips_below_bracket', False)
+                ):
+                    try:
+                        from core.trade_outcome_utils import parse_bracket_temp as _parse_bracket_temp_mfc
+                        _mfc_bracket_f = _parse_bracket_temp_mfc(ticker)
+                        if _mfc_bracket_f is not None:
+                            _mfc_blocked, _mfc_ctx = self._sunrise_entry_gate.morning_forecast_dips_below_bracket(
+                                ticker,
+                                _mfc_bracket_f,
+                                now_utc=now_utc,
+                            )
+                            if _mfc_blocked:
+                                self._record_gate(
+                                    ticker, "morning_forecast_low", "BLOCKED",
+                                    gate_type="continuous",
+                                    bracket_temp_f=_mfc_bracket_f,
+                                    projected_min_f=_mfc_ctx.get('projected_min_f'),
+                                )
+                                logger.info(
+                                    'entry.blocked_morning_forecast_dip_below_bracket',
+                                    ticker=ticker,
+                                    bracket_temp_f=_mfc_bracket_f,
+                                    projected_min_f=_mfc_ctx.get('projected_min_f'),
+                                )
+                                continue
+                            self._record_gate(
+                                ticker, "morning_forecast_low", "PASS",
+                                gate_type="continuous",
+                                bracket_temp_f=_mfc_bracket_f,
+                            )
+                    except Exception as _mfc_exc:  # noqa: BLE001
+                        logger.warning(
+                            'entry.morning_forecast_dip_gate_error_fail_open',
+                            ticker=ticker,
+                            error_class=type(_mfc_exc).__name__,
+                        )
+                elif is_low and self.config.entry_gate_mode == "SUNRISE":
+                    # Ledger: the morning forecast gate is disabled by config.
+                    # Record it explicitly so the report shows "SKIPPED (gate
+                    # disabled)" instead of silently omitting the gate.
+                    self._record_gate(
+                        ticker, "morning_forecast_low", "SKIPPED",
+                        gate_type="continuous", reason="gate_disabled",
+                    )
+                # ------------------------------------------------------------------
                 # --- NWS temperature-window gate ---
                 _station = get_series_station_code(ticker)
                 apply_nws_temp_gate = (

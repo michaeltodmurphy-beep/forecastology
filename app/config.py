@@ -465,6 +465,20 @@ class AppConfig(BaseSettings):
     # Default OFF (& fail-open) so the running bot's behavior is unchanged until
     # explicitly enabled.  Parsed by from_env().
     block_entry_when_forecast_dips_below_bracket: bool = False
+    # BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET=yes|no  (default: no / false)
+    # MORNING analog of the overnight 9pm-1am forecast gate above.  When
+    # enabled, a LOW 'daily temp stays >= X F' bracket is refused when the NWS
+    # HOURLY FORECAST minimum over the morning window -- sunrise through
+    # NWS_LOW_DEADLINE_HOUR (default 12:00 noon) local, inclusive of both ends
+    # -- is below the market line.  The boundary is bracket-kind-aware and
+    # STRICT (no cushion):
+    #   T<n> ("strictly greater than n") -> block when forecast <= n.
+    #   B<n> ("greater-than-or-equal-to n") -> block when forecast < n.
+    # Motivating case: Seattle entry just after sunrise into B54 while the
+    # 07:00 hourly forecast was 53F (the intraday 5-min obs still supported 54).
+    # Default OFF (& fail-open) so the running bot's behavior is unchanged until
+    # explicitly enabled.  Parsed by from_env().
+    block_entry_when_morning_forecast_dips_below_bracket: bool = False
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 50–250 ms.  Configurable via
@@ -911,6 +925,11 @@ class AppConfig(BaseSettings):
             "BLOCK_ENTRY_WHEN_FORECAST_DIPS_BELOW_BRACKET",
             default=False,
         )
+        block_entry_when_morning_forecast_dips_below_bracket = _parse_trade_toggle(
+            os.getenv("BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET"),
+            "BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET",
+            default=False,
+        )
         falling_knife_decay_minutes = _parse_non_negative_int(
             os.getenv("FALLING_KNIFE_DECAY_MINUTES"),
             "FALLING_KNIFE_DECAY_MINUTES",
@@ -1059,6 +1078,7 @@ class AppConfig(BaseSettings):
             sunrise_obs_source=sunrise_obs_source,
             block_entry_when_below_bracket=block_entry_when_below_bracket,
             block_entry_when_forecast_dips_below_bracket=block_entry_when_forecast_dips_below_bracket,
+            block_entry_when_morning_forecast_dips_below_bracket=block_entry_when_morning_forecast_dips_below_bracket,
             falling_knife_decay_minutes=falling_knife_decay_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,

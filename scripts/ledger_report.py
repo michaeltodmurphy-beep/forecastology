@@ -42,6 +42,7 @@ GATE_ORDER = [
     ("sunrise.temp_rise_1deg", "  child: temp rise after sunrise", "once"),
     ("am_low_keyword", "AM-low daily-brief keyword", "once"),
     ("overnight_9pm_1am_low", "Overnight 9pm-1am low (forecast)", "continuous"),
+    ("morning_forecast_low", "Morning forecast low (sunrise->deadline)", "continuous"),
     ("price_trigger", "Price >= buy trigger", "continuous"),
     ("price_ceiling", "Price <= max ceiling", "continuous"),
     ("falling_knife", "Falling-knife guard", "continuous"),
