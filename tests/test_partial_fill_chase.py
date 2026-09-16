@@ -280,7 +280,12 @@ class FakeExecutor:
 
 
 def make_config(**overrides):
+    # Build the config from explicit kwargs only.  _env_file=None plus the
+    # explicit chaser defaults below keep the tests hermetic: without this,
+    # pydantic-settings would let a real .env (e.g. PARTIAL_FILL_CHASE=yes on a
+    # deployed host) leak in and override the in-test defaults.
     config = AppConfig(
+        _env_file=None,
         kalshi_api_key="test-key",
         kalshi_private_key_path="unused.pem",
         mysql_database_url="******localhost:3306/test",
@@ -301,6 +306,12 @@ def make_config(**overrides):
         sl_panic_max_retries=3,
         sl_panic_max_quote_age_ms=30000,
         no_trade_tickers=set(),
+        # Chaser fields: pin to their code defaults so ambient env cannot leak.
+        partial_fill_chase=False,
+        chase_interval_seconds=60,
+        chase_max_minutes=30,
+        chase_until_gate_close=True,
+        chase_take_at_ceiling=True,
     )
     for key, value in overrides.items():
         setattr(config, key, value)
