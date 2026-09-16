@@ -1563,6 +1563,15 @@ async def test_resume_chaser_on_startup_for_underfilled(monkeypatch):
     """A restored HOLDING position below target gets its chaser re-armed."""
     ticker = "KXLOWTPHX-26AUG17-T88"
     db = InMemoryDB()
+
+    # Pin "today" to the ticker's market date (26AUG17); otherwise the resume
+    # guard correctly skips positions dated before the real current day and
+    # this test would be a time-bomb that fails the day after 2026-08-17.
+    import core.state_machine as sm_mod
+    monkeypatch.setattr(
+        sm_mod, "get_eastern_today_date_prefix", lambda *_a, **_kw: "26AUG17"
+    )
+
     strategy = make_strategy(monkeypatch, db=db, partial_fill_chase=True)
 
     bracket = MarketBracket(
