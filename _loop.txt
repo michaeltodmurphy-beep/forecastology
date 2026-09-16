@@ -1,0 +1,310 @@
+﻿    async def _partial_fill_chase_loop(
+        self,
+        bracket: MarketBracket,
+        remaining: int,
+        intended_quantity: int,
+    ) -> None:
+        """Async task: work a pegged limit bid for the remaining partial-fill quantity.
+
+        Adjusts upward every chase_interval_seconds, capped at spread_monitor_price
+        (the ceiling).  Terminates on full fill, max duration, SL trigger, gate
+        close, falling-knife (ask below buy trigger), or task cancellation.
+        """
+        ticker = bracket.market_ticker
+        ceiling = self.config.spread_monitor_price
+        chase_start = asyncio.get_event_loop().time()
+        max_seconds = getattr(self.config, "chase_max_minutes", 30) * 60
+        interval = getattr(self.config, "chase_interval_seconds", 60)
+        until_gate_close = getattr(self.config, "chase_until_gate_close", True)
+        take_at_ceiling = getattr(self.config, "chase_take_at_ceiling", True)
+        # Target = INITIAL_CONTRACT_COUNT.  Recompute remaining from the
+        # live position each cycle so it never tops past the target.
+        target = self._entry_target_qty(bracket, fallback=intended_quantity)
+
+        resting_order_id: Optional[str] = None
+        resting_bid: int = 0
+        at_ceiling_logged = False
+        total_chased_qty = 0
+        last_known_fill_qty = 0
+
+        best_bid = self._get_best_bid_from_cache(ticker)
+        if best_bid is None:
+            initial_bid = ceiling  # no bid info ╬ô├ç├╢ start at ceiling
+        else:
+            initial_bid = min(best_bid + 1, ceiling)
+
+        logger.info(
+            "chase.started",
+            ticker=ticker,
+            remaining=remaining,
+            initial_bid=initial_bid,
+            ceiling=ceiling,
+        )
+
+        try:
+            while remaining > 0:
+                # -- Termination: position no longer app-owned / HOLDING --
+                # As soon as the position is sold (stop-loss / close-out)
+                # or settles, stop chasing and never buy back in.
+                if not self._chase_position_still_held(bracket):
+                    if resting_order_id:
+                        try:
+                            await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                        except Exception:
+                            pass
+                    logger.info(
+                        "chase.cancelled",
+                        ticker=ticker,
+                        reason="position_no_longer_held",
+                        remaining_unfilled=remaining,
+                    )
+                    return
+
+                # Recompute remaining against the live position so a
+                # concurrent fill can never push us past the target.
+                remaining = max(0, target - max(int(bracket.position_quantity or 0), 0))
+                if remaining <= 0:
+                    if resting_order_id:
+                        try:
+                            await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                        except Exception:
+                            pass
+                    logger.info(
+                        "chase.filled",
+                        ticker=ticker,
+                        total_chased_qty=total_chased_qty,
+                        blended_avg=bracket.avg_entry,
+                    )
+                    return
+
+                # ╬ô├╢├ç╬ô├╢├ç Termination: max duration ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                elapsed = asyncio.get_event_loop().time() - chase_start
+                # Safety duration cap; ignored when CHASE_UNTIL_GATE_CLOSE=yes
+                # (the gate/aliveness guards above govern termination then).
+                if (not until_gate_close) and elapsed >= max_seconds:
+                    if resting_order_id:
+                        await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                    logger.info(
+                        "chase.cancelled",
+                        ticker=ticker,
+                        reason="max_minutes_exceeded",
+                        remaining_unfilled=remaining,
+                    )
+                    return
+
+                # ╬ô├╢├ç╬ô├╢├ç Termination: gate closed ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                if not await self._chase_entry_gate_open(bracket):
+                    if resting_order_id:
+                        await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                    logger.info(
+                        "chase.cancelled",
+                        ticker=ticker,
+                        reason="entry_gate_closed",
+                        remaining_unfilled=remaining,
+                    )
+                    return
+
+                # ╬ô├╢├ç╬ô├╢├ç Termination: falling knife (ask below buy trigger) ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                buy_trigger = get_buy_trigger_price(self.config, ticker)
+                ob = self.cache.get_orderbook(ticker)
+                if buy_trigger is not None and ob and ob.yes_asks:
+                    if ob.yes_asks[0].price < buy_trigger:
+                        if resting_order_id:
+                            await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                        logger.info(
+                            "chase.cancelled",
+                            ticker=ticker,
+                            reason="falling_knife",
+                            remaining_unfilled=remaining,
+                        )
+                        return
+
+                # ╬ô├╢├ç╬ô├╢├ç Compute desired bid ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                best_bid = self._get_best_bid_from_cache(ticker)
+                best_ask = self._get_best_ask_from_cache(ticker)
+                if best_bid is None:
+                    # No bid available; skip this cycle
+                    await asyncio.sleep(interval)
+                    continue
+
+                if (
+                    take_at_ceiling
+                    and best_ask is not None
+                    and best_ask <= ceiling
+                ):
+                    # The remainder is available at/below our ceiling -- lift
+                    # the ask (marketable buy) so the top-up fills now.
+                    desired_bid = min(best_ask, ceiling)
+                elif best_bid >= ceiling - 1:
+                    desired_bid = ceiling
+                else:
+                    desired_bid = min(best_bid + 1, ceiling)
+
+                # ╬ô├╢├ç╬ô├╢├ç Hard cap guard ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                hedge_max = int(self.config.hedge_max_factor)
+                _, _, max_allowed_qty = hedge_policy(
+                    self.config.initial_contract_count, hedge_max, 0
+                )
+                existing_qty = max(int(bracket.position_quantity or 0), 0)
+                allowed_chase = max(0, max_allowed_qty - existing_qty)
+                if allowed_chase <= 0:
+                    if resting_order_id:
+                        await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                    logger.critical(
+                        "hedge.cap_blocked",
+                        ticker=ticker,
+                        existing_qty=existing_qty,
+                        remaining=remaining,
+                        max_allowed_qty=max_allowed_qty,
+                        action="chase_hard_cap_blocked",
+                    )
+                    logger.info(
+                        "chase.cancelled",
+                        ticker=ticker,
+                        reason="hard_cap_exceeded",
+                        remaining_unfilled=remaining,
+                    )
+                    return
+                chase_qty = min(remaining, allowed_chase)
+
+                # ╬ô├╢├ç╬ô├╢├ç Re-bid if outbid or no resting order ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                outbid = (best_bid >= resting_bid) and (desired_bid > resting_bid) and resting_order_id is not None
+                no_order = resting_order_id is None
+
+                if no_order or outbid:
+                    if resting_order_id is not None:
+                        # Confirm cancellation before re-submitting (avoid double exposure)
+                        await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                        # Wait briefly for the cancel to propagate
+                        await asyncio.sleep(0.5)
+                        # Collect any partial fills that arrived before cancel
+                        fill_info = await self.executor.get_order_fill_info(resting_order_id)
+                        new_fills = max(0, fill_info.get("fill_qty", 0) - last_known_fill_qty)
+                        if new_fills > 0:
+                            fill_p = fill_info.get("fill_price", 0) or desired_bid
+                            await self._chase_apply_fill(bracket, new_fills, fill_p)
+                            total_chased_qty += new_fills
+                            remaining -= new_fills
+                            logger.info(
+                                "chase.fill",
+                                ticker=ticker,
+                                fill_qty=new_fills,
+                                fill_price=fill_p,
+                                remaining_after=remaining,
+                            )
+                            if remaining <= 0:
+                                logger.info(
+                                    "chase.filled",
+                                    ticker=ticker,
+                                    total_chased_qty=total_chased_qty,
+                                    blended_avg=bracket.avg_entry,
+                                )
+                                return
+                        last_known_fill_qty = 0
+                        resting_order_id = None
+
+                    if remaining > 0:
+                        old_bid = resting_bid
+                        resting_bid = desired_bid
+                        order = OrderRequest(
+                            market_ticker=ticker,
+                            side=OrderSide.BUY_YES,
+                            price=resting_bid,
+                            quantity=chase_qty,
+                        )
+                        place_result = await self.executor.place_limit_buy(order)
+                        if place_result.success:
+                            resting_order_id = place_result.order_id
+                            last_known_fill_qty = 0
+                            if old_bid:
+                                logger.info(
+                                    "chase.rebid",
+                                    ticker=ticker,
+                                    old_bid=old_bid,
+                                    new_bid=resting_bid,
+                                    best_bid=best_bid,
+                                    remaining=remaining,
+                                )
+                            if resting_bid == ceiling and not at_ceiling_logged:
+                                logger.info("chase.at_ceiling", ticker=ticker, bid=resting_bid)
+                                at_ceiling_logged = True
+                        else:
+                            logger.warning(
+                                "chase.place_failed",
+                                ticker=ticker,
+                                bid=resting_bid,
+                                notes=place_result.notes,
+                            )
+                            resting_order_id = None
+
+                # ╬ô├╢├ç╬ô├╢├ç Sleep, then poll for fills ╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç╬ô├╢├ç
+                await asyncio.sleep(interval)
+
+                if resting_order_id is None:
+                    continue
+
+                try:
+                    fill_info = await self.executor.get_order_fill_info(resting_order_id)
+                except Exception as poll_err:
+                    logger.error("chase.loop_error", ticker=ticker, error=str(poll_err))
+                    continue
+
+                new_fills = max(0, fill_info.get("fill_qty", 0) - last_known_fill_qty)
+                if new_fills > 0:
+                    fill_p = fill_info.get("fill_price", 0) or resting_bid
+                    await self._chase_apply_fill(bracket, new_fills, fill_p)
+                    total_chased_qty += new_fills
+                    remaining -= new_fills
+                    last_known_fill_qty = fill_info.get("fill_qty", 0)
+                    logger.info(
+                        "chase.fill",
+                        ticker=ticker,
+                        fill_qty=new_fills,
+                        fill_price=fill_p,
+                        remaining_after=remaining,
+                    )
+                    if remaining <= 0:
+                        logger.info(
+                            "chase.filled",
+                            ticker=ticker,
+                            total_chased_qty=total_chased_qty,
+                            blended_avg=bracket.avg_entry,
+                        )
+                        resting_order_id = None
+                        return
+
+                if fill_info.get("status") in ("filled", "cancelled", "not_found"):
+                    # Order is gone ╬ô├ç├╢ null out so next cycle re-submits
+                    resting_order_id = None
+                    last_known_fill_qty = 0
+
+        except asyncio.CancelledError:
+            # Bot shutdown or explicit cancel ╬ô├ç├╢ cancel any resting order best-effort
+            if resting_order_id:
+                try:
+                    await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                except Exception:
+                    pass
+            logger.info(
+                "chase.cancelled",
+                ticker=ticker,
+                reason="task_cancelled",
+                remaining_unfilled=remaining,
+            )
+            raise
+        except Exception as e:
+            logger.error("chase.loop_error", ticker=ticker, error=str(e))
+            if resting_order_id:
+                try:
+                    await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
+                except Exception:
+                    pass
+            logger.info(
+                "chase.cancelled",
+                ticker=ticker,
+                reason="loop_error",
+                remaining_unfilled=remaining,
+            )
+
+    async def _chase_entry_gate_open(self, bracket: MarketBracket) -> bool:
+        """Return True if entry is still allowed for this ticker's gate."""

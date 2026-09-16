@@ -3295,6 +3295,10 @@ class TemperatureStrategy:
         at_ceiling_logged = False
         total_chased_qty = 0
         last_known_fill_qty = 0
+        # Stable client_order_id tag for THIS bracket's chaser orders.  Used to
+        # reconcile against the exchange's live book so we only ever have one
+        # resting chaser buy per bracket and never touch a user's manual order.
+        chaser_client_id = f"{APP_CLIENT_ORDER_PREFIX}CHASE_{ticker}"
 
         best_bid = self._get_best_bid_from_cache(ticker)
         if best_bid is None:
@@ -3436,95 +3440,200 @@ class TemperatureStrategy:
                     return
                 chase_qty = min(remaining, allowed_chase)
 
-                # ΓöÇΓöÇ Re-bid if outbid or no resting order ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-                outbid = (best_bid >= resting_bid) and (desired_bid > resting_bid) and resting_order_id is not None
-                no_order = resting_order_id is None
+                # -- Maintain exactly one resting buy per bracket --------------
+                # Authoritative source of truth: the exchange's open-order list
+                # for this ticker, filtered to *this app's* chaser orders by
+                # client_order_id prefix.  Keying off the live book (not the
+                # in-memory order id, which can be dropped by a transient poll
+                # failure) is what guarantees we never stack duplicates.
+                open_buys = []
+                try:
+                    open_buys = await self.executor.list_open_buy_orders(
+                        ticker, client_prefix=APP_CLIENT_ORDER_PREFIX
+                    )
+                except Exception as list_err:
+                    logger.warning(
+                        "chase.list_open_buy_orders_error",
+                        ticker=ticker,
+                        error=str(list_err),
+                    )
+                    open_buys = []
 
-                if no_order or outbid:
-                    if resting_order_id is not None:
-                        # Confirm cancellation before re-submitting (avoid double exposure)
-                        await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
-                        # Wait briefly for the cancel to propagate
-                        await asyncio.sleep(0.5)
-                        # Collect any partial fills that arrived before cancel
-                        fill_info = await self.executor.get_order_fill_info(resting_order_id)
-                        new_fills = max(0, fill_info.get("fill_qty", 0) - last_known_fill_qty)
-                        if new_fills > 0:
-                            fill_p = fill_info.get("fill_price", 0) or desired_bid
-                            await self._chase_apply_fill(bracket, new_fills, fill_p)
-                            total_chased_qty += new_fills
-                            remaining -= new_fills
-                            logger.info(
-                                "chase.fill",
-                                ticker=ticker,
-                                fill_qty=new_fills,
-                                fill_price=fill_p,
-                                remaining_after=remaining,
-                            )
-                            if remaining <= 0:
-                                logger.info(
-                                    "chase.filled",
-                                    ticker=ticker,
-                                    total_chased_qty=total_chased_qty,
-                                    blended_avg=bracket.avg_entry,
-                                )
-                                return
-                        last_known_fill_qty = 0
-                        resting_order_id = None
+                # Reconcile against THIS bracket's chaser orders.  We match on
+                # our per-bracket client id, but fall back to any APP_-tagged
+                # buy on this ticker: the partial-fill chaser is the only code
+                # path that places a resting APP_ buy, so an APP_ buy here can
+                # only be ours.  The fallback guards against the exchange
+                # normalising/truncating the client_order_id we sent.
+                my_orders = [
+                    o for o in open_buys if o.get("client_order_id") == chaser_client_id
+                ]
+                if not my_orders:
+                    my_orders = list(open_buys)
+                if my_orders:
+                    resting_order_id = my_orders[0].get("order_id") or resting_order_id
 
-                    if remaining > 0:
-                        old_bid = resting_bid
-                        resting_bid = desired_bid
-                        order = OrderRequest(
-                            market_ticker=ticker,
-                            side=OrderSide.BUY_YES,
-                            price=resting_bid,
-                            quantity=chase_qty,
-                        )
-                        place_result = await self.executor.place_limit_buy(order)
-                        if place_result.success:
-                            resting_order_id = place_result.order_id
-                            last_known_fill_qty = 0
-                            if old_bid:
-                                logger.info(
-                                    "chase.rebid",
-                                    ticker=ticker,
-                                    old_bid=old_bid,
-                                    new_bid=resting_bid,
-                                    best_bid=best_bid,
-                                    remaining=remaining,
-                                )
-                            if resting_bid == ceiling and not at_ceiling_logged:
-                                logger.info("chase.at_ceiling", ticker=ticker, bid=resting_bid)
-                                at_ceiling_logged = True
-                        else:
+                existing = None
+                if my_orders:
+                    # Best (highest) resting bid already working for this bracket.
+                    existing = max(my_orders, key=lambda o: int(o.get("price") or 0))
+                    existing_price = int(existing.get("price") or 0)
+                else:
+                    existing_price = 0
+
+                need_cancel = False
+                need_place = False
+                if existing is None:
+                    need_place = True
+                elif desired_bid > existing_price:
+                    # Price improved: cancel the old one, then replace.
+                    need_cancel = True
+                    need_place = True
+                # else: an order is already working at a price at least as good
+                # as desired -> do nothing this cycle (just poll for fills).
+
+                if need_cancel and existing is not None:
+                    cancel_id = existing.get("order_id")
+                    if cancel_id:
+                        try:
+                            await self.executor.cancel_order(cancel_id, market_ticker=ticker)
+                        except Exception as cancel_err:
                             logger.warning(
-                                "chase.place_failed",
+                                "chase.cancel_error",
+                                ticker=ticker,
+                                order_id=cancel_id,
+                                error=str(cancel_err),
+                            )
+                    # Wait briefly for the cancel to propagate.
+                    await asyncio.sleep(0.5)
+                    # Harvest any partial fills that arrived before the cancel.
+                    try:
+                        fill_info = await self.executor.get_order_fill_info(cancel_id)
+                    except Exception:
+                        fill_info = {"fill_qty": 0, "fill_price": 0, "status": "unknown"}
+                    new_fills = max(0, fill_info.get("fill_qty", 0) - last_known_fill_qty)
+                    if new_fills > 0:
+                        fill_p = fill_info.get("fill_price", 0) or existing_price or desired_bid
+                        await self._chase_apply_fill(bracket, new_fills, fill_p)
+                        total_chased_qty += new_fills
+                        remaining -= new_fills
+                        logger.info(
+                            "chase.fill",
+                            ticker=ticker,
+                            fill_qty=new_fills,
+                            fill_price=fill_p,
+                            remaining_after=remaining,
+                        )
+                        if remaining <= 0:
+                            logger.info(
+                                "chase.filled",
+                                ticker=ticker,
+                                total_chased_qty=total_chased_qty,
+                                blended_avg=bracket.avg_entry,
+                            )
+                            return
+                    last_known_fill_qty = 0
+                    resting_order_id = None
+
+                if need_place and remaining > 0:
+                    old_bid = existing_price
+                    resting_bid = desired_bid
+                    order = OrderRequest(
+                        market_ticker=ticker,
+                        side=OrderSide.BUY_YES,
+                        price=resting_bid,
+                        quantity=chase_qty,
+                        client_order_id=chaser_client_id,
+                    )
+                    place_result = await self.executor.place_limit_buy(order)
+                    if place_result.success:
+                        resting_order_id = place_result.order_id
+                        last_known_fill_qty = 0
+                        # A GTC buy can partially (or fully) fill on placement.
+                        if getattr(place_result, "fill_quantity", 0) and place_result.fill_quantity > 0:
+                            await self._chase_apply_fill(
+                                bracket,
+                                place_result.fill_quantity,
+                                place_result.fill_price or resting_bid,
+                            )
+                            total_chased_qty += place_result.fill_quantity
+                            remaining -= place_result.fill_quantity
+                        if old_bid:
+                            logger.info(
+                                "chase.rebid",
+                                ticker=ticker,
+                                old_bid=old_bid,
+                                new_bid=resting_bid,
+                                best_bid=best_bid,
+                                remaining=remaining,
+                            )
+                        else:
+                            logger.info(
+                                "chase.placed",
                                 ticker=ticker,
                                 bid=resting_bid,
-                                notes=place_result.notes,
+                                best_bid=best_bid,
+                                remaining=remaining,
                             )
-                            resting_order_id = None
+                        if resting_bid == ceiling and not at_ceiling_logged:
+                            logger.info("chase.at_ceiling", ticker=ticker, bid=resting_bid)
+                            at_ceiling_logged = True
+                        if remaining <= 0:
+                            logger.info(
+                                "chase.filled",
+                                ticker=ticker,
+                                total_chased_qty=total_chased_qty,
+                                blended_avg=bracket.avg_entry,
+                            )
+                            return
+                    else:
+                        logger.warning(
+                            "chase.place_failed",
+                            ticker=ticker,
+                            bid=resting_bid,
+                            notes=place_result.notes,
+                        )
+                        resting_order_id = None
 
                 # ΓöÇΓöÇ Sleep, then poll for fills ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
                 await asyncio.sleep(interval)
 
-                if resting_order_id is None:
-                    continue
-
+                # -- Poll fills from the exchange's open-order list ------------
+                # We deliberately do NOT trust a single remembered order id
+                # here: a transient poll failure used to null it and trigger a
+                # duplicate re-place.  Instead read every still-open chaser
+                # order for this bracket and account for cumulative fills.
                 try:
-                    fill_info = await self.executor.get_order_fill_info(resting_order_id)
+                    poll_orders = await self.executor.list_open_buy_orders(
+                        ticker, client_prefix=APP_CLIENT_ORDER_PREFIX
+                    )
                 except Exception as poll_err:
                     logger.error("chase.loop_error", ticker=ticker, error=str(poll_err))
                     continue
 
-                new_fills = max(0, fill_info.get("fill_qty", 0) - last_known_fill_qty)
-                if new_fills > 0:
-                    fill_p = fill_info.get("fill_price", 0) or resting_bid
+                poll_mine = [
+                    o for o in poll_orders if o.get("client_order_id") == chaser_client_id
+                ]
+                if not poll_mine:
+                    poll_mine = list(poll_orders)
+                polled_fill_total = 0
+                for o in poll_mine:
+                    oid = o.get("order_id")
+                    if not oid:
+                        continue
+                    try:
+                        fi = await self.executor.get_order_fill_info(oid)
+                    except Exception:
+                        continue
+                    polled_fill_total += int(fi.get("fill_qty", 0) or 0)
+
+                if polled_fill_total > last_known_fill_qty:
+                    new_fills = polled_fill_total - last_known_fill_qty
+                    fill_p = resting_bid or desired_bid
                     await self._chase_apply_fill(bracket, new_fills, fill_p)
                     total_chased_qty += new_fills
                     remaining -= new_fills
-                    last_known_fill_qty = fill_info.get("fill_qty", 0)
+                    last_known_fill_qty = polled_fill_total
                     logger.info(
                         "chase.fill",
                         ticker=ticker,
@@ -3542,10 +3651,25 @@ class TemperatureStrategy:
                         resting_order_id = None
                         return
 
-                if fill_info.get("status") in ("filled", "cancelled", "not_found"):
-                    # Order is gone ΓÇö null out so next cycle re-submits
+                # Recompute remaining from the live position so a fill we did
+                # not observe still stops the loop at the target.
+                remaining = max(0, target - max(int(bracket.position_quantity or 0), 0))
+                if remaining <= 0:
+                    logger.info(
+                        "chase.filled",
+                        ticker=ticker,
+                        total_chased_qty=total_chased_qty,
+                        blended_avg=bracket.avg_entry,
+                    )
                     resting_order_id = None
-                    last_known_fill_qty = 0
+                    return
+
+                # NOTE: we intentionally do NOT clear resting_order_id when a
+                # poll reports "filled"/"cancelled"/"not_found".  The next
+                # cycle reconciles against the exchange's live open-order list
+                # (see "Maintain exactly one resting buy per bracket" above),
+                # which is the single source of truth.  Clearing it here on a
+                # transient status was what produced duplicate resting orders.
 
         except asyncio.CancelledError:
             # Bot shutdown or explicit cancel ΓÇö cancel any resting order best-effort

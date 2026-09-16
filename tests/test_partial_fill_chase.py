@@ -240,6 +240,25 @@ class FakeExecutor:
     async def get_fills(self, ticker=None):
         return list(self.fills)
 
+    async def list_open_buy_orders(self, ticker, client_prefix=""):
+        # Mirror the exchange: every tracked resting order for *ticker*.
+        out = []
+        for oid, o in self._resting_orders.items():
+            if o.get("ticker") != ticker:
+                continue
+            cid = o.get("client_order_id", "")
+            if client_prefix and not cid.startswith(client_prefix):
+                continue
+            out.append(
+                {
+                    "order_id": oid,
+                    "price": o.get("price", 0),
+                    "quantity": o.get("quantity", 0),
+                    "client_order_id": cid,
+                }
+            )
+        return out
+
     async def place_limit_buy(self, order):
         oid = f"chase-oid-{len(self.orders)}"
         self.orders.append(("place_limit_buy", order, None))
@@ -247,6 +266,7 @@ class FakeExecutor:
             "ticker": order.market_ticker,
             "price": order.price,
             "quantity": order.quantity,
+            "client_order_id": getattr(order, "client_order_id", "") or "",
         }
         return ExecutionResult(
             success=True,
@@ -777,6 +797,76 @@ async def test_chaser_outbid_cancel_rebid(monkeypatch):
     assert place_calls[1][0] == 90
     # First order should have been cancelled
     assert place_calls[0][1] in executor._cancel_calls
+
+
+@pytest.mark.asyncio
+async def test_chaser_resting_order_not_duplicated(monkeypatch):
+    """Regression: a resting, unfilled order must NOT be re-placed every cycle.
+
+    Reproduces the live incident where the chaser tried to poll its order,
+    lost the handle on a transient status, and stacked a fresh resting order
+    every interval (48 placements, no cancels, no fills).
+    """
+    ticker = "KXLOWTPHX-26AUG17-T88"
+    cache = TickerCache()
+    cache.quotes[ticker] = (88, 92)
+
+    executor = FakeExecutor()
+    place_calls = []
+
+    async def tracked_place(order):
+        place_calls.append(order.price)
+        # Register the resting order exactly like the real executor would.
+        oid = f"rest-oid-{len(place_calls)}"
+        executor._resting_orders[oid] = {
+            "ticker": order.market_ticker,
+            "price": order.price,
+            "quantity": order.quantity,
+            "client_order_id": getattr(order, "client_order_id", "") or "",
+        }
+        return ExecutionResult(
+            success=True, market_ticker=order.market_ticker, side="yes",
+            price=order.price, quantity=order.quantity,
+            fill_price=0, fill_quantity=0, total_cost_cents=0,
+            order_id=oid, status="RESTING",
+        )
+
+    executor.place_limit_buy = tracked_place
+
+    import core.state_machine as sm_mod
+    call_count = {"n": 0}
+
+    async def sleep_many_then_stop(secs):
+        # Let several full intervals elapse (order stays resting, never fills).
+        if secs < 1:
+            return
+        call_count["n"] += 1
+        if call_count["n"] >= 5:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(sm_mod.asyncio, "sleep", sleep_many_then_stop)
+
+    db = InMemoryDB()
+    strategy = make_strategy(
+        monkeypatch, db=db, executor=executor, partial_fill_chase=True,
+        chase_take_at_ceiling=False,
+    )
+    strategy.cache = cache
+
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTPHX",
+        bracket_label="entry", phase=Phase.HOLDING,
+        position_quantity=7, avg_entry=90,
+    )
+
+    try:
+        await strategy._partial_fill_chase_loop(bracket, remaining=5, intended_quantity=12)
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    # The order never fills and the price never improves: exactly ONE placement.
+    assert len(place_calls) == 1, f"expected a single placement, got {place_calls}"
+    assert executor._cancel_calls == [], "a resting order should never be cancelled"
 
 
 # ===========================================================================

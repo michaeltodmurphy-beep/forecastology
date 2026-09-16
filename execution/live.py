@@ -689,6 +689,90 @@ class LiveTradeExecutor(BaseExecutor):
             return []
         return out
 
+    async def list_open_buy_orders(self, ticker: str, client_prefix: str = "") -> list[dict]:
+        """Return live resting BUY/YES-bid orders for *ticker* from the exchange.
+
+        Normalizes each order to ``{order_id, price (cents), quantity,
+        client_order_id}``.  Only orders whose status is still open (resting/
+        unfilled) are returned.  If *client_prefix* is non-empty only orders
+        whose client_order_id starts with that prefix are returned, so callers
+        reconcile only this app's own resting buys and never a user's manual
+        orders.  On any error this logs and returns an empty list.
+        """
+        out: list[dict] = []
+        if not ticker:
+            return out
+        path = REST_PORTFOLIO_ORDERS
+        url = f"{self.base_url}{path}"
+        try:
+            headers = self._headers("GET", path)
+            resp = await self._client.get(
+                url, headers=headers, params={"ticker": ticker, "limit": 200}
+            )
+            if resp.status_code not in (200, 201):
+                logger.warning(
+                    "live.list_open_buy_orders_failed",
+                    ticker=ticker,
+                    status=resp.status_code,
+                )
+                return out
+            data = resp.json()
+            orders = data.get("orders") if isinstance(data.get("orders"), list) else []
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                if (o.get("ticker") or o.get("market_ticker")) != ticker:
+                    continue
+                status = (o.get("status") or "").lower()
+                if status in ("filled", "cancelled", "canceled", "expired", "settled", "not_found"):
+                    continue
+                # Side: the events-orders API reports buy YES as "bid".  Some
+                # endpoints use "yes"/"buy".  Accept any of those; reject asks.
+                side = str(o.get("side") or o.get("action") or "").lower()
+                if side not in ("bid", "buy", "yes"):
+                    continue
+                cid = o.get("client_order_id") or ""
+                if client_prefix and not cid.startswith(client_prefix):
+                    continue
+                # Remaining (unfilled) quantity, in contracts.
+                remaining = o.get("remaining_count")
+                if remaining is None:
+                    remaining = o.get("remaining_count_fp")
+                if remaining is None:
+                    remaining = o.get("count") or o.get("count_fp")
+                try:
+                    qty = int(float(remaining or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                # Limit price in cents: prefer the yes_price_dollars field.
+                price_cents = 0
+                for key in ("yes_price_dollars", "yes_price", "price"):
+                    val = o.get(key)
+                    if val is None:
+                        continue
+                    try:
+                        f = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    price_cents = round(f * 100) if f <= 1.0 else round(f)
+                    if price_cents > 0:
+                        break
+                order_id = o.get("order_id") or o.get("id") or ""
+                if not order_id:
+                    continue
+                out.append(
+                    {
+                        "order_id": order_id,
+                        "price": price_cents,
+                        "quantity": qty,
+                        "client_order_id": cid,
+                    }
+                )
+        except Exception as e:
+            logger.warning("live.list_open_buy_orders_error", ticker=ticker, error=str(e))
+            return []
+        return out
+
     async def cancel_open_sell_orders(self, ticker: str, client_prefix: str = "") -> int:
         """Cancel any live resting SELL orders for *ticker* on the exchange.
 

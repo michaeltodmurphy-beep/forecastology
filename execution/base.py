@@ -115,6 +115,18 @@ class BaseExecutor(ABC):
         """
         return 0
 
+    async def list_open_buy_orders(self, ticker: str, client_prefix: str = "") -> list[dict]:
+        """Return exchange open (resting/unfilled) BUY/YES-bid orders for *ticker*.
+
+        Each dict has at least: ``order_id``, ``price`` (cents), ``quantity``,
+        ``client_order_id``.  If *client_prefix* is non-empty only orders whose
+        client_order_id starts with that prefix are returned, so callers can
+        reconcile only this app's own resting buys without touching a user's
+        manual orders.  Default is a no-op returning an empty list; the LIVE
+        executor overrides this.
+        """
+        return []
+
     async def place_limit_buy(self, order: "OrderRequest") -> "ExecutionResult":
         """Place a resting (GTC) limit BUY_YES order.
 

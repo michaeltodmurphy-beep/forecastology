@@ -321,6 +321,7 @@ class PaperTradeExecutor(BaseExecutor):
             "bid_price": order.price,
             "remaining": order.quantity,
             "total_cost_reserved": total_cost,
+            "client_order_id": getattr(order, "client_order_id", "") or "",
         }
         logger.info(
             "paper.place_limit_buy",
@@ -342,6 +343,31 @@ class PaperTradeExecutor(BaseExecutor):
             status="RESTING",
             notes="paper_resting_buy",
         )
+
+    async def list_open_buy_orders(self, ticker: str, client_prefix: str = "") -> list[dict]:
+        """Return resting BUY orders for *ticker* from the paper book.
+
+        Mirrors LiveTradeExecutor.list_open_buy_orders so the chaser reconciles
+        against the (simulated) exchange instead of tracking a single order id.
+        """
+        out: list[dict] = []
+        if not ticker:
+            return out
+        for oid, o in self._resting_buy_orders.items():
+            if o.get("ticker") != ticker:
+                continue
+            cid = o.get("client_order_id", "")
+            if client_prefix and not cid.startswith(client_prefix):
+                continue
+            out.append(
+                {
+                    "order_id": oid,
+                    "price": o.get("bid_price", 0),
+                    "quantity": o.get("remaining", 0),
+                    "client_order_id": cid,
+                }
+            )
+        return out
 
     async def get_order_fill_info(self, order_id: str) -> dict:
         """Paper mode: check if current ask has crossed our resting bid price.
