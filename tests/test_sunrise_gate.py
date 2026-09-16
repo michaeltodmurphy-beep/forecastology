@@ -1342,7 +1342,7 @@ def test_morning_forecast_dip_includes_deadline_hour(monkeypatch):
 def test_morning_forecast_dip_converts_celsius(monkeypatch):
     """A Celsius-unit forecast is converted to F before comparison.
     11.0C = 51.8F -> 52 -> below B54 -> blocked."""
-        periods = [
+    periods = [
         {"startTime": datetime.datetime(2026, 9, 9, 7, 0, tzinfo=_TZ_SEA).isoformat(),
          "temperature": 11.0, "temperatureUnit": "C"},
     ]
@@ -1360,7 +1360,7 @@ def test_morning_forecast_dip_fails_open_when_forecast_unavailable(monkeypatch):
         forecast_periods=None,  # _get_hourly_periods raises
         station_meta=(47.45, -122.31, "https://api.weather.gov/hourly", "America/Los_Angeles"),
     )
-        gate = SunriseEntryGate(_make_config(), nws_client=client)
+    gate = SunriseEntryGate(_make_config(), nws_client=client)
     fixed = datetime.datetime(2026, 9, 9, 5, 59, tzinfo=_TZ_SEA)
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed, "astral"))
     blocked, ctx = gate.morning_forecast_dips_below_bracket(
