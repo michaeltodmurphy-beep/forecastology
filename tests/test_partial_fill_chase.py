@@ -549,6 +549,9 @@ async def test_chaser_initial_bid_best_bid_plus_one(monkeypatch):
         executor=executor,
         partial_fill_chase=True,
         chase_interval_seconds=0,
+        # Pure-maker path: ask (92) <= ceiling so default take-at-ceiling would
+        # lift the ask; disable it to assert the best_bid+1 resting bid.
+        chase_take_at_ceiling=False,
     )
     strategy.cache = cache
 
@@ -745,7 +748,10 @@ async def test_chaser_outbid_cancel_rebid(monkeypatch):
 
     db = InMemoryDB()
     strategy = make_strategy(
-        monkeypatch, db=db, executor=executor, partial_fill_chase=True
+        monkeypatch, db=db, executor=executor, partial_fill_chase=True,
+        # Pure-maker path: ask (92) <= ceiling so default take-at-ceiling would
+        # lift the ask; disable it to assert the outbid cancel/rebid sequence.
+        chase_take_at_ceiling=False,
     )
     strategy.cache = cache
 
