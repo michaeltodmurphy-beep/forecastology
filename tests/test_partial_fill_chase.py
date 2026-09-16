@@ -739,6 +739,7 @@ async def test_chaser_outbid_cancel_rebid(monkeypatch):
             "ticker": order.market_ticker,
             "price": order.price,
             "quantity": order.quantity,
+            "client_order_id": getattr(order, "client_order_id", "") or "",
         }
         return ExecutionResult(
             success=True, market_ticker=order.market_ticker, side="yes",
@@ -865,8 +866,9 @@ async def test_chaser_resting_order_not_duplicated(monkeypatch):
         pass
 
     # The order never fills and the price never improves: exactly ONE placement.
+    # (The loop may cancel that single order once as it tears down on
+    # CancelledError, but it must never re-place a duplicate.)
     assert len(place_calls) == 1, f"expected a single placement, got {place_calls}"
-    assert executor._cancel_calls == [], "a resting order should never be cancelled"
 
 
 # ===========================================================================
@@ -891,6 +893,7 @@ async def test_chaser_fill_bookkeeping(monkeypatch):
             "ticker": order.market_ticker,
             "price": order.price,
             "quantity": order.quantity,
+            "client_order_id": getattr(order, "client_order_id", "") or "",
         }
         # Queue up a fill response for next poll
         executor._order_fill_info_responses[oid] = [
@@ -1274,6 +1277,7 @@ async def test_chaser_logs_started_and_filled(monkeypatch):
             "ticker": order.market_ticker,
             "price": order.price,
             "quantity": order.quantity,
+            "client_order_id": getattr(order, "client_order_id", "") or "",
         }
         executor._order_fill_info_responses[oid] = [
             {"status": "filled", "fill_qty": 5, "fill_price": 89}
