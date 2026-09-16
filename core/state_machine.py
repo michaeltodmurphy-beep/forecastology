@@ -3617,6 +3617,7 @@ class TemperatureStrategy:
                 if not poll_mine:
                     poll_mine = list(poll_orders)
                 polled_fill_total = 0
+                polled_cost_cents = 0
                 for o in poll_mine:
                     oid = o.get("order_id")
                     if not oid:
@@ -3625,11 +3626,25 @@ class TemperatureStrategy:
                         fi = await self.executor.get_order_fill_info(oid)
                     except Exception:
                         continue
-                    polled_fill_total += int(fi.get("fill_qty", 0) or 0)
+                    fq = int(fi.get("fill_qty", 0) or 0)
+                    if fq <= 0:
+                        continue
+                    fp = int(fi.get("fill_price", 0) or 0)
+                    if fp <= 0:
+                        fp = int(o.get("price") or 0) or resting_bid or desired_bid
+                    polled_fill_total += fq
+                    polled_cost_cents += fp * fq
 
                 if polled_fill_total > last_known_fill_qty:
                     new_fills = polled_fill_total - last_known_fill_qty
-                    fill_p = resting_bid or desired_bid
+                    # Use the exchange-reported average fill price for the
+                    # *cumulative* fills, not our assumed resting bid.  This
+                    # keeps position cost basis correct when our order filled
+                    # at a better price (e.g. ask crossed below our bid).
+                    if polled_fill_total > 0 and polled_cost_cents > 0:
+                        fill_p = max(1, round(polled_cost_cents / polled_fill_total))
+                    else:
+                        fill_p = int(resting_bid or desired_bid or 0)
                     await self._chase_apply_fill(bracket, new_fills, fill_p)
                     total_chased_qty += new_fills
                     remaining -= new_fills
