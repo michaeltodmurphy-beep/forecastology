@@ -1776,50 +1776,6 @@ class TemperatureStrategy:
                         app_owned_qty=app_owned_qty, external_qty=external_qty)
             await self._seed_rest_price_for_ticker(ticker)
 
-        await self._resume_chasers_for_underfilled_positions()
-
-    async def _resume_chasers_for_underfilled_positions(self) -> None:
-        """Re-arm the chaser for restored positions below INITIAL_CONTRACT_COUNT.
-
-        A partial entry that never topped up is abandoned across a restart
-        otherwise (the bracket is restored as HOLDING/crossed_buy and the
-        entry scan never re-triggers).  For each app-owned HOLDING bracket,
-        on the current market day and below target, restart the chaser.
-        """
-        if not getattr(self.config, "partial_fill_chase", False):
-            return
-        today_eastern = _parse_date_prefix(get_eastern_today_date_prefix())
-        for ticker, bracket in list(self.active_positions.items()):
-            try:
-                if bracket.phase != Phase.HOLDING:
-                    continue
-                if int(self._app_owned_qty.get(ticker, 0) or 0) <= 0:
-                    continue
-                target = self._entry_target_qty(bracket)
-                current_qty = max(int(bracket.position_quantity or 0), 0)
-                if current_qty >= target:
-                    continue
-                # Only resume on the market day the ticker is dated for.
-                parsed = parse_series_and_date(ticker)
-                if parsed is not None and today_eastern is not None:
-                    _, date_prefix = parsed
-                    market_date = _parse_date_prefix(date_prefix)
-                    if market_date is not None and market_date < today_eastern:
-                        continue
-                if not await self._chase_entry_gate_open(bracket):
-                    continue
-                remaining = target - current_qty
-                await self._maybe_start_chaser(bracket, remaining, target)
-                logger.info(
-                    "chase.resumed_on_startup",
-                    ticker=ticker,
-                    current_qty=current_qty,
-                    target=target,
-                    remaining=remaining,
-                )
-            except Exception as e:
-                logger.warning("chase.resume_error", ticker=ticker, error=str(e))
-
     async def _ensure_bracket(self, market_ticker: str, event_ticker: str = "", series_ticker: str = "", bracket_label: str = ""):
         """Create a new MarketBracket if the ticker is a temperature market and unknown."""
         if market_ticker in self.brackets:
@@ -3029,57 +2985,17 @@ class TemperatureStrategy:
             )
 
             # ΓöÇΓöÇ Partial-fill chaser (opt-in via PARTIAL_FILL_CHASE=yes) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-            # Target is INITIAL_CONTRACT_COUNT: if the entry filled less than the
-            # requested size (book exhausted at/below ceiling), keep working the
-            # REMAINDER until we hold the full target.  Never exceeds the target.
-            if getattr(self.config, "partial_fill_chase", False):
-                target = self._entry_target_qty(bracket, fallback=proposed_qty)
-                current_qty = max(int(bracket.position_quantity or 0), 0)
-                remaining = max(0, target - current_qty)
-                if remaining > 0 and result.fill_quantity > 0:
-                    await self._maybe_start_chaser(bracket, remaining, target)
+            if (
+                getattr(self.config, "partial_fill_chase", False)
+                and result.fill_quantity < proposed_qty
+                and result.fill_quantity > 0
+            ):
+                remaining = proposed_qty - result.fill_quantity
+                await self._maybe_start_chaser(bracket, remaining, proposed_qty)
         else:
             bracket.phase = Phase.MONITORING
             logger.warning("phase.b.entry_failed", ticker=bracket.market_ticker,
                            notes=result.notes)
-
-    def _entry_target_qty(self, bracket: MarketBracket, fallback: Optional[int] = None) -> int:
-        """Target entry size for a bracket = INITIAL_CONTRACT_COUNT.
-
-        The chaser tops up a partial entry to this target and NEVER buys
-        past it.  Falls back to *fallback* (or 0) if config is missing.
-        """
-        try:
-            target = int(self.config.initial_contract_count)
-        except (TypeError, ValueError):
-            target = 0
-        if target <= 0:
-            target = max(int(fallback or 0), 0)
-        return max(target, 0)
-
-    def _chase_position_still_held(self, bracket: MarketBracket) -> bool:
-        """True while the position is still an open HOLDING app position.
-
-        The chaser must stop the moment the position leaves HOLDING
-        (stop-loss / close-out / settlement sets the phase to CLOSED or
-        MONITORING and removes the ticker from ``active_positions``), so
-        we never buy more into a position we already exited.
-
-        Ownership is checked only when it has been recorded: if the ticker
-        is present in the app-owned ledger with a non-positive quantity we
-        treat the app position as gone.  When no ownership entry exists we
-        fail open (the chaser is only ever started for an app-owned fill).
-        """
-        if bracket.phase != Phase.HOLDING:
-            return False
-        ticker = bracket.market_ticker
-        if ticker in self._app_owned_qty:
-            try:
-                if int(self._app_owned_qty.get(ticker, 0) or 0) <= 0:
-                    return False
-            except (TypeError, ValueError):
-                return False
-        return True
 
     async def _maybe_start_chaser(
         self,
@@ -3255,18 +3171,6 @@ class TemperatureStrategy:
             return ob.yes_bids[0].price
         return None
 
-    def _get_best_ask_from_cache(self, ticker: str) -> Optional[int]:
-        """Return the current best YES ask price in cents, or None."""
-        quote = self.cache.get_quote(ticker)
-        if quote is not None:
-            _, yes_ask = quote
-            if yes_ask is not None and yes_ask > 0:
-                return yes_ask
-        ob = self.cache.get_orderbook(ticker)
-        if ob is not None and ob.yes_asks:
-            return ob.yes_asks[0].price
-        return None
-
     async def _partial_fill_chase_loop(
         self,
         bracket: MarketBracket,
@@ -3284,11 +3188,6 @@ class TemperatureStrategy:
         chase_start = asyncio.get_event_loop().time()
         max_seconds = getattr(self.config, "chase_max_minutes", 30) * 60
         interval = getattr(self.config, "chase_interval_seconds", 60)
-        until_gate_close = getattr(self.config, "chase_until_gate_close", True)
-        take_at_ceiling = getattr(self.config, "chase_take_at_ceiling", True)
-        # Target = INITIAL_CONTRACT_COUNT.  Recompute remaining from the
-        # live position each cycle so it never tops past the target.
-        target = self._entry_target_qty(bracket, fallback=intended_quantity)
 
         resting_order_id: Optional[str] = None
         resting_bid: int = 0
@@ -3312,45 +3211,9 @@ class TemperatureStrategy:
 
         try:
             while remaining > 0:
-                # -- Termination: position no longer app-owned / HOLDING --
-                # As soon as the position is sold (stop-loss / close-out)
-                # or settles, stop chasing and never buy back in.
-                if not self._chase_position_still_held(bracket):
-                    if resting_order_id:
-                        try:
-                            await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
-                        except Exception:
-                            pass
-                    logger.info(
-                        "chase.cancelled",
-                        ticker=ticker,
-                        reason="position_no_longer_held",
-                        remaining_unfilled=remaining,
-                    )
-                    return
-
-                # Recompute remaining against the live position so a
-                # concurrent fill can never push us past the target.
-                remaining = max(0, target - max(int(bracket.position_quantity or 0), 0))
-                if remaining <= 0:
-                    if resting_order_id:
-                        try:
-                            await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
-                        except Exception:
-                            pass
-                    logger.info(
-                        "chase.filled",
-                        ticker=ticker,
-                        total_chased_qty=total_chased_qty,
-                        blended_avg=bracket.avg_entry,
-                    )
-                    return
-
                 # ΓöÇΓöÇ Termination: max duration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
                 elapsed = asyncio.get_event_loop().time() - chase_start
-                # Safety duration cap; ignored when CHASE_UNTIL_GATE_CLOSE=yes
-                # (the gate/aliveness guards above govern termination then).
-                if (not until_gate_close) and elapsed >= max_seconds:
+                if elapsed >= max_seconds:
                     if resting_order_id:
                         await self.executor.cancel_order(resting_order_id, market_ticker=ticker)
                     logger.info(
@@ -3390,21 +3253,12 @@ class TemperatureStrategy:
 
                 # ΓöÇΓöÇ Compute desired bid ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
                 best_bid = self._get_best_bid_from_cache(ticker)
-                best_ask = self._get_best_ask_from_cache(ticker)
                 if best_bid is None:
                     # No bid available; skip this cycle
                     await asyncio.sleep(interval)
                     continue
 
-                if (
-                    take_at_ceiling
-                    and best_ask is not None
-                    and best_ask <= ceiling
-                ):
-                    # The remainder is available at/below our ceiling -- lift
-                    # the ask (marketable buy) so the top-up fills now.
-                    desired_bid = min(best_ask, ceiling)
-                elif best_bid >= ceiling - 1:
+                if best_bid >= ceiling - 1:
                     desired_bid = ceiling
                 else:
                     desired_bid = min(best_bid + 1, ceiling)
