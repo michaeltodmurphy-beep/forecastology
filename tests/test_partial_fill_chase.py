@@ -1475,6 +1475,11 @@ async def test_chaser_until_gate_close_ignores_max_minutes(monkeypatch):
     strategy.config.chase_max_minutes = 0
     strategy.cache = cache
 
+    # Never actually sleep (the default interval is 60s and this test does not
+    # set a small one); the gate-close guard is what must terminate the loop.
+    import core.state_machine as sm_mod
+    monkeypatch.setattr(sm_mod.asyncio, "sleep", AsyncMock())
+
     # Stop the loop after two gate checks via the gate itself.
     gate_calls = {"n": 0}
     orig_gate = strategy._chase_entry_gate_open
