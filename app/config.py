@@ -644,12 +644,26 @@ class AppConfig(BaseSettings):
     #
     # PARTIAL_FILL_CHASE=yes|no     (default: no — deployed dark until tested)
     # CHASE_INTERVAL_SECONDS=<int>  (default: 60)
+    #   How often the chaser re-evaluates/re-prices (also polls for fills).
+    # CHASE_UNTIL_GATE_CLOSE=yes|no (default: yes)
+    #   When yes, ignore CHASE_MAX_MINUTES and keep working the remainder until
+    #   the entry gate closes for the market day OR the position leaves HOLDING
+    #   (stop-loss/close-out/settlement).  When no, use CHASE_MAX_MINUTES.
+    # CHASE_TAKE_AT_CEILING=yes|no  (default: yes)
+    #   When yes, if the current ask is <= ceiling, LIFT it (marketable buy) to
+    #   guarantee the remainder fills.  When no, pure maker: only ever rest at
+    #   min(best_bid+1, ceiling) and never cross the spread.
     # CHASE_MAX_MINUTES=<int>       (default: 30)
+    #   Safety ceiling (minutes).  Fully active only when
+    #   CHASE_UNTIL_GATE_CLOSE=no; otherwise it is a backstop in case that flag
+    #   is ever turned off.
     #
-    # Parsed by from_env().
+    # Parsed by from_env().  The chaser NEVER buys past INITIAL_CONTRACT_COUNT.
     partial_fill_chase: bool = False
     chase_interval_seconds: int = 60
     chase_max_minutes: int = 30
+    chase_until_gate_close: bool = True
+    chase_take_at_ceiling: bool = True
 
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'buy_trigger_price_low_warm', 'spread_monitor_price', 'minimum_spread',
@@ -1009,6 +1023,16 @@ class AppConfig(BaseSettings):
             "CHASE_MAX_MINUTES",
             default=30,
         )
+        chase_until_gate_close = _parse_trade_toggle(
+            os.getenv("CHASE_UNTIL_GATE_CLOSE"),
+            "CHASE_UNTIL_GATE_CLOSE",
+            default=True,
+        )
+        chase_take_at_ceiling = _parse_trade_toggle(
+            os.getenv("CHASE_TAKE_AT_CEILING"),
+            "CHASE_TAKE_AT_CEILING",
+            default=True,
+        )
         return cls(
             dry_run=dry_run,
             low_trades=low_trades,
@@ -1071,4 +1095,6 @@ class AppConfig(BaseSettings):
             partial_fill_chase=partial_fill_chase,
             chase_interval_seconds=chase_interval_seconds,
             chase_max_minutes=chase_max_minutes,
+            chase_until_gate_close=chase_until_gate_close,
+            chase_take_at_ceiling=chase_take_at_ceiling,
         )
