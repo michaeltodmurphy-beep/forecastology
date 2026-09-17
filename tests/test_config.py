@@ -612,6 +612,7 @@ class TestIntradayExitConfig:
             os.environ.pop("INTRADAY_EXIT_SPREAD", None)
 
     def test_intraday_exit_exclude_default_empty(self):
+        os.environ.pop("INTRADAY_EXIT_EXCLUDE", None)
         cfg = self._base_cfg()
         assert cfg.intraday_exit_exclude == set()
 

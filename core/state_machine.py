@@ -5567,8 +5567,11 @@ class TemperatureStrategy:
                     ticker=ticker,
                     schedule=schedule,
                 )
+            # Tracks whether a scheduled checkpoint exit already fired this
+            # cycle. Declared unconditionally so the HWM block below can read it
+            # even when intraday checkpoints are disabled or the ticker is excluded.
+            exited_this_cycle = False
             if intraday_enabled and not intraday_excluded:
-                exited_this_cycle = False
                 for chk_time_str, chk_threshold in schedule:
                     if exited_this_cycle:
                         break

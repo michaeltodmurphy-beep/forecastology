@@ -256,6 +256,16 @@ def make_config(**overrides):
         # these gates pass an explicit override.
         low_ticker_entry_halt_enabled=False,
         low_ticker_daily_closeout_enabled=False,
+        # Intraday-exit config is pinned so tests do not inherit ambient .env
+        # values (pydantic-settings reads the environment even when AppConfig
+        # is constructed with explicit kwargs for other fields).
+        intraday_exit_schedule="12:00:0.85,15:00:0.90,18:00:0.90",
+        intraday_exit_entry_grace_minutes=90,
+        intraday_exit_spread=0,
+        intraday_exit_exclude=set(),
+        hwm_exit_enabled=False,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
     )
     for key, value in overrides.items():
         setattr(config, key, value)
