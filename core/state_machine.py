@@ -5493,6 +5493,15 @@ class TemperatureStrategy:
         )
         grace_minutes = int(getattr(self.config, "intraday_exit_entry_grace_minutes", 90))
         intraday_spread_limit = int(getattr(self.config, "intraday_exit_spread", 0))
+        # Series/ticker prefixes (uppercase) excluded from INTRADAY_EXIT
+        # checkpoint exits. These tickers still run every other strategy
+        # (entry, stop-loss, HWM exit, PM closeout); only the scheduled
+        # intraday checkpoint exit is skipped for them.
+        intraday_exit_exclude: set[str] = {
+            str(t).strip().upper()
+            for t in getattr(self.config, "intraday_exit_exclude", set()) or set()
+            if str(t).strip()
+        }
         hwm_arm_price = int(getattr(self.config, "hwm_arm_price", 93))
         hwm_exit_price = int(getattr(self.config, "hwm_exit_price", 88))
         # Seconds between first below-threshold read and confirmation read.
@@ -5543,8 +5552,22 @@ class TemperatureStrategy:
                     pass
 
             # ΓöÇΓöÇ Feature 1: Intraday checkpoints ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-            exited_this_cycle = False
-            if intraday_enabled:
+            # INTRADAY_EXIT_EXCLUDE: skip the scheduled checkpoint exits for
+            # excluded series/ticker prefixes (matched by prefix so KXLOWTSEA
+            # also matches KXLOWTSEA-26AUG08-B54.5). HWM exit and every other
+            # strategy remain active for these tickers.
+            ticker_upper = ticker.upper()
+            intraday_excluded = any(
+                ticker_upper == ex or ticker_upper.startswith(ex + "-")
+                for ex in intraday_exit_exclude
+            )
+            if intraday_enabled and intraday_excluded:
+                logger.info(
+                    "intraday.exit_skipped_excluded",
+                    ticker=ticker,
+                    schedule=schedule,
+                )
+            if intraday_enabled and not intraday_excluded:
                 exited_this_cycle = False
                 for chk_time_str, chk_threshold in schedule:
                     if exited_this_cycle:

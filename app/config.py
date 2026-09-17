@@ -636,6 +636,16 @@ class AppConfig(BaseSettings):
     #   re-evaluated on the next ~30 s cycle instead of selling into a thin
     #   or widened book.  0 disables the gate entirely.
     intraday_exit_spread: int = 0
+    # INTRADAY_EXIT_EXCLUDE=<series prefix>[,<series prefix>...]  (default: empty)
+    #   CSV of ticker/series prefixes that must NOT participate in the
+    #   INTRADAY_EXIT checkpoint exits.  These tickers still participate in
+    #   every other strategy (entry, stop-loss, HWM exit, PM closeout); only
+    #   the scheduled intraday checkpoint exit is skipped for them.
+    #   Matching is by series prefix (e.g. KXLOWTSEA also matches
+    #   KXLOWTSEA-26AUG08-B54.5).  Uppercase; whitespace trimmed; empty/unset
+    #   = nobody excluded.  Example:
+    #   INTRADAY_EXIT_EXCLUDE=KXLOWTSEA,KXLOWTDAL
+    intraday_exit_exclude: Annotated[set[str], NoDecode] = set()
     # ── High-water-mark deterioration exit (opt-in) ──────────────────────────
     # Once a held KXLOW* position's ask has reached HWM_ARM_PRICE after local
     # noon, arms a deterioration trigger: if the ask subsequently drops to
@@ -702,7 +712,7 @@ class AppConfig(BaseSettings):
         # Already an int or float — it's already in cents
         return int(v)
 
-    @field_validator('no_trade_tickers', 'warm_trade_tickers', 'pm_tickers_close', mode='before')
+    @field_validator('no_trade_tickers', 'warm_trade_tickers', 'pm_tickers_close', 'intraday_exit_exclude', mode='before')
     @classmethod
     def parse_upper_csv_set(cls, v):
         if not v:
@@ -1020,6 +1030,7 @@ class AppConfig(BaseSettings):
             "INTRADAY_EXIT_SPREAD",
             default=0,
         )
+        intraday_exit_exclude_raw = os.getenv("INTRADAY_EXIT_EXCLUDE", "")
         hwm_exit_enabled = _parse_trade_toggle(
             os.getenv("HWM_EXIT_ENABLED"),
             "HWM_EXIT_ENABLED",
@@ -1109,6 +1120,7 @@ class AppConfig(BaseSettings):
             intraday_exit_schedule=intraday_exit_schedule,
             intraday_exit_entry_grace_minutes=intraday_exit_entry_grace_minutes,
             intraday_exit_spread=intraday_exit_spread,
+            intraday_exit_exclude=intraday_exit_exclude_raw,
             hwm_exit_enabled=hwm_exit_enabled,
             hwm_arm_price=hwm_arm_price,
             hwm_exit_price=hwm_exit_price,

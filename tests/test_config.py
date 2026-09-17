@@ -599,7 +599,7 @@ class TestIntradayExitConfig:
         cfg = self._base_cfg()
         assert cfg.intraday_exit_spread == 0
 
-    def test_intraday_exit_spread_from_env(self):
+        def test_intraday_exit_spread_from_env(self):
         import pytest
         pytest.importorskip("pydantic_settings")
         import os
@@ -610,6 +610,52 @@ class TestIntradayExitConfig:
             assert cfg.intraday_exit_spread == 10
         finally:
             os.environ.pop("INTRADAY_EXIT_SPREAD", None)
+
+    def test_intraday_exit_exclude_default_empty(self):
+        cfg = self._base_cfg()
+        assert cfg.intraday_exit_exclude == set()
+
+    def test_intraday_exit_exclude_parses_upper_csv_set(self):
+        from app.config import AppConfig
+        cfg = AppConfig(
+            kalshi_api_key='k',
+            kalshi_private_key_path='k.pem',
+            mysql_database_url='mysql+aiomysql://u:p@localhost:3306/test',
+            trading_mode='PAPER',
+            initial_contract_count=1,
+            monitor_start_price=80,
+            buy_trigger_price_low=82,
+            buy_trigger_price_high=82,
+            spread_monitor_price=90,
+            minimum_spread=4,
+            stop_loss_price=35,
+            intraday_exit_exclude="kxlowsEA-B54.5, kxlowtdal",
+        )
+        assert cfg.intraday_exit_exclude == {"KXLOWSEA-B54.5", "KXLOWTDAL"}
+
+    def test_intraday_exit_exclude_from_env(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["INTRADAY_EXIT_EXCLUDE"] = "KXLOWTSEA,KXLOWTDAL"
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.intraday_exit_exclude == {"KXLOWTSEA", "KXLOWTDAL"}
+        finally:
+            os.environ.pop("INTRADAY_EXIT_EXCLUDE", None)
+
+    def test_intraday_exit_exclude_env_empty_yields_empty_set(self):
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        os.environ["INTRADAY_EXIT_EXCLUDE"] = ""
+        try:
+            from app.config import AppConfig
+            cfg = AppConfig.from_env()
+            assert cfg.intraday_exit_exclude == set()
+        finally:
+            os.environ.pop("INTRADAY_EXIT_EXCLUDE", None)
 
 
 class TestSunriseEntryGateConfig:

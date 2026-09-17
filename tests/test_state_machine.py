@@ -7915,3 +7915,160 @@ async def test_hwm_exit_flicker_ignored(monkeypatch):
     assert any(ev == "hwm.exit_flicker_ignored" for ev, _ in logged)
     assert ticker not in strategy._hwm_pending
     strategy._execute_stop_loss.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_exclude_skips_checkpoint_for_matching_prefix(monkeypatch):
+    """A ticker whose series prefix is in INTRADAY_EXIT_EXCLUDE is skipped for checkpoint exits."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSEA-26AUG08-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_exclude={"KXLOWTSEA"},
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    bracket = _make_low_bracket(ticker, "KXLOWTSEA")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # Ask=80 is below the 12:00 threshold of 85, so without the exclude this
+    # would begin the confirmation flow.
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    # No checkpoint evaluation, no pending, no exit for the excluded ticker.
+    strategy._execute_stop_loss.assert_not_awaited()
+    assert not any(ev == "intraday.checkpoint_evaluated" for ev, _ in logged)
+    assert not any(ev == "intraday.exit_pending_confirmation" for ev, _ in logged)
+    assert not any(ev == "intraday.exit_confirmed" for ev, _ in logged)
+    assert (ticker, "12:00") not in strategy._intraday_checkpoint_pending
+    # The skip is logged distinctly so operators can see the exclusion applied.
+    assert any(ev == "intraday.exit_skipped_excluded" for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_exclude_does_not_skip_non_matching_prefix(monkeypatch):
+    """A non-excluded series still runs checkpoint exits while another is excluded."""
+    logged = capture_logs(monkeypatch)
+    excluded = "KXLOWTSEA-26AUG08-B54.5"
+    active = "KXLOWTBOS-26AUG08-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {
+        excluded: {"count": 3, "average_fill_cost_cents": 80},
+        active: {"count": 3, "average_fill_cost_cents": 80},
+    }
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_exclude={"KXLOWTSEA"},
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    for tk, series in ((excluded, "KXLOWTSEA"), (active, "KXLOWTBOS")):
+        bracket = _make_low_bracket(tk, series)
+        strategy.active_positions[tk] = bracket
+        strategy.brackets[tk] = bracket
+        strategy.cache.update_quote(tk, 75, 80)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    # Excluded ticker: skipped entirely.
+    assert (excluded, "12:00") not in strategy._intraday_checkpoint_pending
+    assert any(
+        ev == "intraday.exit_skipped_excluded" and ctx.get("ticker") == excluded
+        for ev, ctx in logged
+    )
+    # Non-excluded ticker: checkpoint evaluation proceeded to pending.
+    assert (active, "12:00") in strategy._intraday_checkpoint_pending
+    assert any(
+        ev == "intraday.exit_pending_confirmation" and ctx.get("ticker") == active
+        for ev, ctx in logged
+    )
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_exclude_still_runs_hwm_exit(monkeypatch):
+    """An excluded ticker participates in everything else - HWM exit still fires."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSEA-26AUG08-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_exclude={"KXLOWTSEA"},
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTSEA")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    # Arm the HWM: ask >= 93 after noon.
+    strategy.cache.update_quote(ticker, 90, 95)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    local_date = now_local.date()
+    assert strategy._hwm_armed.get((ticker, local_date)) is True
+
+    # Now drop the ask to/below the exit price; HWM confirmation flow engages.
+    strategy.cache.update_quote(ticker, 80, 85)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    # HWM path is unaffected by the intraday-exit exclusion.
+    assert any(ev == "hwm.armed" for ev, _ in logged)
+    assert any(ev.startswith("hwm.exit") for ev, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_exclude_empty_set_is_inert(monkeypatch):
+    """With no exclusions configured, checkpoint exits behave as before."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSEA-26AUG08-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_exclude=set(),
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTSEA")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 75, 80)
+
+    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    assert not any(ev == "intraday.exit_skipped_excluded" for ev, _ in logged)
+    assert (ticker, "12:00") in strategy._intraday_checkpoint_pending
