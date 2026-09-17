@@ -599,7 +599,7 @@ class TestIntradayExitConfig:
         cfg = self._base_cfg()
         assert cfg.intraday_exit_spread == 0
 
-        def test_intraday_exit_spread_from_env(self):
+    def test_intraday_exit_spread_from_env(self):
         import pytest
         pytest.importorskip("pydantic_settings")
         import os
