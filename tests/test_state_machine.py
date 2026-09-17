@@ -5,6 +5,11 @@ import sys
 import time
 from unittest.mock import AsyncMock
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python < 3.9
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
 import pytest
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import BinaryExpression, BooleanClauseList
@@ -7949,8 +7954,10 @@ async def test_intraday_exit_exclude_skips_checkpoint_for_matching_prefix(monkey
     # would begin the confirmation flow.
     strategy.cache.update_quote(ticker, 75, 80)
 
-    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
-    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    # KXLOWTSEA is Pacific; build the instant in the ticker's own zone so the
+    # 12:00 checkpoint is due at 12:30 local.
+    sea_tz = ZoneInfo("America/Los_Angeles")
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=sea_tz)
     now_utc = now_local.astimezone(datetime.timezone.utc)
 
     await strategy._run_intraday_exits(now_utc=now_utc)
@@ -7991,8 +7998,10 @@ async def test_intraday_exit_exclude_does_not_skip_non_matching_prefix(monkeypat
         strategy.brackets[tk] = bracket
         strategy.cache.update_quote(tk, 75, 80)
 
-    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
-    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    # KXLOWTSEA is Pacific; build the instant in the ticker's own zone so the
+    # 12:00 checkpoint is due at 12:30 local.
+    sea_tz = ZoneInfo("America/Los_Angeles")
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=sea_tz)
     now_utc = now_local.astimezone(datetime.timezone.utc)
 
     await strategy._run_intraday_exits(now_utc=now_utc)
@@ -8034,8 +8043,10 @@ async def test_intraday_exit_exclude_still_runs_hwm_exit(monkeypatch):
     strategy.active_positions[ticker] = bracket
     strategy.brackets[ticker] = bracket
 
-    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
-    now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=ny_tz)
+    # KXLOWTSEA is Pacific; build the instant in the ticker's own zone so the
+    # engine's local-clock comparisons (noon / checkpoint) see 13:00 local.
+    sea_tz = ZoneInfo("America/Los_Angeles")
+    now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=sea_tz)
     now_utc = now_local.astimezone(datetime.timezone.utc)
 
     # Arm the HWM: ask >= 93 after noon.
@@ -8074,8 +8085,10 @@ async def test_intraday_exit_exclude_empty_set_is_inert(monkeypatch):
     strategy.brackets[ticker] = bracket
     strategy.cache.update_quote(ticker, 75, 80)
 
-    ny_tz = datetime.timezone(datetime.timedelta(hours=-4))
-    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=ny_tz)
+    # KXLOWTSEA is Pacific; build the instant in the ticker's own zone so the
+    # 12:00 checkpoint is due at 12:30 local.
+    sea_tz = ZoneInfo("America/Los_Angeles")
+    now_local = datetime.datetime(2026, 8, 8, 12, 30, 0, tzinfo=sea_tz)
     now_utc = now_local.astimezone(datetime.timezone.utc)
 
     await strategy._run_intraday_exits(now_utc=now_utc)
