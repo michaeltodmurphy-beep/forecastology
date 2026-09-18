@@ -213,7 +213,7 @@ def test_fetch_station_obs_honors_configured_source(monkeypatch):
     """``_fetch_station_obs`` must forward ``config.sunrise_obs_source`` to the
     combined fetcher rather than hardcoding the legacy NWS path.  Otherwise
     AWC_PRIMARY (the default) is silently ignored for every gate obs read."""
-    import nws.awc_obs as awc_module
+    import core.sunrise_gate as gate_module
 
     captured: dict = {}
 
@@ -222,7 +222,9 @@ def test_fetch_station_obs_honors_configured_source(monkeypatch):
         captured["obs_source"] = obs_source
         return [], "awc"
 
-    monkeypatch.setattr(awc_module, "fetch_obs_with_fallback", _fake_fetch)
+    # _fetch_station_obs calls the module-level name imported into
+    # core.sunrise_gate, so patch it there (not at nws.awc_obs).
+    monkeypatch.setattr(gate_module, "fetch_obs_with_fallback", _fake_fetch)
 
     gate = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
     gate._fetch_station_obs("KBOS", "https://api.weather.gov/stations/KBOS/observations")
