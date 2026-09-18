@@ -1428,3 +1428,102 @@ def test_morning_forecast_dip_non_kxlow_allowed(monkeypatch):
         "KXHIGHTSEA-26AUG09-B95", 95.0, now_utc=_SEA_NOW_UTC
     )
     assert blocked is False
+
+
+# ---------------------------------------------------------------------------
+# day_has_dipped_below: AWC window must cover the whole local trading day
+# ---------------------------------------------------------------------------
+
+def test_day_has_dipped_below_requests_whole_day_awc_window(monkeypatch):
+    """Regression: ``day_has_dipped_below`` needs obs back to station-local
+    midnight (up to ~24h), but the AWC primary source defaults to a 2h window.
+    The gate must therefore pass an explicit ``hours`` large enough to cover the
+    elapsed part of the local day; otherwise early-day dips are silently missed
+    and the below-bracket guard fails open.
+
+    We capture the ``hours`` forwarded through ``_fetch_station_obs`` and assert
+    it exceeds the 2h default and is at least the hours elapsed since local
+    midnight.
+    """
+    import core.sunrise_gate as gate_module
+
+    captured: dict = {}
+
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None):
+        captured["hours"] = hours
+        captured["nws_url"] = nws_url
+        return [], "awc"
+
+    monkeypatch.setattr(gate_module, "fetch_obs_with_fallback", _fake_fetch)
+
+    gate = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
+    # 2026-08-09 14:00 UTC == 10:00 EDT for KXLOWTNYC -> ~10h since local midnight.
+    gate.day_has_dipped_below(
+        "KXLOWTNYC-26AUG09-B68", 68.0, now_utc=_NOW_DIP
+    )
+
+    assert captured["hours"] is not None, "day-min fetch must pass an explicit AWC window"
+    assert captured["hours"] > 2.0, "2h AWC default is too short for a whole-day scan"
+    # ~10h elapsed since local midnight -> must request at least that (plus margin).
+    assert captured["hours"] >= 10.0
+
+
+def test_day_has_dipped_below_awc_window_grows_through_the_day(monkeypatch):
+    """Later in the local day the requested AWC window must be larger, so a dip
+    that happened early in the morning is still within the fetch window."""
+    import core.sunrise_gate as gate_module
+
+    captured: list = []
+
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None):
+        captured.append(hours)
+        return [], "awc"
+
+    monkeypatch.setattr(gate_module, "fetch_obs_with_fallback", _fake_fetch)
+
+    # Two separate gates so each does its (rate-limited) first fetch.
+    gate_morning = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
+    gate_morning.day_has_dipped_below(
+        "KXLOWTNYC-26AUG09-B68",
+        68.0,
+        now_utc=datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc),  # 07:00 EDT
+    )
+
+    gate_evening = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
+    gate_evening.day_has_dipped_below(
+        "KXLOWTNYC-26AUG09-B68",
+        68.0,
+        now_utc=datetime.datetime(2026, 8, 10, 3, 0, tzinfo=datetime.timezone.utc),  # 23:00 EDT
+    )
+
+    assert len(captured) == 2
+    assert captured[1] > captured[0], "evening fetch must cover a longer window than morning"
+
+
+def test_temp_rise_latch_uses_default_awc_window(monkeypatch):
+    """The temp-rise latch window is only sunrise - baseline_minutes (~15 min),
+    so it should NOT request a whole-day AWC window (leave ``hours`` unset so the
+    client's 2h default applies)."""
+    import core.sunrise_gate as gate_module
+
+    captured: dict = {}
+
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None):
+        captured["hours"] = hours
+        return [], "awc"
+
+    monkeypatch.setattr(gate_module, "fetch_obs_with_fallback", _fake_fetch)
+
+    gate = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
+    # _check_temp_rise_latch is called by evaluate(); drive it directly for clarity.
+    gate._check_temp_rise_latch(
+        "KXLOWTNYC",
+        "KNYC",
+        now_utc=_NOW_DIP,
+        baseline_start_utc=datetime.datetime(2026, 8, 9, 13, 45, tzinfo=datetime.timezone.utc),
+        gate_close_utc=datetime.datetime(2026, 8, 9, 16, 0, tzinfo=datetime.timezone.utc),
+        tz=ZoneInfo("America/New_York"),
+        local_date=datetime.date(2026, 8, 9),
+    )
+
+    assert captured["hours"] is None, "latch should rely on the AWC default window"

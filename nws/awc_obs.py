@@ -148,6 +148,7 @@ def fetch_obs_with_fallback(
     obs_source: str = "awc",
     user_agent: str = "",
     timeout: int = 15,
+    hours: Optional[float] = None,
 ) -> tuple[ObsList, str]:
     """Fetch station observations using the configured source with fallback.
 
@@ -156,6 +157,15 @@ def fetch_obs_with_fallback(
     observations.
 
     ``obs_source="nws"``: legacy behaviour — use ``nws_url`` directly.
+
+    *hours* bounds how far back the AWC primary path looks.  When ``None`` the
+    AWC client default (2.0h) is used, which is fine for callers that only need
+    the most recent reports (e.g. the temperature-rise latch).  Callers that
+    need the WHOLE trading day (e.g. the day-min "already dipped below"
+    tracker, anchored at station-local midnight) MUST pass an explicit *hours*
+    large enough to cover it -- otherwise the AWC primary path silently
+    truncates the window and early-day dips are missed.  The NWS fallback path
+    ignores *hours* (it uses the ``start=`` query embedded in *nws_url*).
 
     Returns ``(obs_list, source)`` where *source* is ``"awc"`` or ``"nws"``.
     Logs source switches at INFO and per-fetch source at DEBUG.
@@ -170,7 +180,12 @@ def fetch_obs_with_fallback(
     # ---- AWC primary path ------------------------------------------------
     reason: Optional[str] = None
     try:
-        obs = fetch_awc_obs(station_id, user_agent=user_agent, timeout=timeout)
+        obs = fetch_awc_obs(
+            station_id,
+            hours=hours if hours is not None else 2.0,
+            user_agent=user_agent,
+            timeout=timeout,
+        )
         if len(obs) >= 2:
             logger.debug(
                 "sunrise.obs_fetch source=awc station=%s count=%d", station_id, len(obs)

@@ -121,10 +121,15 @@ class SunriseEntryGate:
         self,
         station_id: str,
         nws_url: str,
+        hours: Optional[float] = None,
     ) -> tuple[ObsList, str]:
         """Fetch station observations using the configured source with fallback.
 
         Delegates to :func:`nws.awc_obs.fetch_obs_with_fallback`.
+        *hours* bounds how far back the AWC primary path looks; the NWS
+        fallback path ignores it and uses the ``start=`` query in *nws_url*.
+        Callers that need a window longer than the AWC default (2h) -- e.g. the
+        day-min tracker, anchored at station-local midnight -- must pass it.
         Returns ``(obs_list, source)`` where *obs_list* is sorted newest first
         and *source* is ``"awc"`` or ``"nws"``.
         Raises on irrecoverable fetch failure.
@@ -134,6 +139,7 @@ class SunriseEntryGate:
             nws_client=self.nws_client,
             nws_url=nws_url,
             obs_source=self.config.sunrise_obs_source,
+            hours=hours,
         )
 
     # ------------------------------------------------------------------
@@ -344,6 +350,11 @@ class SunriseEntryGate:
 
         if now_utc is None:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
+        # Normalize to an aware UTC datetime so ``now_local`` (and the elapsed
+        # window computed below against tz-aware boundaries) is correct even if
+        # a caller passes a naive datetime.
+        now_utc = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=datetime.timezone.utc)
+        now_utc = now_utc.astimezone(datetime.timezone.utc)
         now_local = now_utc.astimezone(tz)
         local_date = now_local.date()
 
@@ -371,6 +382,16 @@ class SunriseEntryGate:
             )
             start_utc = start_local.astimezone(datetime.timezone.utc)
             start_iso = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # AWC (the default primary source) bounds its response by whole
+            # ``hours``.  We need every observation since local midnight, which
+            # can be ~24h back, so request enough hours to cover the elapsed
+            # part of the trading day (rounded up, +1 for clock skew / a report
+            # just after midnight) instead of the AWC 2h default.  The NWS
+            # fallback ignores this and uses the ``start=`` query above.
+            hours_since_midnight = (
+                now_utc - start_utc
+            ).total_seconds() / 3600.0
+            obs_hours = max(2.0, math.ceil(hours_since_midnight) + 1.0)
             try:
                 raw_obs, _src = self._fetch_station_obs(
                     station_id,
@@ -378,6 +399,7 @@ class SunriseEntryGate:
                         f"https://api.weather.gov/stations/{station_id}/observations"
                         f"?start={start_iso}"
                     ),
+                    hours=obs_hours,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

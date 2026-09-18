@@ -355,3 +355,88 @@ def test_appconfig_sunrise_obs_source_env(monkeypatch):
         entry_gate_mode="SUNRISE",
     )
     assert cfg.sunrise_obs_source == "nws"
+
+
+# ---------------------------------------------------------------------------
+# AWC request window (*hours*) plumbing
+# ---------------------------------------------------------------------------
+
+def test_awc_defaults_to_two_hour_window_when_hours_omitted(monkeypatch):
+    """When *hours* is None the AWC client's 2.0h default is used.
+
+    Callers that only need the most recent reports (e.g. the temp-rise latch)
+    rely on this default, so it must not silently change.
+    """
+    import nws.awc_obs as awc_module
+
+    captured: dict = {}
+
+    def fake_fetch_awc(station_id, *, hours=2.0, user_agent="", timeout=15):
+        captured["hours"] = hours
+        return [
+            (datetime.datetime(2026, 8, 17, 11, 5, tzinfo=datetime.timezone.utc), 22.0),
+            (datetime.datetime(2026, 8, 17, 11, 0, tzinfo=datetime.timezone.utc), 21.5),
+        ]
+
+    monkeypatch.setattr(awc_module, "fetch_awc_obs", fake_fetch_awc)
+
+    nws_client = _OkNWSClient(_nws_features_two())
+    obs, source = fetch_obs_with_fallback(
+        "KBOS",
+        nws_client=nws_client,
+        nws_url="https://api.weather.gov/stations/KBOS/observations",
+        obs_source="awc",
+    )
+    assert source == "awc"
+    assert captured["hours"] == 2.0
+
+
+def test_awc_forwards_explicit_hours_to_client(monkeypatch):
+    """An explicit *hours* (e.g. the whole trading day for the day-min tracker)
+    MUST be forwarded to the AWC client instead of being truncated to the 2h
+    default.  Otherwise the day-min gate silently misses early-day dips.
+    """
+    import nws.awc_obs as awc_module
+
+    captured: dict = {}
+
+    def fake_fetch_awc(station_id, *, hours=2.0, user_agent="", timeout=15):
+        captured["hours"] = hours
+        return [
+            (datetime.datetime(2026, 8, 17, 11, 5, tzinfo=datetime.timezone.utc), 22.0),
+            (datetime.datetime(2026, 8, 17, 11, 0, tzinfo=datetime.timezone.utc), 21.5),
+        ]
+
+    monkeypatch.setattr(awc_module, "fetch_awc_obs", fake_fetch_awc)
+
+    nws_client = _OkNWSClient(_nws_features_two())
+    obs, source = fetch_obs_with_fallback(
+        "KBOS",
+        nws_client=nws_client,
+        nws_url="https://api.weather.gov/stations/KBOS/observations?start=2026-08-17T00:00:00Z",
+        obs_source="awc",
+        hours=25.0,
+    )
+    assert source == "awc"
+    assert captured["hours"] == 25.0
+
+
+def test_nws_mode_ignores_hours(monkeypatch):
+    """In the legacy NWS path *hours* is irrelevant (the start= query governs)."""
+    import nws.awc_obs as awc_module
+
+    awc_called = []
+    monkeypatch.setattr(
+        awc_module, "fetch_awc_obs", lambda *a, **k: awc_called.append(1) or []
+    )
+
+    nws_client = _OkNWSClient(_nws_features_two())
+    obs, source = fetch_obs_with_fallback(
+        "KBOS",
+        nws_client=nws_client,
+        nws_url="https://api.weather.gov/stations/KBOS/observations",
+        obs_source="nws",
+        hours=25.0,
+    )
+    assert source == "nws"
+    assert not awc_called
