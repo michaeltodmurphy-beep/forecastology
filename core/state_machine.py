@@ -2284,7 +2284,7 @@ class TemperatureStrategy:
                     # parent verdict plus the propagated flag for the report.
                     self._record_gate(
                         ticker, "sunrise", "BLOCKED",
-                        gate_type="once", parent="",
+                                                gate_type="once", parent="",
                         reason="sunrise_gate_closed",
                     )
                 else:
@@ -2300,17 +2300,52 @@ class TemperatureStrategy:
                     )
             self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
 
+            # ------------------------------------------------------------------
+            # AM-low daily-brief keyword gate (CONTINUOUS, TERMINAL).
+            #
+            # Evaluated for ANY KXLOW* ticker — including restored / crossed_buy /
+            # HOLDING brackets — regardless of should_evaluate_entry.  Enforced
+            # BEFORE the ``if not should_evaluate_entry: continue`` early-return
+            # below so a keyword-blocked series can never proceed to any buy/add.
+            #
+            # Previously this check lived *inside* the should_evaluate_entry
+            # block, which structurally skipped it for positions that entered the
+            # book via adoption (periodic_reconciliation) or were restored on
+            # restart as crossed_buy=True — the exact case that let
+            # KXLOWTSATX-26SEP18-B76.5 be held against an active keyword.
+            # ------------------------------------------------------------------
             am_low_forecast_blocked = False
-            if (
-                is_low
-                and should_evaluate_entry
-                and self.config.am_low_forecast_keywords
-            ):
-                _series_prefix = ticker_upper.split("-")[0]
+            am_low_forecast_matched: set[str] = set()
+            _series_prefix = ticker_upper.split("-")[0]
+            if is_low and self.config.am_low_forecast_keywords:
                 if _series_prefix in DAILY_BRIEF_SERIES_CITY:
                     am_low_forecast_blocked, am_low_forecast_matched = (
                         self._am_low_brief_gate.get_block(_series_prefix, now_utc=now_utc)
                     )
+
+            # Definition A: suppress new buys (initial/recovery/chase top-up) for
+            # a keyword-blocked series, but leave any existing quantity untouched.
+            if is_low and am_low_forecast_blocked:
+                self._record_gate(
+                    ticker, "am_low_keyword", "BLOCKED",
+                    gate_type="continuous", terminal=True,
+                    series_prefix=_series_prefix,
+                    matched=sorted(am_low_forecast_matched),
+                    should_evaluate_entry=should_evaluate_entry,
+                    held_qty=int(bracket.position_quantity or 0),
+                )
+                self._log_deduped_info(
+                    "phase.b.entry_blocked_am_low_forecast",
+                    ticker,
+                    ticker=ticker,
+                    series_prefix=_series_prefix,
+                    matched=sorted(am_low_forecast_matched),
+                    reason="continuous",
+                    should_evaluate_entry=should_evaluate_entry,
+                    held_qty=int(bracket.position_quantity or 0),
+                    message="AM-low daily-brief keyword match blocked entry/add",
+                )
+                continue
 
             if not should_evaluate_entry:
                 continue
@@ -2391,29 +2426,20 @@ class TemperatureStrategy:
                 # explicit in the ledger so a blocked sunrise is never silent.
                 self._record_gate(
                     ticker, "sunrise", "BLOCKED",
-                    gate_type="once", parent="", reason="sunrise_gate_closed",
+                    gate_type="once", parent="",
+                    reason="sunrise_gate_closed",
                 )
                 continue
 
-            if am_low_forecast_blocked:
-                self._record_gate(
-                    ticker, "am_low_keyword", "BLOCKED",
-                    gate_type="once", terminal=True,
-                    series_prefix=_series_prefix,
-                    matched=sorted(am_low_forecast_matched),
-                )
-                logger.info(
-                    "phase.b.entry_blocked_am_low_forecast",
-                    ticker=ticker,
-                    series_prefix=_series_prefix,
-                    matched=sorted(am_low_forecast_matched),
-                    message="AM-low daily-brief keyword match blocked entry",
-                )
-                continue
-            if is_low and should_evaluate_entry and self.config.am_low_forecast_keywords:
+            # NOTE: the am_low_keyword gate is now enforced as a CONTINUOUS
+            # guard earlier in this loop (before the should_evaluate_entry
+            # early-return), so a blocked series has already ``continue``d by
+            # the time we reach here.  Reaching this point means the keyword
+            # gate passed for this ticker — record the PASS for the ledger.
+            if is_low and self.config.am_low_forecast_keywords:
                 self._record_gate(
                     ticker, "am_low_keyword", "PASS",
-                    gate_type="once",
+                    gate_type="continuous",
                 )
 
             if spread <= self.config.minimum_spread:
@@ -3767,7 +3793,7 @@ class TemperatureStrategy:
                 ticker=ticker,
                 reason="loop_error",
                 remaining_unfilled=remaining,
-            )
+                        )
 
     async def _chase_entry_gate_open(self, bracket: MarketBracket) -> bool:
         """Return True if entry is still allowed for this ticker's gate."""
@@ -3776,6 +3802,32 @@ class TemperatureStrategy:
         _is_high = "KXHIGH" in _ticker_upper
         _is_low = "KXLOW" in _ticker_upper
         _gate_station = get_series_station_code(ticker)
+
+        # AM-low daily-brief keyword gate (continuous, terminal) — a chase
+        # top-up is an ADD, so a keyword-blocked series must not be chased.
+        # This covers the partial-fill chaser and the startup resume path
+        # (_resume_chasers_for_underfilled_positions), which shares this helper.
+        if _is_low and self.config.am_low_forecast_keywords:
+            _series_prefix = _ticker_upper.split("-")[0]
+            if _series_prefix in DAILY_BRIEF_SERIES_CITY:
+                try:
+                    _blocked, _matched = self._am_low_brief_gate.get_block(
+                        _series_prefix,
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                    )
+                except Exception:  # noqa: BLE001
+                    _blocked, _matched = False, set()
+                if _blocked:
+                    self._log_deduped_info(
+                        "phase.b.entry_blocked_am_low_forecast",
+                        ticker,
+                        ticker=ticker,
+                        series_prefix=_series_prefix,
+                        matched=sorted(_matched),
+                        reason="chase_entry_gate",
+                        message="AM-low daily-brief keyword match blocked chase/add",
+                    )
+                    return False
 
         # Low-ticker 22:00 ET halt
         if _is_low and getattr(self.config, "low_ticker_entry_halt_enabled", False):
