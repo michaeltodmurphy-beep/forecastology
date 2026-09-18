@@ -209,6 +209,31 @@ def test_missing_coords_uses_nws_window_fallback():
     assert decision.use_nws_window_fallback is True
 
 
+def test_fetch_station_obs_honors_configured_source(monkeypatch):
+    """``_fetch_station_obs`` must forward ``config.sunrise_obs_source`` to the
+    combined fetcher rather than hardcoding the legacy NWS path.  Otherwise
+    AWC_PRIMARY (the default) is silently ignored for every gate obs read."""
+    import nws.awc_obs as awc_module
+
+    captured: dict = {}
+
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", **kwargs):
+        captured["station_id"] = station_id
+        captured["obs_source"] = obs_source
+        return [], "awc"
+
+    monkeypatch.setattr(awc_module, "fetch_obs_with_fallback", _fake_fetch)
+
+    gate = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
+    gate._fetch_station_obs("KBOS", "https://api.weather.gov/stations/KBOS/observations")
+    assert captured["obs_source"] == "awc"
+    assert captured["station_id"] == "KBOS"
+
+    gate_nws = SunriseEntryGate(_make_config(sunrise_obs_source="nws"))
+    gate_nws._fetch_station_obs("KBOS", "https://api.weather.gov/stations/KBOS/observations")
+    assert captured["obs_source"] == "nws"
+
+
 _REQUIRED_FROM_ENV = {
     "KALSHI_API_KEY": "test-key",
     "KALSHI_PRIVATE_KEY_PATH": "unused.pem",
@@ -1190,6 +1215,30 @@ def test_forecast_dip_phoenix_band_ends_at_midnight():
     # The 01:00 cold reading is excluded for Phoenix -> min seen is 60 -> allowed.
     assert blocked is False
     assert ctx["projected_min_f"] == 60.0
+
+
+def test_forecast_dip_post_midnight_uses_previous_day_band_start():
+    """When evaluated BETWEEN 00:00 and 01:00 local, the band that is still
+    underway began on the PREVIOUS local calendar day.  The anchor must roll
+    back one day so the 21:00-23:00 periods of the prior evening are still
+    counted; anchoring to ``now_local.date()`` would place the whole band in
+    the future and silently skip the coldest hours."""
+    # now = 2026-09-14 00:30 CDT == 2026-09-14 05:30 UTC.
+    now_utc = datetime.datetime(2026, 9, 14, 5, 30, tzinfo=datetime.timezone.utc)
+    periods = [
+        _overnight_pkt(21, 60.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(22, 58.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(23, 53.0, day=13, tz=_TZ_CPT),  # coldest hour, prior evening
+        _overnight_pkt(0, 60.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 60.0, day=14, tz=_TZ_CPT),
+    ]
+    gate = _gate_for_forecast(periods, "America/Chicago")
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=now_utc
+    )
+    # The 23:00 prior-evening dip to 53F must be seen (53 < 54.5) -> block.
+    assert blocked is True
+    assert ctx["projected_min_f"] == 53.0
 
 
 def test_forecast_dip_fails_open_when_forecast_unavailable():

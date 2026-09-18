@@ -133,7 +133,7 @@ class SunriseEntryGate:
             station_id,
             nws_client=self.nws_client,
             nws_url=nws_url,
-            obs_source="nws",
+            obs_source=self.config.sunrise_obs_source,
         )
 
     # ------------------------------------------------------------------
@@ -966,12 +966,20 @@ class SunriseEntryGate:
 
         # Anchor the band to the market's overnight night.  `end_clock` is a
         # smaller clock time than `start_clock` (21:00 -> 01:00), so the band
-        # ends on the FOLLOWING calendar day.
+        # ends on the FOLLOWING calendar day.  When we are already PAST
+        # midnight local (00:00-01:00 for non-Phoenix), the band that is still
+        # "underway" started on the PREVIOUS calendar day -- anchoring to
+        # ``now_local.date()`` would place the whole band in the future and
+        # skip every remaining hour.  Phoenix's band ends at 00:00, so the
+        # current day's date is always correct for it.
+        band_start_date = now_local.date()
+        if not is_phoenix and now_local.time() < end_clock:
+            band_start_date = band_start_date - datetime.timedelta(days=1)
         start_local = datetime.datetime.combine(
-            now_local.date(), start_clock, tzinfo=station_tz
+            band_start_date, start_clock, tzinfo=station_tz
         )
         end_local = datetime.datetime.combine(
-            now_local.date() + datetime.timedelta(days=1), end_clock, tzinfo=station_tz
+            band_start_date + datetime.timedelta(days=1), end_clock, tzinfo=station_tz
         )
 
         try:
