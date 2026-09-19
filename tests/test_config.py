@@ -657,6 +657,34 @@ class TestIntradayExitConfig:
             assert cfg.intraday_exit_exclude == set()
         finally:
             os.environ.pop("INTRADAY_EXIT_EXCLUDE", None)
+    def test_intraday_exit_exclude_logs_effective_and_warns_on_bad_prefix(self, monkeypatch):
+        """from_env logs the effective set and warns on a non-family prefix."""
+        import pytest
+        pytest.importorskip("pydantic_settings")
+        import os
+        from structlog.testing import capture_logs
+        import app.config as config_mod
+
+        # KXLOWSATX is the typo form (missing the T) that matches no tickers.
+        monkeypatch.setenv("INTRADAY_EXIT_EXCLUDE", "kxlowtsatx,KXLOWSATX")
+        with capture_logs() as logs:
+            cfg = config_mod.AppConfig.from_env()
+
+        assert cfg.intraday_exit_exclude == {"KXLOWTSATX", "KXLOWSATX"}
+
+        effective = [
+            e for e in logs if e.get("event") == "config.intraday_exit_exclude_effective"
+        ]
+        assert effective, "effective exclusion set must be logged"
+        assert effective[0]["entries"] == sorted(["KXLOWTSATX", "KXLOWSATX"])
+
+        warnings = [
+            e
+            for e in logs
+            if e.get("event") == "config.intraday_exit_exclude_unmatched_prefix"
+        ]
+        assert len(warnings) == 1
+        assert warnings[0]["entry"] == "KXLOWSATX"
 
 
 class TestSunriseEntryGateConfig:

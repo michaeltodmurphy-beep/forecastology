@@ -638,19 +638,26 @@ class AppConfig(BaseSettings):
     intraday_exit_spread: int = 0
     # INTRADAY_EXIT_EXCLUDE=<series prefix>[,<series prefix>...]  (default: empty)
     #   CSV of ticker/series prefixes that must NOT participate in the
-    #   INTRADAY_EXIT checkpoint exits.  These tickers still participate in
-    #   every other strategy (entry, stop-loss, HWM exit, PM closeout); only
-    #   the scheduled intraday checkpoint exit is skipped for them.
+    #   INTRADAY_EXIT checkpoint exits NOR the HWM exit.  For these tickers
+    #   the HWM path is fully inert (no arming, no armed-exit trigger) and the
+    #   scheduled checkpoint exit is skipped.  They still participate in every
+    #   other strategy (entry, stop-loss, PM closeout).
     #   Matching is by series prefix (e.g. KXLOWTSEA also matches
     #   KXLOWTSEA-26AUG08-B54.5).  Uppercase; whitespace trimmed; empty/unset
     #   = nobody excluded.  Example:
     #   INTRADAY_EXIT_EXCLUDE=KXLOWTSEA,KXLOWTDAL
+    #   NOTE: prefixes are matched literally by string prefix; a typo (e.g.
+    #   KXLOWSATX vs the correct KXLOWTSATX) silently matches nothing.  A
+    #   config.intraday_exit_exclude_unmatched_prefix warning is emitted at
+    #   startup for entries that do not start with a known family prefix.
     intraday_exit_exclude: Annotated[set[str], NoDecode] = set()
     # ── High-water-mark deterioration exit (opt-in) ──────────────────────────
     # Once a held KXLOW* position's ask has reached HWM_ARM_PRICE after local
     # noon, arms a deterioration trigger: if the ask subsequently drops to
     # HWM_EXIT_PRICE or below, the position is exited (same confirmation-read
     # + limit-at-bid mechanics as checkpoint exits).
+    # Tickers matching INTRADAY_EXIT_EXCLUDE are exempt from HWM entirely
+    # (neither arm nor fire); see that field above.
     #
     # HWM_EXIT_ENABLED=true|false  (default: false — opt-in)
     # HWM_ARM_PRICE=<dollars>      (default: 0.93 → 93¢)
@@ -1031,6 +1038,34 @@ class AppConfig(BaseSettings):
             default=0,
         )
         intraday_exit_exclude_raw = os.getenv("INTRADAY_EXIT_EXCLUDE", "")
+        # Log the effective exclusion set and warn on entries that don't look
+        # like a recognized series prefix.  A silent typo (e.g. KXLOWSATX vs
+        # the correct KXLOWTSATX) otherwise makes the exclusion a no-op with no
+        # signal to the operator.
+        _intraday_exclude_effective = {
+            _t.strip().upper()
+            for _t in (intraday_exit_exclude_raw or "").split(",")
+            if _t.strip()
+        }
+        if _intraday_exclude_effective:
+            logger.info(
+                "config.intraday_exit_exclude_effective",
+                entries=sorted(_intraday_exclude_effective),
+            )
+            _known_family_prefixes = ("KXLOWT", "KXHIGH", "KXWEATHER")
+            for _entry in sorted(_intraday_exclude_effective):
+                if not _entry.startswith(_known_family_prefixes):
+                    logger.warning(
+                        "config.intraday_exit_exclude_unmatched_prefix",
+                        entry=_entry,
+                        message=(
+                            f"INTRADAY_EXIT_EXCLUDE entry '{_entry}' does not "
+                            "start with a recognized series family prefix "
+                            "(KXLOWT/KXHIGH/KXWEATHER); it will match no "
+                            "tickers. Check for typos (e.g. KXLOWTSATX, not "
+                            "KXLOWSATX)."
+                        ),
+                    )
         hwm_exit_enabled = _parse_trade_toggle(
             os.getenv("HWM_EXIT_ENABLED"),
             "HWM_EXIT_ENABLED",

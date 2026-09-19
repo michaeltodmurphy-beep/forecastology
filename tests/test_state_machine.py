@@ -8021,8 +8021,8 @@ async def test_intraday_exit_exclude_does_not_skip_non_matching_prefix(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_intraday_exit_exclude_still_runs_hwm_exit(monkeypatch):
-    """An excluded ticker participates in everything else - HWM exit still fires."""
+async def test_intraday_exit_exclude_skips_hwm_arm_and_exit(monkeypatch):
+    """An excluded ticker's HWM exit is fully inert (no arming, no firing)."""
     logged = capture_logs(monkeypatch)
     ticker = "KXLOWTSEA-26AUG08-B54.5"
     executor = FakeExecutor()
@@ -8048,20 +8048,95 @@ async def test_intraday_exit_exclude_still_runs_hwm_exit(monkeypatch):
     sea_tz = ZoneInfo("America/Los_Angeles")
     now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=sea_tz)
     now_utc = now_local.astimezone(datetime.timezone.utc)
+    local_date = now_local.date()
 
-    # Arm the HWM: ask >= 93 after noon.
+    # Ask >= 93 after noon would normally arm the HWM - but the ticker is
+    # excluded, so it must NOT arm.
     strategy.cache.update_quote(ticker, 90, 95)
     await strategy._run_intraday_exits(now_utc=now_utc)
-    local_date = now_local.date()
-    assert strategy._hwm_armed.get((ticker, local_date)) is True
+    assert not strategy._hwm_armed.get((ticker, local_date))
+    assert not any(ev == "hwm.armed" for ev, _ in logged)
+    assert any(ev == "hwm.exit_skipped_excluded" for ev, _ in logged)
 
-    # Now drop the ask to/below the exit price; HWM confirmation flow engages.
+    # Even a pre-seeded armed state must not fire for an excluded ticker.
+    strategy._hwm_armed[(ticker, local_date)] = True
     strategy.cache.update_quote(ticker, 80, 85)
     await strategy._run_intraday_exits(now_utc=now_utc)
+    assert not any(ev == "hwm.exit_confirmed" for ev, _ in logged)
+    strategy._execute_stop_loss.assert_not_awaited()
 
-    # HWM path is unaffected by the intraday-exit exclusion.
-    assert any(ev == "hwm.armed" for ev, _ in logged)
-    assert any(ev.startswith("hwm.exit") for ev, _ in logged)
+
+@pytest.mark.asyncio
+async def test_intraday_exit_exclude_hwm_skip_logged_once_per_day(monkeypatch):
+    """The hwm.exit_skipped_excluded log fires at most once per (ticker, day)."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSEA-26AUG08-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_exclude={"KXLOWTSEA"},
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTSEA")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    sea_tz = ZoneInfo("America/Los_Angeles")
+    now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=sea_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+
+    strategy.cache.update_quote(ticker, 90, 95)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+
+    assert sum(1 for ev, _ in logged if ev == "hwm.exit_skipped_excluded") == 1
+
+
+@pytest.mark.asyncio
+async def test_intraday_exit_exclude_non_matching_ticker_still_runs_hwm(monkeypatch):
+    """A non-excluded ticker still arms and fires the HWM exit (positive control)."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSEA-26AUG08-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        intraday_exit_enabled=True,
+        intraday_exit_exclude={"KXLOWTDAL"},
+        hwm_exit_enabled=True,
+        hwm_arm_price=93,
+        hwm_exit_price=88,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+    strategy._cancel_sl_backstop = AsyncMock()
+
+    bracket = _make_low_bracket(ticker, "KXLOWTSEA")
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    sea_tz = ZoneInfo("America/Los_Angeles")
+    now_local = datetime.datetime(2026, 8, 8, 13, 0, 0, tzinfo=sea_tz)
+    now_utc = now_local.astimezone(datetime.timezone.utc)
+    local_date = now_local.date()
+
+    strategy.cache.update_quote(ticker, 90, 95)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert strategy._hwm_armed.get((ticker, local_date)) is True
+
+    strategy.cache.update_quote(ticker, 80, 85)
+    await strategy._run_intraday_exits(now_utc=now_utc)
+    assert any(ev == "hwm.exit_pending_confirmation" for ev, _ in logged)
+    assert not any(ev == "hwm.exit_skipped_excluded" for ev, _ in logged)
 
 
 @pytest.mark.asyncio

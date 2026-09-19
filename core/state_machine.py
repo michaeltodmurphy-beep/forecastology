@@ -332,6 +332,11 @@ class TemperatureStrategy:
         self._hwm_armed: dict[tuple[str, datetime.date], bool] = {}
         # HWM confirmation read: ticker ΓåÆ monotonic time of first below-exit-price read.
         self._hwm_pending: dict[str, float] = {}
+        # Throttle: (ticker, local_date) -> True once we have logged that the
+        # HWM exit was skipped because the ticker is in INTRADAY_EXIT_EXCLUDE.
+        # Keeps the "hwm.exit_skipped_excluded" log to at most once per ticker
+        # per local day (the evaluation loop runs roughly every 30 s).
+        self._hwm_skip_logged: dict[tuple[str, datetime.date], bool] = {}
 
         # Timestamp-based throttle for portfolio snapshot logging.
         # Using wall-clock time (not a counter) so the interval is not coupled
@@ -5546,9 +5551,9 @@ class TemperatureStrategy:
         grace_minutes = int(getattr(self.config, "intraday_exit_entry_grace_minutes", 90))
         intraday_spread_limit = int(getattr(self.config, "intraday_exit_spread", 0))
         # Series/ticker prefixes (uppercase) excluded from INTRADAY_EXIT
-        # checkpoint exits. These tickers still run every other strategy
-        # (entry, stop-loss, HWM exit, PM closeout); only the scheduled
-        # intraday checkpoint exit is skipped for them.
+        # checkpoint exits AND the HWM exit. These tickers still run every
+        # other strategy (entry, stop-loss, PM closeout); only the scheduled
+        # intraday checkpoint exit and the HWM exit are skipped for them.
         intraday_exit_exclude: set[str] = {
             str(t).strip().upper()
             for t in getattr(self.config, "intraday_exit_exclude", set()) or set()
@@ -5604,10 +5609,11 @@ class TemperatureStrategy:
                     pass
 
             # ΓöÇΓöÇ Feature 1: Intraday checkpoints ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-            # INTRADAY_EXIT_EXCLUDE: skip the scheduled checkpoint exits for
-            # excluded series/ticker prefixes (matched by prefix so KXLOWTSEA
-            # also matches KXLOWTSEA-26AUG08-B54.5). HWM exit and every other
-            # strategy remain active for these tickers.
+            # INTRADAY_EXIT_EXCLUDE: skip the scheduled checkpoint exits AND
+            # the HWM exit for excluded series/ticker prefixes (matched by
+            # prefix so KXLOWTSEA also matches KXLOWTSEA-26AUG08-B54.5). HWM is
+            # fully inert for these tickers (no arming, no armed-exit). Entry,
+            # stop-loss, and PM closeout remain active for them.
             ticker_upper = ticker.upper()
             intraday_excluded = any(
                 ticker_upper == ex or ticker_upper.startswith(ex + "-")
@@ -5738,7 +5744,20 @@ class TemperatureStrategy:
                     exited_this_cycle = True
 
             # ΓöÇΓöÇ Feature 2: HWM deterioration exit ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-            if hwm_enabled and not exited_this_cycle:
+            if hwm_enabled and intraday_excluded and not exited_this_cycle:
+                # INTRADAY_EXIT_EXCLUDE now also suppresses the HWM exit
+                # (both arming and the armed deterioration trigger). Log the
+                # skip at most once per (ticker, local day) to avoid spamming
+                # the ~30 s evaluation loop.
+                skip_key = (ticker, local_date)
+                if not self._hwm_skip_logged.get(skip_key):
+                    self._hwm_skip_logged[skip_key] = True
+                    logger.info(
+                        "hwm.exit_skipped_excluded",
+                        ticker=ticker,
+                        local_date=local_date.isoformat(),
+                    )
+            elif hwm_enabled and not exited_this_cycle:
                 is_noon_or_later = local_time >= datetime.time(12, 0)
                 hwm_key = (ticker, local_date)
 
