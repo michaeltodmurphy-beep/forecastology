@@ -511,9 +511,17 @@ class TestIntradayScheduleParsing:
 class TestIntradayExitConfig:
     """Tests for intraday checkpoint and HWM config fields."""
 
-    def _base_cfg(self):
+    def _base_cfg(self, **overrides):
+        """Build an AppConfig for tests with the ambient environment neutralized.
+
+        ``_env_file=None`` prevents pydantic-settings from reading a ``.env``
+        file, and the base kwargs below pin every other field explicitly, so
+        results depend ONLY on the arguments passed here - never on the host's
+        ``.env`` or on process environment variables.  This is what makes the
+        ``*_default_cents`` assertions deterministic across machines.
+        """
         from app.config import AppConfig
-        return AppConfig(
+        base = dict(
             kalshi_api_key='k',
             kalshi_private_key_path='k.pem',
             mysql_database_url='******localhost:3306/test',
@@ -527,6 +535,8 @@ class TestIntradayExitConfig:
             stop_loss_price=35,
             no_trade_tickers=set(),
         )
+        base.update(overrides)
+        return AppConfig(_env_file=None, **base)
 
     def test_intraday_exit_enabled_default_true(self):
         cfg = self._base_cfg()
@@ -537,15 +547,19 @@ class TestIntradayExitConfig:
         assert cfg.hwm_exit_enabled is False
 
     def test_hwm_arm_price_default_cents(self):
+        # Asserts the CODE default. conftest's autouse fixture strips
+        # .env-derived env vars (HWM_ARM_PRICE is in _LEAKY_APP_CONFIG_ENV_VARS),
+        # so this is deterministic on every host.
+        # Runtime .env override: test_hwm_arm_price_parses_dollars_from_env.
         cfg = self._base_cfg()
         assert cfg.hwm_arm_price == 93
 
     def test_hwm_exit_price_default_cents(self):
-        # Value comes from the .env (HWM_EXIT_PRICE) rather than a hard-coded
-        # default, so assert against whatever is configured.
+        # Asserts the CODE default; isolation provided by conftest's autouse
+        # fixture (HWM_EXIT_PRICE is in _LEAKY_APP_CONFIG_ENV_VARS).
+        # Runtime .env override: test_hwm_exit_price_parses_dollars_from_env.
         cfg = self._base_cfg()
-        expected = int(float(os.environ.get("HWM_EXIT_PRICE", "0.88")) * 100)
-        assert cfg.hwm_exit_price == expected
+        assert cfg.hwm_exit_price == 88
 
     def test_hwm_arm_price_parses_dollars_from_env(self):
         import pytest
