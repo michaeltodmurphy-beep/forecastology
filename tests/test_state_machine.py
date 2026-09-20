@@ -348,7 +348,9 @@ async def test_strategy_started_logs_max_spread(monkeypatch):
     await strategy.start()
 
     start_log = next(kwargs for event, kwargs in logged if event == "strategy.started")
-    assert start_log["max_spread"] == 7
+    assert start_log["sunrise_max_spread"] == 7
+    assert start_log["midam_max_spread"] == 7
+    assert start_log["pm_max_spread"] == 7
     assert start_log["falling_knife_decay_minutes"] == 10
     assert "hedge_trigger" not in start_log
 

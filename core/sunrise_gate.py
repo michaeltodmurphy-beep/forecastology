@@ -254,7 +254,7 @@ class SunriseEntryGate:
             )
         return SunriseGateDecision(allowed=True)
 
-        def sunrise_window_bounds(
+    def sunrise_window_bounds(
         self,
         ticker: str,
         now_utc: Optional[datetime.datetime] = None,

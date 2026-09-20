@@ -87,7 +87,7 @@ def get_buy_trigger_price(config: "AppConfig", market_ticker: str) -> Optional[i
         if warm_trigger and _is_warm_series(config, market_ticker):
             return warm_trigger
         return int(config.buy_trigger_price_low)
-        if "KXHIGH" in ticker_upper:
+    if "KXHIGH" in ticker_upper:
         return int(config.buy_trigger_price_high)
     return None
 
@@ -1539,7 +1539,7 @@ class TemperatureStrategy:
 
         logger.info("strategy.started",
                      monitor_start=self.config.monitor_start_price,
-                                          buy_trigger_low=self.config.buy_trigger_price_low,
+                    buy_trigger_low=self.config.buy_trigger_price_low,
                      buy_trigger_high=self.config.buy_trigger_price_high,
                      sunrise_max_spread=self.config.sunrise_max_spread,
                      midam_max_spread=self.config.midam_max_spread,
@@ -2500,7 +2500,7 @@ class TemperatureStrategy:
                     gate_type="continuous",
                 )
 
-                _max_spread, _spread_band = get_max_spread_for_entry(self.config, ticker, now_utc)
+            _max_spread, _spread_band = get_max_spread_for_entry(self.config, ticker, now_utc)
             if spread <= _max_spread:
                 self._record_gate(
                     ticker, "spread", "PASS",
@@ -2851,7 +2851,7 @@ class TemperatureStrategy:
                     await self._execute_entry(bracket, quantity=next_qty)
                 else:
                     await self._execute_entry(bracket)
-                        else:
+            else:
                 self._record_gate(
                     ticker, "spread", "BLOCKED",
                     gate_type="continuous", price=price, spread=spread,

@@ -41,7 +41,7 @@ class TestAppConfig:
         assert cfg.dry_run is True
         assert cfg.enable_fast_sl_exit is False
 
-        def test_spread_bands_parse_dollars_to_cents(self):
+    def test_spread_bands_parse_dollars_to_cents(self):
         import pytest
         pytest.importorskip("pydantic_settings")
         os.environ["SUNRISE_MAX_SPREAD"] = "0.03"
