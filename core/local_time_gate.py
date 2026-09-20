@@ -53,13 +53,13 @@ SERIES_TIMEZONE: dict[str, str] = {
     "KXLOWTBOS":   "America/New_York",
     "KXHIGHMIA":   "America/New_York",   # Miami
     "KXLOWTMIA":   "America/New_York",
-        "KXHIGHNY":    "America/New_York",   # New York City
+    "KXHIGHNY":    "America/New_York",   # New York City
     "KXLOWTNYC":   "America/New_York",
     "KXLOWTEWR":   "America/New_York",   # Newark
     "KXLOWTTTN":   "America/New_York",   # Trenton
     "KXHIGHPHIL":  "America/New_York",   # Philadelphia
     "KXLOWTPHIL":  "America/New_York",
-        "KXHIGHTDC":   "America/New_York",   # Washington DC
+    "KXHIGHTDC":   "America/New_York",   # Washington DC
     "KXLOWTDC":    "America/New_York",
     "KXLOWTSDF":   "America/New_York",   # Louisville
     # ── Central Time ────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ SERIES_TIMEZONE: dict[str, str] = {
     "KXLOWTLAX":   "America/Los_Angeles",
     "KXHIGHTSFO":  "America/Los_Angeles",  # San Francisco
     "KXLOWTSFO":   "America/Los_Angeles",
-        "KXHIGHTSEA":  "America/Los_Angeles",  # Seattle
+    "KXHIGHTSEA":  "America/Los_Angeles",  # Seattle
     "KXLOWTSEA":   "America/Los_Angeles",
     "KXLOWTSAN":   "America/Los_Angeles",  # San Diego
 }

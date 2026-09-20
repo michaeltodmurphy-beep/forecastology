@@ -260,7 +260,7 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
             if ask is None or bid is None or spread is None:
                 continue
 
-                        # Condition: ask >= buy_trigger AND spread <= max_spread band for
+            # Condition: ask >= buy_trigger AND spread <= max_spread band for
             # the ticker's own city-local time (shared with the main bot).
             max_spread, band = get_max_spread_for_entry(config, ticker)
             if ask >= buy_trigger and spread <= max_spread:
