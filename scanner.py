@@ -240,7 +240,7 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
             result = await session.execute(
                 select(PositionModel.market_ticker).where(PositionModel.quantity > 0)
             )
-                        held_tickers = {row[0] for row in result.fetchall()}
+            held_tickers = {row[0] for row in result.fetchall()}
 
         max_buy_attempts = 3
 

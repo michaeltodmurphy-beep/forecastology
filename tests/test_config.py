@@ -32,7 +32,7 @@ class TestAppConfig:
         assert cfg.buy_trigger_price_high == 83
         assert cfg.hedge_trigger_price == 48
         assert cfg.stop_loss_price_ask == 35
-                assert cfg.initial_contract_count == 1
+        assert cfg.initial_contract_count == 1
         assert cfg.sunrise_max_spread == 4
         assert cfg.midam_max_spread == 5
         assert cfg.pm_max_spread == 6

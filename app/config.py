@@ -345,7 +345,7 @@ class AppConfig(BaseSettings):
     # sunrise/NWS entry gate. 0 (default) means "use buy_trigger_price_low".
     # Parsed by from_env() from BUY_TRIGGER_PRICE_LOW_WARM (dollars -> cents).
     buy_trigger_price_low_warm: int = 0
-        spread_monitor_price: int
+    spread_monitor_price: int
     falling_knife_decay_minutes: int = 10
     # ── Time-of-day entry spread thresholds (city-local) ────────────────────
     # Three separate MAX_SPREAD-style thresholds, each active during its own
@@ -707,7 +707,7 @@ class AppConfig(BaseSettings):
     chase_until_gate_close: bool = True
     chase_take_at_ceiling: bool = True
 
-        @field_validator(
+    @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'buy_trigger_price_low_warm', 'spread_monitor_price',
         'sunrise_max_spread', 'midam_max_spread', 'pm_max_spread',
         'stop_loss_price_ask', 'monitor_start_price',
@@ -787,7 +787,7 @@ class AppConfig(BaseSettings):
         Prices in .env may be in dollar format (e.g. 0.85) or already in cents.
         Field validators convert them to integer cents automatically.
         """
-                dry_run_raw = os.getenv("DRY_RUN", "")
+        dry_run_raw = os.getenv("DRY_RUN", "")
         dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
         # Time-of-day entry spread thresholds (city-local).  Three separate
         # MAX_SPREAD-style values, each active during its own local-time window.
@@ -1132,7 +1132,7 @@ class AppConfig(BaseSettings):
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
             buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
-                        buy_trigger_price_low_warm=buy_trigger_price_low_warm,
+            buy_trigger_price_low_warm=buy_trigger_price_low_warm,
             sunrise_max_spread=sunrise_max_spread,
             midam_max_spread=midam_max_spread,
             pm_max_spread=pm_max_spread,

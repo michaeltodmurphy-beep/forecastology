@@ -2500,7 +2500,7 @@ class TemperatureStrategy:
                     gate_type="continuous",
                 )
 
-                        _max_spread, _spread_band = get_max_spread_for_entry(self.config, ticker, now_utc)
+                _max_spread, _spread_band = get_max_spread_for_entry(self.config, ticker, now_utc)
             if spread <= _max_spread:
                 self._record_gate(
                     ticker, "spread", "PASS",
@@ -2807,7 +2807,7 @@ class TemperatureStrategy:
 
                 bracket.crossed_buy = True
                 spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
-                                logger.info("phase.b.buying", ticker=ticker,
+                logger.info("phase.b.buying", ticker=ticker,
                             label=bracket.bracket_label, price=price, spread=spread,
                             max_spread=_max_spread, band=_spread_band,
                             spread_note=spread_note)
