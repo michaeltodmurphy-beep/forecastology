@@ -254,6 +254,46 @@ class SunriseEntryGate:
             )
         return SunriseGateDecision(allowed=True)
 
+        def sunrise_window_bounds(
+        self,
+        ticker: str,
+        now_utc: Optional[datetime.datetime] = None,
+    ) -> Optional[tuple[datetime.datetime, datetime.datetime]]:
+        """Return ``(gate_open_local, gate_close_local)`` for *ticker*'s city.
+
+        ``gate_open_local = sunrise_local + SUNRISE_STRATEGY_TIME`` minutes and
+        ``gate_close_local = gate_open_local + SUNRISE_ENTRY_WINDOW_MINUTES``
+        minutes (both tz-aware, in the ticker's own city-local timezone).
+
+        Used by the time-of-day entry spread resolver so the spread bands share
+        the exact same sunrise anchor as the entry gate itself.  Returns ``None``
+        when the series has no station coords or the ticker timezone is unknown
+        (callers then treat the whole day as the PM band).
+        """
+        series = get_series_prefix(ticker)
+        coords = SERIES_STATION_COORDS.get(series)
+        if coords is None:
+            return None
+        tz_name = get_series_timezone(ticker)
+        if tz_name is None:
+            return None
+        tz = ZoneInfo(tz_name)
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_local = now_utc.astimezone(tz)
+        local_date = now_local.date()
+
+        station_id, lat, lon = coords
+        sunrise_local, _source = self._get_sunrise_local(series, tz, local_date, lat, lon)
+        gate_open = sunrise_local + datetime.timedelta(
+            minutes=int(self.config.sunrise_strategy_time)
+        )
+        gate_close = gate_open + datetime.timedelta(
+            minutes=int(self.config.sunrise_entry_window_minutes)
+        )
+        return gate_open, gate_close
+
     def evaluate_am_low_only(
         self,
         ticker: str,

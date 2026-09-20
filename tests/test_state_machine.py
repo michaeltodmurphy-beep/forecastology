@@ -245,7 +245,9 @@ def make_config(**overrides):
         buy_trigger_price_low=82,
         buy_trigger_price_high=82,
         spread_monitor_price=90,
-        minimum_spread=4,
+        sunrise_max_spread=4,
+        midam_max_spread=4,
+        pm_max_spread=4,
         stop_loss_price=50,
         hedge_max_factor=3,
         dry_run=False,
@@ -338,7 +340,7 @@ async def test_strategy_started_logs_max_spread(monkeypatch):
 
     monkeypatch.setattr(state_machine.asyncio, "create_task", fake_create_task)
 
-    strategy = make_strategy(monkeypatch, minimum_spread=7)
+    strategy = make_strategy(monkeypatch, sunrise_max_spread=7, midam_max_spread=7, pm_max_spread=7)
     monkeypatch.setattr(strategy, "_restore_positions", AsyncMock())
     monkeypatch.setattr(strategy, "_strategy_loop", AsyncMock())
     monkeypatch.setattr(strategy, "_db_cleanup_loop", AsyncMock())
@@ -1832,7 +1834,9 @@ def test_config_loads_without_hedge_trigger_price(monkeypatch):
         "BUY_TRIGGER_PRICE_HIGH": "0.84",
         "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "2",
-        "MINIMUM_SPREAD": "0.04",
+        "SUNRISE_MAX_SPREAD": "0.04",
+        "MIDAM_MAX_SPREAD": "0.05",
+        "PM_MAX_SPREAD": "0.06",
         "MONITOR_START_PRICE": "0.80",
         "SPREAD_MONITOR_PRICE": "0.90",
         "HEDGE_MAX_FACTOR": "3",
@@ -2152,7 +2156,9 @@ def test_hedge_max_factor_loaded_as_int_from_env(monkeypatch):
         "BUY_TRIGGER_PRICE_HIGH": "0.84",
         "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "1",
-        "MINIMUM_SPREAD": "0.04",
+        "SUNRISE_MAX_SPREAD": "0.04",
+        "MIDAM_MAX_SPREAD": "0.05",
+        "PM_MAX_SPREAD": "0.06",
         "MONITOR_START_PRICE": "0.80",
         "SPREAD_MONITOR_PRICE": "0.90",
         "HEDGE_MAX_FACTOR": "3",
@@ -2218,7 +2224,9 @@ def test_initial_contract_count_loaded_from_env(monkeypatch):
         "BUY_TRIGGER_PRICE_HIGH": "0.84",
         "STOP_LOSS_PRICE_ASK": "0.35",
         "INITIAL_CONTRACT_COUNT": "4",
-        "MINIMUM_SPREAD": "0.04",
+        "SUNRISE_MAX_SPREAD": "0.04",
+        "MIDAM_MAX_SPREAD": "0.05",
+        "PM_MAX_SPREAD": "0.06",
         "MONITOR_START_PRICE": "0.80",
         "SPREAD_MONITOR_PRICE": "0.90",
         "HEDGE_MAX_FACTOR": "2",
@@ -4658,7 +4666,9 @@ async def test_monitor_run_cycle_does_not_submit_stop_loss(monkeypatch):
         buy_trigger_price_low=82,
         buy_trigger_price_high=82,
         spread_monitor_price=90,
-        minimum_spread=4,
+        sunrise_max_spread=4,
+        midam_max_spread=4,
+        pm_max_spread=4,
         stop_loss_price=50,
         hedge_max_factor=3,
         dry_run=False,

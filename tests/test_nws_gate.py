@@ -1316,9 +1316,11 @@ class TestGateCacheKeySeparation:
         config = MagicMock()
         config.high_trades = True
         config.low_trades = True
-        config.buy_trigger_price_low = 80
+                config.buy_trigger_price_low = 80
         config.buy_trigger_price_high = 80
-        config.minimum_spread = 3
+        config.sunrise_max_spread = 3
+        config.midam_max_spread = 3
+        config.pm_max_spread = 3
         config.initial_contract_count = 1
         config.hedge_max_factor = 1
         config.no_trade_tickers = set()

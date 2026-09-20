@@ -33,7 +33,7 @@ from app.config import AppConfig
 from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
 from core.constants import SERIES_LIST, get_eastern_today_date_prefix
-from core.state_machine import hedge_policy, get_buy_trigger_price
+from core.state_machine import hedge_policy, get_buy_trigger_price, get_max_spread_for_entry
 from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
 from data.ticker_cache import TickerCache
 from execution.factory import create_executor
@@ -240,9 +240,7 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
             result = await session.execute(
                 select(PositionModel.market_ticker).where(PositionModel.quantity > 0)
             )
-            held_tickers = {row[0] for row in result.fetchall()}
-
-        min_spread = config.minimum_spread
+                        held_tickers = {row[0] for row in result.fetchall()}
 
         max_buy_attempts = 3
 
@@ -262,10 +260,13 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
             if ask is None or bid is None or spread is None:
                 continue
 
-            # Condition: ask >= buy_trigger AND spread <= min_spread
-            if ask >= buy_trigger and spread <= min_spread:
+                        # Condition: ask >= buy_trigger AND spread <= max_spread band for
+            # the ticker's own city-local time (shared with the main bot).
+            max_spread, band = get_max_spread_for_entry(config, ticker)
+            if ask >= buy_trigger and spread <= max_spread:
                 logger.info("scanner.buy_signal", ticker=ticker,
-                            ask=ask, bid=bid, spread=spread)
+                            ask=ask, bid=bid, spread=spread,
+                            max_spread=max_spread, band=band)
 
                 success = await buy_market(config, ticker, ask, client)
 

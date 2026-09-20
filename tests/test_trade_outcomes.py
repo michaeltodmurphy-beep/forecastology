@@ -303,7 +303,7 @@ async def test_create_entry_outcome_never_raises():
         kalshi_api_key="x", kalshi_private_key_path="/dev/null",
         mysql_database_url="mysql://localhost/db",
         monitor_start_price=80, buy_trigger_price_low=75,
-        buy_trigger_price_high=75, minimum_spread=3,
+        buy_trigger_price_high=75, sunrise_max_spread=3, midam_max_spread=3, pm_max_spread=3,
         spread_monitor_price=70, stop_loss_price=40,
         initial_contract_count=1, hedge_max_factor=4,
         sl_worker_interval_ms=250, sl_exit_mode="PANIC_FLATTEN",

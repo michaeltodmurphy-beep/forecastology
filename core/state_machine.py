@@ -87,9 +87,60 @@ def get_buy_trigger_price(config: "AppConfig", market_ticker: str) -> Optional[i
         if warm_trigger and _is_warm_series(config, market_ticker):
             return warm_trigger
         return int(config.buy_trigger_price_low)
-    if "KXHIGH" in ticker_upper:
+        if "KXHIGH" in ticker_upper:
         return int(config.buy_trigger_price_high)
     return None
+
+
+# Local-time boundaries (ticker's own city-local clock) that divide the trading
+# day into the three entry spread bands.
+_MIDAM_BAND_START = datetime.time(9, 1)   # 09:01 local starts the mid-AM band
+_PM_BAND_START = datetime.time(12, 1)     # 12:01 local starts the PM band
+
+
+def get_max_spread_for_entry(
+    config: "AppConfig",
+    market_ticker: str,
+    now_utc: Optional[datetime.datetime] = None,
+) -> tuple[int, str]:
+    """Resolve the entry max-spread tolerance (cents) for *market_ticker* now.
+
+    The tolerance is one of three configured thresholds selected by the
+    ticker's own city-local time.  There is NO fallback — all three
+    (``sunrise_max_spread``, ``midam_max_spread``, ``pm_max_spread``) are
+    expected to be set.
+
+    Bands (in the ticker's city-local timezone):
+      - ``sunrise``: gate-open (= sunrise + SUNRISE_STRATEGY_TIME) .. 09:00
+      - ``midam``  : 09:01 .. 12:00
+      - ``pm``     : 12:01 .. gate-close (sunrise + SUNRISE_ENTRY_WINDOW_MINUTES)
+                     and for the remainder of the local day.
+
+    Entry before the sunrise gate-open is blocked by the sunrise gate itself;
+    treating pre-open local time as the sunrise band here keeps the spread band
+    aligned with that gate.  When the city timezone is unknown the whole local
+    day is treated as the PM band (the last/widest threshold) so behavior
+    degrades to the most permissive configured policy.
+
+    Returns ``(max_spread_cents, band_label)``.
+    """
+    sunrise_max = int(getattr(config, "sunrise_max_spread", 0) or 0)
+    midam_max = int(getattr(config, "midam_max_spread", 0) or 0)
+    pm_max = int(getattr(config, "pm_max_spread", 0) or 0)
+
+    tz_name = get_series_timezone(market_ticker)
+    if tz_name is None:
+        return pm_max, "pm"
+
+    if now_utc is None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_time = now_utc.astimezone(ZoneInfo(tz_name)).time()
+
+    if now_time < _MIDAM_BAND_START:
+        return sunrise_max, "sunrise"
+    if now_time < _PM_BAND_START:
+        return midam_max, "midam"
+    return pm_max, "pm"
 
 
 def hedge_policy(
@@ -1488,9 +1539,11 @@ class TemperatureStrategy:
 
         logger.info("strategy.started",
                      monitor_start=self.config.monitor_start_price,
-                     buy_trigger_low=self.config.buy_trigger_price_low,
+                                          buy_trigger_low=self.config.buy_trigger_price_low,
                      buy_trigger_high=self.config.buy_trigger_price_high,
-                     max_spread=self.config.minimum_spread,
+                     sunrise_max_spread=self.config.sunrise_max_spread,
+                     midam_max_spread=self.config.midam_max_spread,
+                     pm_max_spread=self.config.pm_max_spread,
                      spread_monitor=self.config.spread_monitor_price,
                      falling_knife_decay_minutes=self.config.falling_knife_decay_minutes,
                      stop_loss=self.config.stop_loss_price,
@@ -2447,11 +2500,12 @@ class TemperatureStrategy:
                     gate_type="continuous",
                 )
 
-            if spread <= self.config.minimum_spread:
+                        _max_spread, _spread_band = get_max_spread_for_entry(self.config, ticker, now_utc)
+            if spread <= _max_spread:
                 self._record_gate(
                     ticker, "spread", "PASS",
                     gate_type="continuous", price=price, spread=spread,
-                    minimum_spread=self.config.minimum_spread,
+                    max_spread=_max_spread, band=_spread_band,
                 )
                 # --- Trade-direction toggle gate ---
                 if is_high and not self.config.high_trades:
@@ -2753,8 +2807,9 @@ class TemperatureStrategy:
 
                 bracket.crossed_buy = True
                 spread_note = "crossed" if spread == 0 else "tight" if spread <= 3 else "normal"
-                logger.info("phase.b.buying", ticker=ticker,
+                                logger.info("phase.b.buying", ticker=ticker,
                             label=bracket.bracket_label, price=price, spread=spread,
+                            max_spread=_max_spread, band=_spread_band,
                             spread_note=spread_note)
 
                 # Duplicate-entry guard: at most one entry per (series, date, count) per cycle.
@@ -2796,11 +2851,11 @@ class TemperatureStrategy:
                     await self._execute_entry(bracket, quantity=next_qty)
                 else:
                     await self._execute_entry(bracket)
-            else:
+                        else:
                 self._record_gate(
                     ticker, "spread", "BLOCKED",
                     gate_type="continuous", price=price, spread=spread,
-                    minimum_spread=self.config.minimum_spread,
+                    max_spread=_max_spread, band=_spread_band,
                 )
                 self._log_deduped_info(
                     "phase.b.spread_too_wide",
@@ -2808,6 +2863,8 @@ class TemperatureStrategy:
                     ticker=ticker,
                     price=price,
                     spread=spread,
+                    max_spread=_max_spread,
+                    band=_spread_band,
                 )
 
     async def _execute_entry(self, bracket: MarketBracket, ob: Optional[OrderBook] = None, quantity: Optional[int] = None):

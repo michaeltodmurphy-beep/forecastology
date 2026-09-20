@@ -47,7 +47,9 @@ def _make_config(**overrides) -> AppConfig:
         buy_trigger_price_low=82,
         buy_trigger_price_high=82,
         spread_monitor_price=90,
-        minimum_spread=4,
+        sunrise_max_spread=4,
+        midam_max_spread=4,
+        pm_max_spread=4,
         stop_loss_price=35,
     )
     for k, v in overrides.items():

@@ -345,9 +345,20 @@ class AppConfig(BaseSettings):
     # sunrise/NWS entry gate. 0 (default) means "use buy_trigger_price_low".
     # Parsed by from_env() from BUY_TRIGGER_PRICE_LOW_WARM (dollars -> cents).
     buy_trigger_price_low_warm: int = 0
-    spread_monitor_price: int
+        spread_monitor_price: int
     falling_knife_decay_minutes: int = 10
-    minimum_spread: int
+    # ── Time-of-day entry spread thresholds (city-local) ────────────────────
+    # Three separate MAX_SPREAD-style thresholds, each active during its own
+    # window in each ticker's own city-local (KXLOW) time. There is NO
+    # fallback: set all three in .env.  Values are dollars in .env
+    # (e.g. 0.04 -> 4 cents) and are parsed to integer cents by the validator.
+    #   SUNRISE_MAX_SPREAD: gate-open (= sunrise + SUNRISE_STRATEGY_TIME)
+    #                       until 09:00 local.
+    #   MIDAM_MAX_SPREAD:   09:01 -> 12:00 local.
+    #   PM_MAX_SPREAD:      12:01 local -> gate-open + SUNRISE_ENTRY_WINDOW_MINUTES.
+    sunrise_max_spread: int = 0
+    midam_max_spread: int = 0
+    pm_max_spread: int = 0
     stop_loss_price_ask: int
     rest_base_url: str = 'https://external-api.kalshi.com'
     ws_url: str = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2'
@@ -696,8 +707,9 @@ class AppConfig(BaseSettings):
     chase_until_gate_close: bool = True
     chase_take_at_ceiling: bool = True
 
-    @field_validator(
-        'buy_trigger_price_low', 'buy_trigger_price_high', 'buy_trigger_price_low_warm', 'spread_monitor_price', 'minimum_spread',
+        @field_validator(
+        'buy_trigger_price_low', 'buy_trigger_price_high', 'buy_trigger_price_low_warm', 'spread_monitor_price',
+        'sunrise_max_spread', 'midam_max_spread', 'pm_max_spread',
         'stop_loss_price_ask', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
@@ -775,25 +787,15 @@ class AppConfig(BaseSettings):
         Prices in .env may be in dollar format (e.g. 0.85) or already in cents.
         Field validators convert them to integer cents automatically.
         """
-        dry_run_raw = os.getenv("DRY_RUN", "")
+                dry_run_raw = os.getenv("DRY_RUN", "")
         dry_run = dry_run_raw.strip().lower() in {"1", "true", "yes"} if dry_run_raw else False
-        max_spread_raw = os.getenv("MAX_SPREAD")
-        minimum_spread_legacy_raw = os.getenv("MINIMUM_SPREAD")
-        if max_spread_raw and max_spread_raw.strip():
-            minimum_spread_raw = max_spread_raw
-            if minimum_spread_legacy_raw and minimum_spread_legacy_raw.strip():
-                logger.warning(
-                    "config.max_spread_precedence",
-                    message="Both MAX_SPREAD and deprecated MINIMUM_SPREAD are set; using MAX_SPREAD.",
-                )
-        elif minimum_spread_legacy_raw and minimum_spread_legacy_raw.strip():
-            minimum_spread_raw = minimum_spread_legacy_raw
-            logger.warning(
-                "config.minimum_spread_deprecated",
-                message="MINIMUM_SPREAD is deprecated; use MAX_SPREAD instead.",
-            )
-        else:
-            minimum_spread_raw = minimum_spread_legacy_raw
+        # Time-of-day entry spread thresholds (city-local).  Three separate
+        # MAX_SPREAD-style values, each active during its own local-time window.
+        # Values are dollars in .env; the convert_dollars_to_cents validator
+        # turns them into integer cents (e.g. 0.04 -> 4).
+        sunrise_max_spread = os.getenv("SUNRISE_MAX_SPREAD", "0")
+        midam_max_spread = os.getenv("MIDAM_MAX_SPREAD", "0")
+        pm_max_spread = os.getenv("PM_MAX_SPREAD", "0")
         low_trades = _parse_trade_toggle(os.getenv("LOW_TRADES"), "LOW_TRADES", default=True)
         high_trades = _parse_trade_toggle(os.getenv("HIGH_TRADES"), "HIGH_TRADES", default=True)
         manage_external_positions = _parse_trade_toggle(
@@ -1130,8 +1132,10 @@ class AppConfig(BaseSettings):
             initial_contract_count=initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
             buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
-            buy_trigger_price_low_warm=buy_trigger_price_low_warm,
-            minimum_spread=minimum_spread_raw,
+                        buy_trigger_price_low_warm=buy_trigger_price_low_warm,
+            sunrise_max_spread=sunrise_max_spread,
+            midam_max_spread=midam_max_spread,
+            pm_max_spread=pm_max_spread,
             low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,
             low_ticker_closeout_time_et=low_ticker_closeout_time_et,
             low_ticker_closeout_on_late_start=low_ticker_closeout_on_late_start,

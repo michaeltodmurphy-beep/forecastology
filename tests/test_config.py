@@ -11,8 +11,9 @@ os.environ['BUY_TRIGGER_PRICE_HIGH'] = '0.83'
 os.environ['HEDGE_TRIGGER_PRICE'] = '0.48'
 os.environ['STOP_LOSS_PRICE_ASK'] = '0.35'
 os.environ['INITIAL_CONTRACT_COUNT'] = '1'
-os.environ['MINIMUM_SPREAD'] = '0.04'
-os.environ.pop('MAX_SPREAD', None)
+os.environ['SUNRISE_MAX_SPREAD'] = '0.04'
+os.environ['MIDAM_MAX_SPREAD'] = '0.05'
+os.environ['PM_MAX_SPREAD'] = '0.06'
 os.environ['MONITOR_START_PRICE'] = '0.80'
 os.environ['SPREAD_MONITOR_PRICE'] = '0.90'
 os.environ['DRY_RUN'] = 'true'
@@ -31,56 +32,64 @@ class TestAppConfig:
         assert cfg.buy_trigger_price_high == 83
         assert cfg.hedge_trigger_price == 48
         assert cfg.stop_loss_price_ask == 35
-        assert cfg.initial_contract_count == 1
-        assert cfg.minimum_spread == 4
+                assert cfg.initial_contract_count == 1
+        assert cfg.sunrise_max_spread == 4
+        assert cfg.midam_max_spread == 5
+        assert cfg.pm_max_spread == 6
         assert cfg.monitor_start_price == 80
         assert cfg.spread_monitor_price == 90
         assert cfg.dry_run is True
         assert cfg.enable_fast_sl_exit is False
 
-    def test_max_spread_is_canonical_env_var(self):
+        def test_spread_bands_parse_dollars_to_cents(self):
         import pytest
         pytest.importorskip("pydantic_settings")
-        os.environ["MAX_SPREAD"] = "0.05"
-        os.environ["MINIMUM_SPREAD"] = "0.04"
+        os.environ["SUNRISE_MAX_SPREAD"] = "0.03"
+        os.environ["MIDAM_MAX_SPREAD"] = "0.05"
+        os.environ["PM_MAX_SPREAD"] = "0.07"
         try:
             from app.config import AppConfig
             cfg = AppConfig.from_env()
-            assert cfg.minimum_spread == 5
+            assert cfg.sunrise_max_spread == 3
+            assert cfg.midam_max_spread == 5
+            assert cfg.pm_max_spread == 7
         finally:
-            os.environ.pop("MAX_SPREAD", None)
-            os.environ["MINIMUM_SPREAD"] = "0.04"
+            os.environ["SUNRISE_MAX_SPREAD"] = "0.04"
+            os.environ["MIDAM_MAX_SPREAD"] = "0.05"
+            os.environ["PM_MAX_SPREAD"] = "0.06"
 
-    def test_minimum_spread_alias_warns_when_used(self):
+    def test_spread_bands_default_to_zero_when_unset(self):
         import pytest
         pytest.importorskip("pydantic_settings")
-        from structlog.testing import capture_logs
-        os.environ.pop("MAX_SPREAD", None)
-        os.environ["MINIMUM_SPREAD"] = "0.06"
+        os.environ.pop("SUNRISE_MAX_SPREAD", None)
+        os.environ.pop("MIDAM_MAX_SPREAD", None)
+        os.environ.pop("PM_MAX_SPREAD", None)
         try:
             from app.config import AppConfig
-            with capture_logs() as logs:
-                cfg = AppConfig.from_env()
-            assert cfg.minimum_spread == 6
-            assert any(e.get("event") == "config.minimum_spread_deprecated" for e in logs)
+            cfg = AppConfig.from_env()
+            assert cfg.sunrise_max_spread == 0
+            assert cfg.midam_max_spread == 0
+            assert cfg.pm_max_spread == 0
         finally:
-            os.environ["MINIMUM_SPREAD"] = "0.04"
+            os.environ["SUNRISE_MAX_SPREAD"] = "0.04"
+            os.environ["MIDAM_MAX_SPREAD"] = "0.05"
+            os.environ["PM_MAX_SPREAD"] = "0.06"
 
-    def test_max_spread_wins_over_minimum_with_warning(self):
+    def test_legacy_max_spread_env_var_is_ignored(self):
         import pytest
         pytest.importorskip("pydantic_settings")
-        from structlog.testing import capture_logs
-        os.environ["MAX_SPREAD"] = "0.07"
-        os.environ["MINIMUM_SPREAD"] = "0.04"
+        os.environ["MAX_SPREAD"] = "0.09"
+        os.environ["MINIMUM_SPREAD"] = "0.09"
         try:
             from app.config import AppConfig
-            with capture_logs() as logs:
-                cfg = AppConfig.from_env()
-            assert cfg.minimum_spread == 7
-            assert any(e.get("event") == "config.max_spread_precedence" for e in logs)
+            cfg = AppConfig.from_env()
+            # The removed legacy vars must not influence the three bands.
+            assert cfg.sunrise_max_spread == 4
+            assert cfg.midam_max_spread == 5
+            assert cfg.pm_max_spread == 6
         finally:
             os.environ.pop("MAX_SPREAD", None)
-            os.environ["MINIMUM_SPREAD"] = "0.04"
+            os.environ.pop("MINIMUM_SPREAD", None)
 
     def test_from_env_ignores_legacy_buy_trigger_price(self):
         import pytest
@@ -177,7 +186,9 @@ class TestAppConfig:
             buy_trigger_price_low=82,
             buy_trigger_price_high=82,
             spread_monitor_price=90,
-            minimum_spread=4,
+            sunrise_max_spread=4,
+            midam_max_spread=4,
+            pm_max_spread=4,
             stop_loss_price=35,
             no_trade_tickers=set(),
         )
@@ -239,7 +250,9 @@ class TestAppConfig:
             buy_trigger_price_low=82,
             buy_trigger_price_high=82,
             spread_monitor_price=90,
-            minimum_spread=4,
+            sunrise_max_spread=4,
+            midam_max_spread=4,
+            pm_max_spread=4,
             stop_loss_price=35,
             no_trade_tickers=set(),
         )
@@ -531,7 +544,9 @@ class TestIntradayExitConfig:
             buy_trigger_price_low=82,
             buy_trigger_price_high=82,
             spread_monitor_price=90,
-            minimum_spread=4,
+            sunrise_max_spread=4,
+            midam_max_spread=4,
+            pm_max_spread=4,
             stop_loss_price=35,
             no_trade_tickers=set(),
         )
@@ -642,7 +657,9 @@ class TestIntradayExitConfig:
             buy_trigger_price_low=82,
             buy_trigger_price_high=82,
             spread_monitor_price=90,
-            minimum_spread=4,
+            sunrise_max_spread=4,
+            midam_max_spread=4,
+            pm_max_spread=4,
             stop_loss_price=35,
             intraday_exit_exclude="kxlowsEA-B54.5, kxlowtdal",
         )
