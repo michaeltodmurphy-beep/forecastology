@@ -490,6 +490,21 @@ class AppConfig(BaseSettings):
     # Default OFF (& fail-open) so the running bot's behavior is unchanged until
     # explicitly enabled.  Parsed by from_env().
     block_entry_when_morning_forecast_dips_below_bracket: bool = False
+        # BLOCK_ENTRY_WHEN_BRACKET_UNREACHED=yes|no  (default: yes / true)
+    # Reachability guard: a LOW bracket is only entered once the day's *observed*
+    # low has actually reached the whole-degree range the bracket can win.
+    # Verified against the Kalshi API: a "B<n>" window covers floor(n)..floor(n)+1
+    # (B57.5 = "57 to 58"), the top open end is a "T" ticked "X or above" and is
+    # EXEMPT, and the bottom open end is the event's smallest "T" ("X or below").
+    # Example -- observed low so far is 56 F:
+    #   "50 or below" (T51) -> block (the low never reached 50)
+    #   "51 to 52"   (B51.5) -> block (never got that cold)
+    #   "53 to 54"   (B53.5) -> block (never got that cold)
+    #   "55 to 56"   (B55.5) -> ALLOW (56 is in range)
+    #   "57 to 58"   (B57.5) -> block (the low never got up to 57)
+    #   "59 or above" (T58)  -> ALLOW (open-ended top, exempt)
+    # Default ON; fails open on fetch errors.  Parsed by from_env().
+    block_entry_when_bracket_unreached: bool = True
     held_position_price_refresh_seconds: int = 10
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 50–250 ms.  Configurable via
@@ -949,6 +964,11 @@ class AppConfig(BaseSettings):
             "BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET",
             default=False,
         )
+        block_entry_when_bracket_unreached = _parse_trade_toggle(
+            os.getenv("BLOCK_ENTRY_WHEN_BRACKET_UNREACHED"),
+            "BLOCK_ENTRY_WHEN_BRACKET_UNREACHED",
+            default=True,
+        )
         falling_knife_decay_minutes = _parse_non_negative_int(
             os.getenv("FALLING_KNIFE_DECAY_MINUTES"),
             "FALLING_KNIFE_DECAY_MINUTES",
@@ -1127,6 +1147,7 @@ class AppConfig(BaseSettings):
             block_entry_when_below_bracket=block_entry_when_below_bracket,
             block_entry_when_forecast_dips_below_bracket=block_entry_when_forecast_dips_below_bracket,
             block_entry_when_morning_forecast_dips_below_bracket=block_entry_when_morning_forecast_dips_below_bracket,
+            block_entry_when_bracket_unreached=block_entry_when_bracket_unreached,
             falling_knife_decay_minutes=falling_knife_decay_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,

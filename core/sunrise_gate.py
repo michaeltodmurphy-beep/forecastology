@@ -508,6 +508,105 @@ class SunriseEntryGate:
         return ctx["blocked"], ctx
 
     # ------------------------------------------------------------------
+    # "Has the observed low actually REACHED the bracket's range?" guard
+    # ------------------------------------------------------------------
+
+    def day_reached_bracket(
+        self,
+        ticker: str,
+        bracket_temp_f: float,
+        now_utc: Optional[datetime.datetime] = None,
+        sibling_lines: Optional[list[float]] = None,
+    ) -> tuple[bool, dict]:
+        """Return True when the day's *observed* low has reached the range that
+        *ticker*'s bracket can win -- i.e. the bracket is actually tradeable.
+
+                Mirror of :meth:`day_has_dipped_below`.  That method blocks when the low
+        has fallen *below* the line (too cold).  This method ALSO blocks when the
+        low has *overshot above* a bounded window and never got cold enough to
+        land in it -- the "hard bracket the temp never reached" bug (a 55-to-56
+        window is a bust when the observed low is already 57).
+
+        Rule (per KXLOW bracket kind -- see
+        :func:`core.trade_outcome_utils.bracket_reachability_range`, verified
+        against the Kalshi markets API):
+
+          - ``"...or below"`` (a ``T`` line, the event's smallest): the low must
+            have reached the bracket's ceiling or colder; block unless
+            ``day_min <= hi``.
+          - ``"hard"`` (a ``B`` line, lo..hi covering two whole degrees): the low
+            must be inside the window; block unless ``lo <= day_min <= hi``.
+          - ``"...or above"`` (a ``T`` line, the event's largest): EXEMPT -- a
+            colder-than-range morning does not disqualify a warm-side bracket.
+
+        ``sibling_lines`` MUST be the numeric lines of the event's ``T`` tickers
+        (the open-ended ends); the smallest identifies the bottom.  The state
+        machine passes them in.
+
+        Returns ``(blocked, ctx)``.  Fails OPEN (returns False) if observations
+        cannot be fetched, so a transient feed outage does not stall legitimate
+        entries.
+        """
+        from core.trade_outcome_utils import bracket_reachability_range
+
+        ctx: dict = {"blocked": False, "day_min_f": None, "kind": None}
+        series = get_series_prefix(ticker)
+        if series is None or not series.startswith("KXLOW"):
+            return False, ctx
+
+        # Reuse day_has_dipped_below to populate/refresh the shared day-min
+        # tracker (same obs fetch + 60 s rate-limit); we only read the min.
+        _, dip_ctx = self.day_has_dipped_below(
+            ticker, bracket_temp_f, now_utc=now_utc
+        )
+        day_min_f = dip_ctx.get("day_min_f")
+        ctx["day_min_f"] = day_min_f
+        if day_min_f is None:
+            # No observation yet -> fail open (nothing observed to reach; the
+            # other gates still apply).
+            return False, ctx
+
+        rng = bracket_reachability_range(ticker, bracket_temp_f, sibling_lines)
+        if rng is None:
+            return False, ctx
+        kind, lo, hi = rng
+        ctx["kind"] = kind
+        ctx["range_lo"] = lo
+        ctx["range_hi"] = hi
+        if kind == "above":
+            # Open-ended top: exempt from reachability.
+            return False, ctx
+
+        day_min_int = int(day_min_f)
+        lo_int = int(lo) if lo != float("-inf") else None
+        hi_int = int(hi) if hi != float("inf") else None
+
+        reached = True
+        reason = None
+        if lo_int is not None and day_min_int < lo_int:
+            reached = False
+            reason = "below_range"
+        elif hi_int is not None and day_min_int > hi_int:
+            reached = False
+            reason = "never_reached"
+
+        ctx["blocked"] = not reached
+        ctx["reason"] = reason
+        if not reached:
+            logger.info(
+                "gate.blocked_bracket_unreached",
+                series=series,
+                ticker=ticker,
+                kind=kind,
+                day_min_f=float(day_min_f),
+                bracket_temp_f=bracket_temp_f,
+                range_lo=lo_int,
+                range_hi=hi_int,
+                reason=reason,
+            )
+        return ctx["blocked"], ctx
+
+    # ------------------------------------------------------------------
     # AM-low forecast check
     # ------------------------------------------------------------------
 

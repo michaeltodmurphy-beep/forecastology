@@ -2571,6 +2571,82 @@ class TemperatureStrategy:
                                 day_min_f=_below_ctx.get('day_min_f'),
                             )
                             continue
+                # --- Observed bracket-REACHABILITY gate (Low only) -------------------
+                # The gate above blocks a bracket the low has already fallen BELOW.
+                # This gate is its mirror: it also blocks a bracket the low has
+                # *overshot above* and never got cold enough to land in -- e.g. a
+                # "50 to 51" bracket when the observed low is 52 (the hard window
+                # was never reached).  Open-ended top ("...or above") is exempt.
+                if (
+                    is_low
+                    and self.config.entry_gate_mode == "SUNRISE"
+                    and getattr(self.config, 'block_entry_when_bracket_unreached', False)
+                ):
+                    try:
+                        from core.trade_outcome_utils import (
+                            parse_bracket_temp as _parse_bracket_temp_br,
+                            parse_bracket_kind as _parse_bracket_kind_br,
+                        )
+                        _br_bracket_f = _parse_bracket_temp_br(ticker)
+                        if _br_bracket_f is not None:
+                            # Sibling "T" lines: the event's open-ended tickers.
+                            # Their smallest T is the bottom ("X or below"), the
+                            # largest is the top ("X or above").  B lines are 2-
+                            # degree windows and are NOT part of this decision.
+                            _br_event = getattr(bracket, 'event_ticker', '') or ''
+                            _br_sib_t_lines = []
+                            if _br_event:
+                                for _sib_ticker, _sib_bracket in self.brackets.items():
+                                    if _sib_ticker == ticker:
+                                        continue
+                                    if (getattr(_sib_bracket, 'event_ticker', '') or '') != _br_event:
+                                        continue
+                                    if _parse_bracket_kind_br(_sib_ticker) != 'T':
+                                        continue
+                                    _sib_temp = _parse_bracket_temp_br(_sib_ticker)
+                                    if _sib_temp is not None:
+                                        _br_sib_t_lines.append(_sib_temp)
+                            if _parse_bracket_kind_br(ticker) == 'T':
+                                # Include this ticker's own line so the bottom/top
+                                # comparison also sees the candidate itself.
+                                _br_sib_t_lines.append(_br_bracket_f)
+                            _br_blocked, _br_ctx = self._sunrise_entry_gate.day_reached_bracket(
+                                ticker,
+                                _br_bracket_f,
+                                now_utc=now_utc,
+                                sibling_lines=_br_sib_t_lines,
+                            )
+                            if _br_blocked:
+                                self._record_gate(
+                                    ticker, "observed_bracket_reachability", "BLOCKED",
+                                    gate_type="continuous",
+                                    bracket_temp_f=_br_bracket_f,
+                                    day_min_f=_br_ctx.get('day_min_f'),
+                                    kind=_br_ctx.get('kind'),
+                                    reason=_br_ctx.get('reason'),
+                                )
+                                logger.info(
+                                    'entry.blocked_bracket_unreached',
+                                    ticker=ticker,
+                                    bracket_temp_f=_br_bracket_f,
+                                    day_min_f=_br_ctx.get('day_min_f'),
+                                    kind=_br_ctx.get('kind'),
+                                    reason=_br_ctx.get('reason'),
+                                )
+                                continue
+                            self._record_gate(
+                                ticker, "observed_bracket_reachability", "PASS",
+                                gate_type="continuous",
+                                bracket_temp_f=_br_bracket_f,
+                                day_min_f=_br_ctx.get('day_min_f'),
+                                kind=_br_ctx.get('kind'),
+                            )
+                    except Exception as _br_exc:  # noqa: BLE001
+                        logger.warning(
+                            'entry.bracket_reachability_gate_error_fail_open',
+                            ticker=ticker,
+                            error_class=type(_br_exc).__name__,
+                        )
                 # --- FORECAST overnight-dip-below-bracket gate (Low only) ----------
                 if (
                     is_low

@@ -101,6 +101,91 @@ def parse_bracket_kind(market_ticker: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Bracket reachability range
+# ---------------------------------------------------------------------------
+
+# KXLOW bracket encoding, VERIFIED against the Kalshi markets API (real titles):
+#
+#   ticker segment   title ("sub_title")     meaning            reachability
+#   --------------   --------------------    ----------------   ------------------
+#   B57.5            "57° to 58°"            window {57, 58}     low in [57, 58]
+#   B55.5            "55° to 56°"            window {55, 56}     low in [55, 56]
+#   B51.5            "51° to 52°"            window {51, 52}     low in [51, 52]
+#   T58              "59° or above"          low > 58            EXEMPT (top)
+#   T51              "50° or below"          low < 51            low reached 50
+#
+# So a ``B<line>`` window covers the two whole degrees ``floor(line)`` and
+# ``floor(line)+1`` (B57.5 -> 57,58).  The OPEN-ENDED ends are both encoded as
+# ``T`` tickers: the event's SMALLEST ``T`` is the bottom ("X or below") and the
+# LARGEST ``T`` is the top ("X or above").  Which is which therefore depends on
+# the sibling lines in the same event, which the caller passes in.
+#
+# Whole-degree values are what the observed 5-min low is compared against; the
+# half-integer line is only Kalshi's split point between adjacent degrees.
+
+
+def bracket_reachability_range(
+    market_ticker: str,
+    bracket_temp_f: float,
+    sibling_lines: Optional[list[float]] = None,
+) -> Optional[tuple[str, float, float]]:
+    """Return ``(kind, lo, hi)`` for the whole-degree range a KXLOW bracket can
+    win, or ``None`` when it cannot be determined.
+
+    ``kind`` is one of:
+
+      - ``"below"``  -- bottom open-ended ("X or below").  *lo* is ``-inf`` and
+        *hi* is the inclusive ceiling; the observed low must have reached
+        at/under *hi* (i.e. ``day_min <= hi``).
+      - ``"hard"``   -- a bounded 2-degree window ``[lo, hi]`` (e.g. 57 to 58);
+        the observed low must fall within it.
+            - ``"above"``  -- top open-ended ("X or above").  EXEMPT from
+        reachability (a colder-than-range morning does not disqualify it).
+
+    ``sibling_lines`` MUST be the numeric lines of the ``T`` tickers in the
+    same event (not the ``B`` lines) -- it is used to tell the bottom ``T``
+    ("X or below") apart from the top ``T`` ("X or above"): the smallest ``T``
+    line is the bottom, the largest is the top.  When only one ``T`` line is
+    supplied it is treated as the top (the common case once the event has fully
+    populated), which is the safe default because the top is exempt, so this
+    never wrongly blocks.
+    """
+    import math
+
+    parts = market_ticker.split("-")
+    if len(parts) < 3:
+        return None
+    bracket_seg = parts[-1]
+    if _BRACKET_RE.match(bracket_seg) is None:
+        return None
+    letter = bracket_seg[0].upper()
+    line = float(bracket_temp_f)
+
+    if letter == "B":
+        # Hard window spanning the two whole degrees floor(line) and floor(line)+1.
+        lo = float(math.floor(line))
+        hi = float(math.floor(line) + 1)
+        return "hard", lo, hi
+
+    # A "T" ticker is one of the two open ends.  The smallest T line in the
+    # event is the bottom ("X or below"); every other T (in practice the largest)
+    # is the top ("X or above").
+    t_lines = []
+    if sibling_lines:
+        t_lines = [ln for ln in sibling_lines if ln is not None]
+    if t_lines and line <= min(t_lines):
+        # Bottom open end: low < n settles it, and n is exclusive on the warm
+        # side, so the bracket covers every whole degree <= floor(n) - 1.
+        # "50 or below" is encoded as T51 -> ceiling floor(51) - 1 = 50.
+        return "below", float("-inf"), float(math.floor(line) - 1)
+
+    # Top open end: low > n settles it (n exclusive on the cold side), so the
+    # bracket covers every whole degree >= floor(n) + 1.  Exempt from
+    # reachability regardless.
+    return "above", float(math.floor(line) + 1), float("inf")
+
+
+# ---------------------------------------------------------------------------
 # Family detection
 # ---------------------------------------------------------------------------
 
