@@ -139,16 +139,16 @@ def bracket_reachability_range(
         at/under *hi* (i.e. ``day_min <= hi``).
       - ``"hard"``   -- a bounded 2-degree window ``[lo, hi]`` (e.g. 57 to 58);
         the observed low must fall within it.
-            - ``"above"``  -- top open-ended ("X or above").  EXEMPT from
+      - ``"above"``  -- top open-ended ("X or above").  EXEMPT from
         reachability (a colder-than-range morning does not disqualify it).
 
     ``sibling_lines`` MUST be the numeric lines of the ``T`` tickers in the
     same event (not the ``B`` lines) -- it is used to tell the bottom ``T``
     ("X or below") apart from the top ``T`` ("X or above"): the smallest ``T``
-    line is the bottom, the largest is the top.  When only one ``T`` line is
-    supplied it is treated as the top (the common case once the event has fully
-    populated), which is the safe default because the top is exempt, so this
-    never wrongly blocks.
+    line is the bottom, a strictly larger ``T`` is the top.  When fewer than two
+    ``T`` lines are supplied the ``T`` is AMBIGUOUS and is treated as the top
+    (the common case once the event has fully populated), which is the safe
+    default because the top is exempt, so this never wrongly blocks.
     """
     import math
 
@@ -168,12 +168,15 @@ def bracket_reachability_range(
         return "hard", lo, hi
 
     # A "T" ticker is one of the two open ends.  The smallest T line in the
-    # event is the bottom ("X or below"); every other T (in practice the largest)
-    # is the top ("X or above").
+    # event is the bottom ("X or below"); a strictly larger T is the top
+    # ("X or above").  A lone T line (no other T to compare against) is
+    # AMBIGUOUS; treat it as the top so it is exempt and never wrongly blocks
+    # (a false "bottom" reading would demand the low have reached a degree it
+    # may not have).
     t_lines = []
     if sibling_lines:
         t_lines = [ln for ln in sibling_lines if ln is not None]
-    if t_lines and line <= min(t_lines):
+    if len(t_lines) >= 2 and line <= min(t_lines):
         # Bottom open end: low < n settles it, and n is exclusive on the warm
         # side, so the bracket covers every whole degree <= floor(n) - 1.
         # "50 or below" is encoded as T51 -> ceiling floor(51) - 1 = 50.
