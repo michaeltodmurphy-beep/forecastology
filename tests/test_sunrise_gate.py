@@ -513,29 +513,61 @@ def _gate_with_rise(obs_payload, rise_required=1.0, baseline_minutes=15, monkeyp
 
 
 def test_temp_rise_latch_set_on_sufficient_rise(monkeypatch):
-    """Temp rises ≥ SUNRISE_TEMP_RISE_REQUIRED → latch set → entry allowed."""
+    """A SUSTAINED rise ≥ SUNRISE_TEMP_RISE_REQUIRED → latch set → entry allowed.
+
+    The rise must persist on the two most recent whole-degree observations
+    (>= _RISE_CONFIRM_OBS) so a single-sample blip cannot latch; a genuine
+    morning warming trend provides that confirmation across successive 5-min
+    reports.
+    """
     tz = ZoneInfo("America/New_York")
     # baseline_start = 06:00 - 15 = 05:45 UTC-4 = 09:45 UTC
     # within gate: now = 06:40 EDT = 10:40 UTC
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
-    # Two observations: baseline 20°C at 09:50, then 20.56°C at 10:30 (≥1°F rise)
-    # 20°C = 68°F, 20.56°C = 69.01°F → rise = 1.01°F ≥ 1.0
+    # Baseline 20°C = 68°F, then two consecutive reports at 20.56°C ≈ 69°F:
+    # running_min = 68, both elevated samples are >= 68 + 1 = 69 → confirmed.
     obs = _obs_features([
-        ("2026-08-09T09:50:00+00:00", 20.0),   # baseline
-        ("2026-08-09T10:30:00+00:00", 20.56),  # rise ~1°F
+        ("2026-08-09T09:50:00+00:00", 20.0),   # baseline (running min)
+        ("2026-08-09T10:20:00+00:00", 20.56),  # ~69°F
+        ("2026-08-09T10:30:00+00:00", 20.56),  # ~69°F (sustained, confirms)
     ])
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     assert result.allowed is True
 
 
-def test_temp_rise_latch_not_set_below_threshold(monkeypatch):
-    """Temp rise < SUNRISE_TEMP_RISE_REQUIRED → latch not set → entry blocked."""
+def test_temp_rise_single_sample_blip_does_not_latch(monkeypatch):
+    """Regression (Boston 2026-09-22): a single elevated report is not enough.
+
+    With an ample history at the floor, one lone elevated sample (the classic
+    low-threshold false positive) must NOT set the latch even though the raw
+    rise clears the threshold.
+    """
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
-    # 20°C = 68°F, 20.3°C = 68.54°F → rise = 0.54°F < 1.0
+    # Many reports at 20.0°C = 68°F, then a lone blip to 20.56°C ≈ 69°F.
     obs = _obs_features([
         ("2026-08-09T09:50:00+00:00", 20.0),
-        ("2026-08-09T10:30:00+00:00", 20.3),
+        ("2026-08-09T10:00:00+00:00", 20.0),
+        ("2026-08-09T10:10:00+00:00", 20.0),
+        ("2026-08-09T10:20:00+00:00", 20.0),
+        ("2026-08-09T10:30:00+00:00", 20.56),  # lone spike -> only 1 elevated obs
+    ])
+    gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
+    result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
+    assert result.allowed is False
+
+
+def test_temp_rise_latch_not_set_below_threshold(monkeypatch):
+    """Temp rise < SUNRISE_TEMP_RISE_REQUIRED → latch not set → entry blocked.
+
+    Whole-degree rounding is applied before comparison: 20.0°C = 68°F and
+    20.2°C = 68.36°F → both round to 68 → rise = 0 < 1.0.
+    """
+    now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
+    obs = _obs_features([
+        ("2026-08-09T09:50:00+00:00", 20.0),  # 68°F
+        ("2026-08-09T10:20:00+00:00", 20.2),  # 68.36°F -> 68°F
+        ("2026-08-09T10:30:00+00:00", 20.2),  # 68°F
     ])
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
@@ -543,14 +575,15 @@ def test_temp_rise_latch_not_set_below_threshold(monkeypatch):
 
 
 def test_temp_rise_threshold_boundary_exact(monkeypatch):
-    """Rise exactly equal to threshold → latch set."""
+    """Rise exactly equal to threshold (sustained) → latch set."""
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
-    # Need exactly 1°F rise: if baseline is 20°C = 68°F, then 20 + (1/1.8) = 20.556°C = 69°F
-    rise_f = 1.0
+    # Need exactly 1°F rise: if baseline is 20°C = 68°F, then 20 + (1/1.8)
+    # = 20.556°C = 69°F.  Two consecutive 69°F samples confirm the rise.
     baseline_c = 20.0
-    current_c = baseline_c + rise_f / (9.0 / 5.0)
+    current_c = baseline_c + 1.0 / (9.0 / 5.0)
     obs = _obs_features([
         ("2026-08-09T09:50:00+00:00", baseline_c),
+        ("2026-08-09T10:20:00+00:00", current_c),
         ("2026-08-09T10:30:00+00:00", current_c),
     ])
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
@@ -561,11 +594,12 @@ def test_temp_rise_threshold_boundary_exact(monkeypatch):
 def test_temp_rise_celsius_conversion(monkeypatch):
     """Temp values (Celsius from NWS) are correctly converted to °F for comparison."""
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
-    # 10°C = 50°F, 10.556°C ≈ 51°F → rise = 1°F ≥ 1.0
+    # 10°C = 50°F, 10.556°C ≈ 51°F → rise = 1°F ≥ 1.0 (sustained, two samples)
     baseline_c = 10.0
     current_c = 10.0 + 1.0 / (9.0 / 5.0)
     obs = _obs_features([
         ("2026-08-09T09:50:00+00:00", baseline_c),
+        ("2026-08-09T10:20:00+00:00", current_c),
         ("2026-08-09T10:30:00+00:00", current_c),
     ])
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
@@ -589,8 +623,9 @@ def test_temp_rise_stale_observation_blocks(monkeypatch):
 def test_temp_rise_station_staleness_override_applies(monkeypatch):
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
     obs = _obs_features([
-        ("2026-08-09T09:50:00+00:00", 20.0),
-        ("2026-08-09T10:20:00+00:00", 20.6),  # 20 minutes old
+        ("2026-08-09T09:50:00+00:00", 20.0),   # running min = 68°F
+        ("2026-08-09T10:15:00+00:00", 20.6),   # ~69°F (sustained confirmation)
+        ("2026-08-09T10:20:00+00:00", 20.6),   # 20 minutes old (allowed by override)
     ])
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
     gate.config.sunrise_obs_max_age_overrides = {"KNYC": 25}
@@ -620,10 +655,11 @@ def test_temp_rise_latch_resets_on_new_running_minimum(monkeypatch):
     now_utc_1 = datetime.datetime(2026, 8, 9, 10, 35, tzinfo=datetime.timezone.utc)
     now_utc_2 = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
 
-    # First call: obs that satisfy rise requirement → latch
+    # First call: obs that satisfy the SUSTAINED rise requirement → latch
     obs1 = _obs_features([
-        ("2026-08-09T09:50:00+00:00", 20.0),   # running min = 20°C
-        ("2026-08-09T10:30:00+00:00", 20.56),  # rise ≥ 1°F → latch
+        ("2026-08-09T09:50:00+00:00", 20.0),   # running min = 20°C = 68°F
+        ("2026-08-09T10:20:00+00:00", 20.56),  # ~69°F
+        ("2026-08-09T10:30:00+00:00", 20.56),  # ~69°F (confirms) → latch
     ])
     cfg = _make_config(
         sunrise_require_am_low=False,
@@ -676,6 +712,7 @@ def test_temp_rise_latched_state_resets_on_new_local_day(monkeypatch):
     client = _FakeNWSClient(
         obs_payload=_obs_features([
             ("2026-08-09T09:50:00+00:00", 20.0),
+            ("2026-08-09T10:20:00+00:00", 20.56),
             ("2026-08-09T10:30:00+00:00", 20.56),
         ]),
         station_meta=(40.0, -74.0, "https://api.weather.gov/hourly", "America/New_York"),
@@ -779,6 +816,7 @@ def test_temp_rise_latch_persists_within_same_day(monkeypatch):
     client = _FakeNWSClient(
         obs_payload=_obs_features([
             ("2026-08-09T09:50:00+00:00", 20.0),
+            ("2026-08-09T10:20:00+00:00", 20.56),
             ("2026-08-09T10:30:00+00:00", 20.56),
         ]),
         station_meta=(40.0, -74.0, "https://api.weather.gov/hourly", "America/New_York"),
@@ -830,8 +868,9 @@ def test_temp_rise_monitoring_window_start_time(monkeypatch):
     # Rise from 11:50 obs to latest
     obs = _obs_features([
         ("2026-08-09T11:30:00+00:00", 10.0),   # before window – should be excluded
-        ("2026-08-09T11:50:00+00:00", 20.0),   # within window, becomes running min
-        ("2026-08-09T12:35:00+00:00", 20.56),  # rise from 20°C ≥ 1°F
+        ("2026-08-09T11:50:00+00:00", 20.0),   # within window, becomes running min = 68°F
+        ("2026-08-09T12:25:00+00:00", 20.56),  # ~69°F
+        ("2026-08-09T12:35:00+00:00", 20.56),  # ~69°F (sustained) → latch
     ])
     cfg = _make_config(
         sunrise_require_am_low=False,
@@ -857,8 +896,9 @@ def test_temp_rise_coarse_cadence_knyc(monkeypatch):
     # Latest obs at 10:30 UTC is 10 minutes before now → not stale (< 15 min threshold)
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
     obs = _obs_features([
-        ("2026-08-09T09:50:00+00:00", 20.0),   # within window (after 09:45 UTC)
-        ("2026-08-09T10:30:00+00:00", 20.56),  # 10 min old → not stale, ≥1°F rise
+        ("2026-08-09T09:50:00+00:00", 20.0),   # within window (after 09:45 UTC), 68°F
+        ("2026-08-09T10:20:00+00:00", 20.56),  # ~69°F
+        ("2026-08-09T10:30:00+00:00", 20.56),  # 10 min old → not stale, sustained ≥1°F rise
     ])
     gate = _gate_with_rise(obs, rise_required=1.0, monkeypatch=monkeypatch)
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
@@ -897,8 +937,9 @@ def test_combined_gate_ordering_all_pass(monkeypatch):
     local_date = datetime.date(2026, 8, 9)
     forecast = _make_forecast_periods_local_low_before_noon(tz, local_date)
     obs = _obs_features([
-        ("2026-08-09T09:50:00+00:00", 20.0),
-        ("2026-08-09T10:30:00+00:00", 20.56),
+        ("2026-08-09T09:50:00+00:00", 20.0),   # running min = 68°F
+        ("2026-08-09T10:20:00+00:00", 20.56),  # ~69°F
+        ("2026-08-09T10:30:00+00:00", 20.56),  # ~69°F (sustained) → latch
     ])
     client = _FakeNWSClient(
         obs_payload=obs,

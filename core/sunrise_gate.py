@@ -28,6 +28,11 @@ logger = structlog.get_logger(__name__)
 
 _CELSIUS_TO_F_FACTOR = 9.0 / 5.0
 _AM_LOW_CACHE_TTL_SECONDS = 1800  # 30 minutes
+# Number of CONSECUTIVE most-recent observations that must each be
+# >= running_min + required before the temperature-rise latch is set.  A value
+# of 2 rejects a single-observation spike (a one-off blip that immediately
+# reverts) while still latching promptly on a genuine, sustained morning rise.
+_RISE_CONFIRM_OBS = 2
 
 
 def _c_to_f(celsius: float) -> float:
@@ -81,6 +86,10 @@ class _TempRiseState:
     latch_time_utc: Optional[datetime.datetime] = None
     last_obs_time_utc: Optional[datetime.datetime] = None
     obs_cadence_logged_date: Optional[datetime.date] = None
+    # Number of CONSECUTIVE most-recent observations whose whole-degree value
+    # is >= running_min + required.  Used to require the rise to be SUSTAINED
+    # (>= _RISE_CONFIRM_OBS of them) so a single sub-degree blip cannot latch.
+    consecutive_rise_obs: int = 0
 
 
 class SunriseEntryGate:
@@ -806,10 +815,19 @@ class SunriseEntryGate:
             )
             return False
 
-        # Filter by baseline window and convert °C → °F; sort ascending for latch logic
+        # Filter by baseline window and convert °C → °F; sort ascending for latch logic.
+        #
+        # Round to the nearest WHOLE degree (half-up), exactly like every other
+        # comparator in this module (day_has_dipped_below,
+        # morning_forecast_dips_below_bracket).  NWS/Kalshi publish and settle
+        # on whole-degree values; a raw Celsius->Fahrenheit conversion yields a
+        # decimal (14C -> 57.2F) whose sub-degree wobble must not be mistaken
+        # for real warming.  Without this, a low threshold (e.g. 0.3F) latches
+        # on conversion noise even though the published whole-degree value
+        # never rose -- the Boston 2026-09-22 false entry.
         parsed_obs: list[tuple[datetime.datetime, float]] = sorted(
             [
-                (obs_ts_utc, _c_to_f(temp_c))
+                (obs_ts_utc, _round_f_half_up(_c_to_f(temp_c)))
                 for obs_ts_utc, temp_c in raw_obs
                 if obs_ts_utc >= baseline_start_utc
             ],
@@ -864,7 +882,11 @@ class SunriseEntryGate:
             )
             return False
 
-        # Update running minimum from all observations in window
+        # Update running minimum from all observations in window.
+        #
+        # These values are already whole-degree °F (rounded above), so the
+        # running min and the rise below are measured on the same published
+        # whole-number scale the market settles on.
         for obs_ts, obs_f in parsed_obs:
             if obs_f < state.running_min_f:
                 if state.latched and obs_f < (state.latch_baseline_f or float("inf")):
@@ -883,10 +905,24 @@ class SunriseEntryGate:
                     state.latch_time_utc = None
                 state.running_min_f = obs_f
 
-        # Check rise condition
+        required = float(self.config.sunrise_temp_rise_required)
+
+        # Count how many of the MOST RECENT observations each show a whole-degree
+        # value >= running_min + required.  Scanning back from the newest obs, a
+        # sustained rise yields >= _RISE_CONFIRM_OBS consecutive hits; a one-off
+        # blip immediately followed by a reversion does not.
+        consecutive = 0
+        for _obs_ts, obs_f in reversed(parsed_obs):
+            if obs_f >= state.running_min_f + required:
+                consecutive += 1
+            else:
+                break
+        state.consecutive_rise_obs = consecutive
+
+        # Check rise condition (sustained, not a single-observation spike).
         if not state.latched:
             rise = latest_f - state.running_min_f
-            if rise >= self.config.sunrise_temp_rise_required:
+            if rise >= required and consecutive >= _RISE_CONFIRM_OBS:
                 state.latched = True
                 state.latch_baseline_f = state.running_min_f
                 state.latch_current_f = latest_f
@@ -898,7 +934,8 @@ class SunriseEntryGate:
                     baseline_f=round(state.running_min_f, 2),
                     current_f=round(latest_f, 2),
                     rise_f=round(rise, 2),
-                    required_f=self.config.sunrise_temp_rise_required,
+                    required_f=required,
+                    confirm_obs=consecutive,
                     baseline_utc=latest_ts.isoformat(),
                 )
 

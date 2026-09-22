@@ -419,7 +419,10 @@ class AppConfig(BaseSettings):
     # NWS_LOW_DEADLINE_HOUR: local hour (0–23) deadline for the day's forecast low
     #   (default 12 noon)
     # SUNRISE_TEMP_RISE_REQUIRED: °F rise above running baseline required to latch
-    #   entry permission (default 1.0; 0 disables the check)
+    #   entry permission (default 1.0; 0 disables the check).  The gate measures
+    #   this on WHOLE-degree °F values (NWS publishes and Kalshi settles on whole
+    #   degrees), and requires the rise to hold on the two most recent obs.
+    #   A value in (0, 1) is degenerate — warn; prefer 1.0.
     # SUNRISE_TEMP_BASELINE_MINUTES: minutes before sunrise to start baseline
     #   observation window (default 15)
     # SUNRISE_OBS_MAX_AGE_MINUTES: stale-observation threshold in minutes (default 15)
@@ -928,6 +931,28 @@ class AppConfig(BaseSettings):
                         message="SUNRISE_TEMP_RISE_REQUIRED must be >= 0; defaulting to 1.0",
                     )
                     sunrise_temp_rise_required = 1.0
+                elif 0.0 < sunrise_temp_rise_required < 1.0:
+                    # A value below 1°F is a degenerate threshold: the gate is
+                    # meant to confirm a real, published 1°F rise, but any value
+                    # in (0, 1) is satisfiable by sub-degree Celsius->Fahrenheit
+                    # conversion noise on a feed that never genuinely warmed
+                    # (the Boston 2026-09-22 false entry used 0.3).  We keep the
+                    # operator's value but emit a loud warning so it is visible;
+                    # combined with whole-degree rounding in the gate this can no
+                    # longer latch on a flat series, but the intent is still
+                    # suspect.
+                    logger.warning(
+                        "config.sunrise_temp_rise_required_too_low",
+                        raw=sunrise_temp_rise_required_raw,
+                        value=sunrise_temp_rise_required,
+                        recommended=1.0,
+                        message=(
+                            "SUNRISE_TEMP_RISE_REQUIRED is below 1.0°F; the gate is "
+                            "intended to confirm a whole-degree (1°F) rise and a "
+                            "sub-degree threshold risks latching on feed noise. "
+                            "Prefer 1.0."
+                        ),
+                    )
             except ValueError:
                 logger.warning(
                     "config.sunrise_temp_rise_required_invalid",
