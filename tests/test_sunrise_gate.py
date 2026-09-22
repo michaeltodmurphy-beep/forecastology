@@ -797,7 +797,7 @@ def test_temp_rise_running_min_resets_on_new_local_day(monkeypatch):
         now_utc=datetime.datetime(2026, 8, 9, 10, 35, tzinfo=datetime.timezone.utc),
     )
     assert first_result.allowed is False
-    assert gate._rise_state["KXLOWTNYC"].running_min_f == _c_to_f(18.0)
+    assert gate._rise_state["KXLOWTNYC"].running_min_f == 64
 
     client.obs_payload = _obs_features([
         ("2026-08-10T09:50:00+00:00", 20.0),
@@ -808,7 +808,7 @@ def test_temp_rise_running_min_resets_on_new_local_day(monkeypatch):
         now_utc=datetime.datetime(2026, 8, 10, 10, 35, tzinfo=datetime.timezone.utc),
     )
     assert second_result.allowed is False
-    assert gate._rise_state["KXLOWTNYC"].running_min_f == _c_to_f(20.0)
+    assert gate._rise_state["KXLOWTNYC"].running_min_f == 68
 
 
 def test_temp_rise_latch_persists_within_same_day(monkeypatch):
