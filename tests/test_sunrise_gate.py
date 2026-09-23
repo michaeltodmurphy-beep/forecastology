@@ -1572,3 +1572,291 @@ def test_temp_rise_latch_uses_default_awc_window(monkeypatch):
     )
 
     assert captured["hours"] is None, "latch should rely on the AWC default window"
+
+
+# ---------------------------------------------------------------------------
+# ENTRY_OBS_CALIBRATION: per-station bracket-line offset (opt-in)
+# ---------------------------------------------------------------------------
+
+def test_entry_obs_calibration_config_defaults():
+    """Opt-in feature: disabled by default with an empty offset map."""
+    cfg = _make_config()
+    assert cfg.entry_obs_calibration_enabled is False
+    assert cfg.entry_obs_calibration_offsets == {}
+
+
+def test_entry_obs_calibration_config_from_env(monkeypatch):
+    """ENTRY_OBS_CALIBRATION_OFFSETS parses STATION:±float entries (leading +)."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_ENABLED", "yes")
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_OFFSETS", "KSEA:+1.0,KNYC:-0.5,KPHX:0.7")
+    cfg = AppConfig.from_env()
+    assert cfg.entry_obs_calibration_enabled is True
+    assert cfg.entry_obs_calibration_offsets == {
+        "KSEA": 1.0,
+        "KNYC": -0.5,
+        "KPHX": 0.7,
+    }
+
+
+def test_entry_obs_calibration_config_skips_malformed_entries(monkeypatch):
+    """Malformed entries (missing colon, blank station, non-numeric offset) are
+    dropped; valid ones survive."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_ENABLED", "yes")
+    monkeypatch.setenv(
+        "ENTRY_OBS_CALIBRATION_OFFSETS",
+        "KSEA:+1.0,badentry,KEMPTY:,KMSD:+foo, KNYC:-0.5",
+    )
+    cfg = AppConfig.from_env()
+    assert cfg.entry_obs_calibration_offsets == {"KSEA": 1.0, "KNYC": -0.5}
+
+
+def test_entry_obs_calibration_config_empty_offsets(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_ENABLED", "yes")
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_OFFSETS", "")
+    cfg = AppConfig.from_env()
+    assert cfg.entry_obs_calibration_offsets == {}
+
+
+def test_calibrated_offset_f_disabled_returns_zero():
+    """Master switch off → every station resolves to 0.0 regardless of the map."""
+    gate = SunriseEntryGate(
+        _make_config(
+            entry_obs_calibration_enabled=False,
+            entry_obs_calibration_offsets={"KSEA": 2.0},
+        )
+    )
+    assert gate._calibrated_offset_f("KSEA") == 0.0
+
+
+def test_calibrated_offset_f_only_listed_stations_adjusted():
+    """Enabled: listed stations get their offset; unlisted stations stay 0.0."""
+    gate = SunriseEntryGate(
+        _make_config(
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 1.0, "KNYC": -0.5},
+        )
+    )
+    assert gate._calibrated_offset_f("KSEA") == 1.0
+    assert gate._calibrated_offset_f("ksea") == 1.0  # case-insensitive
+    assert gate._calibrated_offset_f("KNYC") == -0.5
+    assert gate._calibrated_offset_f("KDAL") == 0.0  # not listed → untouched
+
+
+def test_calibrated_line_int_applies_offset_before_floor():
+    """The offset is added to the half-integer split point BEFORE the floor, so a
+    fractional offset stays meaningful: floor(70.5 + 0.7) = floor(71.2) = 71."""
+    gate = SunriseEntryGate(
+        _make_config(
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 0.7},
+        )
+    )
+    assert gate._calibrated_line_int(70.5, "KSEA") == 71
+    assert gate._calibrated_line_int(70.5, "KDAL") == 70  # unlisted → unshifted
+
+
+def test_day_has_dipped_below_calibration_shifts_line():
+    """Enabled offset shifts the observed below-bracket line for a LISTED station.
+
+    B70.5 covers whole degrees {70, 71}, so a day-min of 70 is a WIN uncalibrated
+    (line floor(70.5) = 70; 70 < 70 is False → not blocked).  With a +1.0 KSEA
+    offset the line becomes floor(71.5) = 71, so a day-min of 70 is now below the
+    line (70 < 71 → blocked).  Verify both behaviors on identical obs.
+    """
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 21.0)])  # 69.8F -> 70
+
+    uncalibrated = _gate_for_day_min(obs)
+    blocked_plain, ctx_plain = uncalibrated.day_has_dipped_below(
+        "KXLOWTSEA-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP
+    )
+    assert blocked_plain is False  # 70 is inside {70, 71}
+    assert ctx_plain["offset_f"] == 0.0
+
+    calibrated = SunriseEntryGate(
+        _make_config(
+            sunrise_obs_source="nws",
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 1.0},
+        ),
+        nws_client=_FakeNWSClient(obs_payload=obs),
+    )
+    blocked_cal, ctx_cal = calibrated.day_has_dipped_below(
+        "KXLOWTSEA-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP
+    )
+    assert blocked_cal is True  # line moved to 71 → 70 < 71 blocks
+    assert ctx_cal["offset_f"] == 1.0
+
+
+def test_day_has_dipped_below_calibration_unlisted_station_untouched():
+    """A station absent from the offset map behaves exactly as before."""
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 21.7)])  # -> 71
+    gate = SunriseEntryGate(
+        _make_config(
+            sunrise_obs_source="nws",
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 1.0},  # KSEA only
+        ),
+        nws_client=_FakeNWSClient(obs_payload=obs),
+    )
+    # KXLOWTDC is not in the map → offset 0.0 → not blocked for B70.5.
+    blocked, ctx = gate.day_has_dipped_below(
+        "KXLOWTDC-26AUG09-B70.5", 70.5, now_utc=_NOW_DIP
+    )
+    assert blocked is False
+    assert ctx["offset_f"] == 0.0
+
+
+def test_forecast_dips_below_bracket_calibration_shifts_threshold():
+    """Enabled offset raises the forecast threshold for a LISTED station.
+
+    B53.5 needs the overnight min >= 53.5 + 1.0 = 54.5.  A 55F floor is safe
+    uncalibrated, but a +1.0 offset raises the threshold to 55.5 → now blocks.
+    """
+    periods = [
+        _overnight_pkt(21, 60.0, day=13, tz=_TZ_CPT),
+        _overnight_pkt(0, 57.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 55.0, day=14, tz=_TZ_CPT),
+    ]
+    plain = _gate_for_forecast(periods, "America/Chicago")
+    blocked_plain, _ = plain.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked_plain is False  # 55 >= 54.5
+
+    calibrated = SunriseEntryGate(
+        _make_config(
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KMSP": 1.0},
+        ),
+        nws_client=_FakeNWSClient(
+            forecast_periods=periods,
+            station_meta=(44.88, -93.22, "https://api.weather.gov/hourly", "America/Chicago"),
+        ),
+    )
+    blocked_cal, ctx_cal = calibrated.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked_cal is True  # threshold 55.5 → 55 < 55.5
+    assert ctx_cal["offset_f"] == 1.0
+
+
+def test_forecast_dips_below_bracket_calibration_unlisted_station_untouched():
+    """A station absent from the map keeps the original 1.0F cushion."""
+    periods = [
+        _overnight_pkt(0, 57.0, day=14, tz=_TZ_CPT),
+        _overnight_pkt(1, 55.0, day=14, tz=_TZ_CPT),
+    ]
+    gate = SunriseEntryGate(
+        _make_config(
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 1.0},  # not KSEA topic
+        ),
+        nws_client=_FakeNWSClient(
+            forecast_periods=periods,
+            station_meta=(44.88, -93.22, "https://api.weather.gov/hourly", "America/Chicago"),
+        ),
+    )
+    blocked, ctx = gate.forecast_dips_below_bracket(
+        "KXLOWTMIN-26SEP13-B53.5", 53.5, now_utc=_KMSP_NOW_UTC
+    )
+    assert blocked is False
+    assert ctx["offset_f"] == 0.0
+
+
+def test_morning_forecast_dip_calibration_shifts_line(monkeypatch):
+    """Enabled offset shifts the morning forecast line for a LISTED station.
+
+    B54 is a WIN at a forecast of 54; with a +1.0 KSEA offset the line becomes
+    55, so a 54F forecast now blocks.
+    """
+    periods = [
+        _overnight_pkt(7, 54.0, day=9, tz=_TZ_SEA),
+    ]
+    plain = _sea_gate(periods, monkeypatch)
+    blocked_plain, ctx_plain = plain.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked_plain is False
+    assert ctx_plain["offset_f"] == 0.0
+
+    client = _FakeNWSClient(
+        forecast_periods=periods,
+        station_meta=(47.45, -122.31, "https://api.weather.gov/hourly", "America/Los_Angeles"),
+    )
+    calibrated = SunriseEntryGate(
+        _make_config(
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 1.0},
+        ),
+        nws_client=client,
+    )
+    fixed = datetime.datetime(2026, 9, 9, 5, 59, tzinfo=_TZ_SEA)
+    monkeypatch.setattr(calibrated, "_get_sunrise_local", lambda *a, **k: (fixed, "astral"))
+    blocked_cal, ctx_cal = calibrated.morning_forecast_dips_below_bracket(
+        "KXLOWTSEA-26AUG09-B54", 54.0, now_utc=_SEA_NOW_UTC
+    )
+    assert blocked_cal is True  # line moved to 55 → 54 < 55
+    assert ctx_cal["offset_f"] == 1.0
+
+
+def test_day_reached_bracket_calibration_shifts_window():
+    """Enabled offset shifts the reachability window consistently.
+
+    A B57.5 window covers {57, 58}; with a +1.0 offset it covers {58, 59}.  A
+    day-min of 57 wins uncalibrated but is below the shifted lo (58) → blocked.
+    """
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 13.9)])  # 57.02F -> 57
+
+    plain = _gate_for_day_min(obs)
+    blocked_plain, ctx_plain = plain.day_reached_bracket(
+        "KXLOWTDC-26AUG09-B57.5", 57.5, now_utc=_NOW_DIP, sibling_lines=[51.0, 58.0]
+    )
+    assert ctx_plain.get("offset_f") == 0.0
+
+    calibrated = SunriseEntryGate(
+        _make_config(
+            sunrise_obs_source="nws",
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KDCA": 1.0},
+        ),
+        nws_client=_FakeNWSClient(obs_payload=obs),
+    )
+    blocked_cal, ctx_cal = calibrated.day_reached_bracket(
+        "KXLOWTDC-26AUG09-B57.5", 57.5, now_utc=_NOW_DIP, sibling_lines=[51.0, 58.0]
+    )
+    assert ctx_cal["offset_f"] == 1.0
+    # With the +1 window shift, a 57F observed low no longer lands in range.
+    assert blocked_cal is True
+
+
+def test_day_reached_bracket_calibration_unlisted_untouched():
+    """A station absent from the map gets a 0.0 offset in day_reached_bracket."""
+    obs = _obs_features([("2026-08-09T13:50:00+00:00", 13.9)])  # -> 57
+    gate = SunriseEntryGate(
+        _make_config(
+            sunrise_obs_source="nws",
+            entry_obs_calibration_enabled=True,
+            entry_obs_calibration_offsets={"KSEA": 1.0},
+        ),
+        nws_client=_FakeNWSClient(obs_payload=obs),
+    )
+    _, ctx = gate.day_reached_bracket(
+        "KXLOWTDC-26AUG09-B57.5", 57.5, now_utc=_NOW_DIP, sibling_lines=[51.0, 58.0]
+    )
+    assert ctx["offset_f"] == 0.0
+
+
+def test_entry_obs_calibration_logs_configured_once(monkeypatch):
+    """from_env() emits config.entry_obs_calibration_configured when both the
+    switch and at least one offset are set."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_ENABLED", "yes")
+    monkeypatch.setenv("ENTRY_OBS_CALIBRATION_OFFSETS", "KSEA:+1.0")
+    with capture_logs() as logs:
+        AppConfig.from_env()
+    assert any(
+        e.get("event") == "config.entry_obs_calibration_configured" for e in logs
+    )

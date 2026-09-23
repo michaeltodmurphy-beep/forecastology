@@ -115,7 +115,7 @@ class SunriseEntryGate:
         event: str,
         key: str,
         local_date: datetime.date,
-        **fields,
+                **fields,
     ) -> None:
         self._log_dedupe.log(logger, "info", event, key, day=local_date, **fields)
 
@@ -125,6 +125,27 @@ class SunriseEntryGate:
         if station_upper in overrides:
             return int(overrides[station_upper])
         return int(self.config.sunrise_obs_max_age_minutes)
+
+    def _calibrated_offset_f(self, station_id: str) -> float:
+        """Return the per-station entry-obs calibration offset in whole-degree °F.
+
+        Returns 0.0 (no adjustment) unless calibration is enabled AND the station
+        is explicitly listed in ENTRY_OBS_CALIBRATION_OFFSETS.  A station that is
+        not listed is left completely untouched.
+        """
+        if not getattr(self.config, "entry_obs_calibration_enabled", False):
+            return 0.0
+        offsets = getattr(self.config, "entry_obs_calibration_offsets", None) or {}
+        return float(offsets.get(station_id.upper(), 0.0))
+
+    def _calibrated_line_int(self, bracket_temp_f: float, station_id: str) -> int:
+        """Bracket line integer AFTER applying the station's calibration offset.
+
+        The offset is added to the half-integer split point BEFORE the existing
+        floor-to-representative-integer step, so a fractional offset stays
+        meaningful (e.g. a B70.5 line with +0.7 becomes floor(71.2) = 71).
+        """
+        return _bracket_line_int(bracket_temp_f + self._calibrated_offset_f(station_id))
 
     def _fetch_station_obs(
         self,
@@ -486,16 +507,19 @@ class SunriseEntryGate:
             #   T<n>  ("strictly greater than n"): a reading EQUAL to n already
             #         fails to satisfy the market, so block on day_min <= n.
             #   B<n>  ("greater-than-or-equal-to n"): equality still satisfies
-            #         the market, so block only on day_min < n.
+                        #         the market, so block only on day_min < n.
             # Collapsing both to a single "<" comparison let a T-bracket entry
             # through when the observed minimum merely touched the line.
             bracket_kind = parse_bracket_kind(ticker)
             # Compare whole-degree integers.  The observed minimum is already a
             # whole number; the bracket line is a half-integer split point
             # (B70.5 covers the whole-degree values 70 and 71), so floor it to the
-            # representative integer before comparing.
+            # representative integer before comparing.  The per-station entry-obs
+            # calibration offset (if enabled and listed) is applied to the line
+            # FIRST, so a station whose feed runs warm/cold shifts the boundary.
+            offset_f = self._calibrated_offset_f(station_id)
             day_min_int = int(state.min_since_local_midnight_f)
-            line_int = _bracket_line_int(bracket_temp_f)
+            line_int = self._calibrated_line_int(bracket_temp_f, station_id)
             inclusive = bracket_kind == "B"
             if inclusive:
                 below = day_min_int < line_int
@@ -504,6 +528,21 @@ class SunriseEntryGate:
             ctx["below"] = below
             ctx["blocked"] = below
             ctx["bracket_kind"] = bracket_kind
+            ctx["offset_f"] = offset_f
+            if offset_f != 0.0:
+                self._deduped_info(
+                    "gate.obs_calibration",
+                    ticker,
+                    local_date,
+                    ticker=ticker,
+                    series=series,
+                    station=station_id,
+                    gate="day_has_dipped_below",
+                    offset_f=offset_f,
+                    bracket_temp_f=bracket_temp_f,
+                    calibrated_line_int=line_int,
+                    day_min_f=float(ctx["day_min_f"]),
+                )
             if below:
                 logger.info(
                     "gate.blocked_below_bracket",
@@ -513,6 +552,7 @@ class SunriseEntryGate:
                     day_min_f=float(ctx["day_min_f"]),
                     bracket_temp_f=bracket_temp_f,
                     bracket_kind=bracket_kind,
+                    offset_f=offset_f,
                 )
         return ctx["blocked"], ctx
 
@@ -584,11 +624,19 @@ class SunriseEntryGate:
         ctx["range_hi"] = hi
         if kind == "above":
             # Open-ended top: exempt from reachability.
-            return False, ctx
+                        return False, ctx
 
         day_min_int = int(day_min_f)
-        lo_int = int(lo) if lo != float("-inf") else None
-        hi_int = int(hi) if hi != float("inf") else None
+        # Apply the per-station entry-obs calibration offset to the reachability
+        # window so the whole bounds move consistently with the below-bracket
+        # line (a station whose feed runs warm shifts the range up).
+        station_id = SERIES_STATION_COORDS[series][0]
+        offset_f = self._calibrated_offset_f(station_id)
+        lo_adj = lo + offset_f if lo != float("-inf") else lo
+        hi_adj = hi + offset_f if hi != float("inf") else hi
+        lo_int = int(lo_adj) if lo_adj != float("-inf") else None
+        hi_int = int(hi_adj) if hi_adj != float("inf") else None
+        ctx["offset_f"] = offset_f
 
         reached = True
         reason = None
@@ -1227,15 +1275,17 @@ class SunriseEntryGate:
         #       so require projected >= n + cushion.
         # Cushion is 1°F by default (matches the original behavior for B), but
         # for T brackets we require strictly greater than n + cushion.  This
-        # closes the gap where a forecast merely touching the line slipped an
+                # closes the gap where a forecast merely touching the line slipped an
         # exclusive-bracket entry through.
         bracket_kind = parse_bracket_kind(ticker)
-        threshold = bracket_temp_f + 1.0
+        offset_f = self._calibrated_offset_f(station_id)
+        threshold = bracket_temp_f + 1.0 + offset_f
         if bracket_kind == "T":
             blocked = projected <= threshold
         else:
             blocked = projected < threshold
         ctx["bracket_kind"] = bracket_kind
+        ctx["offset_f"] = offset_f
         if blocked:
             ctx["blocked"] = True
             ctx["bracket_temp_f"] = bracket_temp_f
@@ -1247,6 +1297,7 @@ class SunriseEntryGate:
                 projected_min_f=float(ctx["projected_min_f"]),
                 bracket_temp_f=bracket_temp_f,
                 bracket_kind=bracket_kind,
+                offset_f=offset_f,
             )
         return ctx["blocked"], ctx
 
@@ -1373,17 +1424,19 @@ class SunriseEntryGate:
 
         # Bracket-kind-aware STRICT boundary (no cushion).  Compare whole-degree
         # integers: the forecast is rounded half-up (matches settled values); the
-        # bracket line is a half-integer split point, so floor it to the
+                # bracket line is a half-integer split point, so floor it to the
         # representative integer before comparing.
         bracket_kind = parse_bracket_kind(ticker)
+        offset_f = self._calibrated_offset_f(station_id)
         forecast_int = _round_f_half_up(projected)
-        line_int = _bracket_line_int(bracket_temp_f)
+        line_int = self._calibrated_line_int(bracket_temp_f, station_id)
         if bracket_kind == "T":
             blocked = forecast_int <= line_int
         else:  # "B" (inclusive): equality still satisfies the market
             blocked = forecast_int < line_int
         ctx["bracket_kind"] = bracket_kind
         ctx["forecast_min_int"] = forecast_int
+        ctx["offset_f"] = offset_f
         if blocked:
             ctx["blocked"] = True
             ctx["bracket_temp_f"] = bracket_temp_f
@@ -1395,5 +1448,6 @@ class SunriseEntryGate:
                 projected_min_f=float(ctx["projected_min_f"]),
                 bracket_temp_f=bracket_temp_f,
                 bracket_kind=bracket_kind,
+                offset_f=offset_f,
             )
         return ctx["blocked"], ctx

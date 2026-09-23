@@ -323,10 +323,60 @@ def _parse_sunrise_obs_max_age_overrides(raw: str | None) -> dict[str, int]:
             logger.warning(
                 "config.sunrise_obs_max_age_override_malformed",
                 entry=entry,
-                reason="minutes_below_minimum",
+                                reason="minutes_below_minimum",
             )
             continue
         parsed[station] = minutes
+    return parsed
+
+
+def _parse_entry_obs_calibration_offsets(raw: str | None) -> dict[str, float]:
+    """Parse ENTRY_OBS_CALIBRATION_OFFSETS into a {STATION: offset_f} map.
+
+    Format: comma-separated ``STATION:±float`` entries (e.g.
+    ``KSEA:+1.0,KNYC:-0.5,KPHX:+0.7``).  The offset is in whole-degree °F and is
+    applied AFTER the Celsius→Fahrenheit conversion by the KXLOW entry gates (the
+    same points where the NWS/Kalshi whole-degree rounding already happens).
+
+    Stations are upper-cased; a leading ``+`` is accepted.  Malformed entries
+    (missing colon, empty station, non-numeric value) are skipped with a warning.
+    An empty/whitespace value yields an empty map (the feature is a no-op).  A
+    station NOT present in this map is left completely untouched.
+    """
+    if not raw or not raw.strip():
+        return {}
+
+    parsed: dict[str, float] = {}
+    for part in raw.strip().split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        station_part, sep, offset_part = entry.partition(":")
+        if sep != ":":
+            logger.warning(
+                "config.entry_obs_calibration_offset_malformed",
+                entry=entry,
+                reason="missing_colon",
+            )
+            continue
+        station = station_part.strip().upper()
+        if not station:
+            logger.warning(
+                "config.entry_obs_calibration_offset_malformed",
+                entry=entry,
+                reason="missing_station",
+            )
+            continue
+        try:
+            offset = float(offset_part.strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "config.entry_obs_calibration_offset_malformed",
+                entry=entry,
+                reason="invalid_offset",
+            )
+            continue
+        parsed[station] = offset
     return parsed
 
 
@@ -450,13 +500,28 @@ class AppConfig(BaseSettings):
     # When set, the NWS **daily brief** forecast for each KXLOW city is pulled
     # once per day at AM_LOW_SNAPSHOT_LOCAL_HOUR local, and KXLOW* entry is
     # blocked for that series day if ANY keyword appears in the forecast text
-    # (case-insensitive).  Parsed by from_env() into a lowercased set.
+        # (case-insensitive).  Parsed by from_env() into a lowercased set.
     am_low_forecast_keywords: Annotated[set[str], NoDecode] = set()
     sunrise_temp_rise_required: float = 1.0
     sunrise_temp_baseline_minutes: int = 15
     sunrise_obs_max_age_minutes: int = 15
     sunrise_obs_max_age_overrides: Annotated[dict[str, int], NoDecode] = {}
     sunrise_obs_source: Literal["awc", "nws"] = "awc"
+    # ── Live 5-min obs entry calibration (KXLOW only) ───────────────────────
+    # ENTRY_OBS_CALIBRATION_ENABLED=yes|no  (default: no — opt-in)
+    #   Master switch. When off, every entry gate behaves exactly as today.
+    # ENTRY_OBS_CALIBRATION_OFFSETS=KSEA:+1.0,KNYC:-0.5,KPHX:+0.7
+    #   Per-STATION °F offset, comma-separated STATION:±float entries. A leading
+    #   '+' is accepted and values are parsed as floats. The offset is added to
+    #   the bracket LINE (AFTER the Celsius→Fahrenheit conversion, on the
+    #   whole-degree scale the market settles on) for the observed + forecast
+    #   entry gates, and acts as a permission modifier on the entry price
+    #   trigger. Only stations LISTED here are adjusted; any station not present
+    #   is left completely untouched (offset 0.0). Keys are NWS station codes
+    #   (SERIES_STATION_COORDS), matching SUNRISE_OBS_MAX_AGE_OVERRIDES.
+    #   Parsed by from_env() via _parse_entry_obs_calibration_offsets().
+    entry_obs_calibration_enabled: bool = False
+    entry_obs_calibration_offsets: Annotated[dict[str, float], NoDecode] = {}
     # ── Observed-feed "day already dipped below bracket" entry guard ────────
     # BLOCK_ENTRY_WHEN_BELOW_BRACKET=yes|no  (default: yes / true)
     # When enabled, a LOW 'daily temp stays >= X°F' bracket is not entered once
@@ -975,6 +1040,23 @@ class AppConfig(BaseSettings):
             os.getenv("SUNRISE_OBS_MAX_AGE_OVERRIDES")
         )
         sunrise_obs_source = _parse_sunrise_obs_source(os.getenv("SUNRISE_OBS_SOURCE"))
+        entry_obs_calibration_enabled = _parse_trade_toggle(
+            os.getenv("ENTRY_OBS_CALIBRATION_ENABLED"),
+            "ENTRY_OBS_CALIBRATION_ENABLED",
+            default=False,
+        )
+        entry_obs_calibration_offsets = _parse_entry_obs_calibration_offsets(
+            os.getenv("ENTRY_OBS_CALIBRATION_OFFSETS")
+        )
+        if entry_obs_calibration_enabled and entry_obs_calibration_offsets:
+            logger.info(
+                "config.entry_obs_calibration_configured",
+                offsets=dict(sorted(entry_obs_calibration_offsets.items())),
+                message=(
+                    "Entry obs calibration enabled; the listed stations' bracket "
+                    "lines are shifted by the configured °F offsets"
+                ),
+            )
         block_entry_when_below_bracket = _parse_trade_toggle(
             os.getenv("BLOCK_ENTRY_WHEN_BELOW_BRACKET"),
             "BLOCK_ENTRY_WHEN_BELOW_BRACKET",
@@ -1167,9 +1249,11 @@ class AppConfig(BaseSettings):
             am_low_forecast_keywords=am_low_forecast_keywords,
             sunrise_temp_rise_required=sunrise_temp_rise_required,
             sunrise_temp_baseline_minutes=sunrise_temp_baseline_minutes,
-            sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
+                        sunrise_obs_max_age_minutes=sunrise_obs_max_age_minutes,
             sunrise_obs_max_age_overrides=sunrise_obs_max_age_overrides,
             sunrise_obs_source=sunrise_obs_source,
+            entry_obs_calibration_enabled=entry_obs_calibration_enabled,
+            entry_obs_calibration_offsets=entry_obs_calibration_offsets,
             block_entry_when_below_bracket=block_entry_when_below_bracket,
             block_entry_when_forecast_dips_below_bracket=block_entry_when_forecast_dips_below_bracket,
             block_entry_when_morning_forecast_dips_below_bracket=block_entry_when_morning_forecast_dips_below_bracket,

@@ -374,6 +374,8 @@ async def test_strategy_start_logs_sunrise_gate_config_when_enabled(monkeypatch)
         sunrise_entry_window_minutes=150,
         sunrise_require_temp_rising=False,
         sunrise_source="api",
+        entry_obs_calibration_enabled=True,
+        entry_obs_calibration_offsets={"KSEA": 1.0, "KNYC": -0.5},
     )
     monkeypatch.setattr(strategy, "_restore_positions", AsyncMock())
     monkeypatch.setattr(strategy, "_strategy_loop", AsyncMock())
@@ -393,6 +395,8 @@ async def test_strategy_start_logs_sunrise_gate_config_when_enabled(monkeypatch)
     assert sunrise_log["sunrise_source"] == "api"
     assert sunrise_log["sunrise_obs_max_age_minutes"] == 15
     assert sunrise_log["sunrise_obs_max_age_overrides"] == {}
+    assert sunrise_log["entry_obs_calibration_enabled"] is True
+    assert sunrise_log["entry_obs_calibration_offsets"] == {"KNYC": -0.5, "KSEA": 1.0}
 
 
 @pytest.mark.asyncio

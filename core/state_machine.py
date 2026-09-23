@@ -1573,6 +1573,14 @@ class TemperatureStrategy:
                 sunrise_obs_max_age_minutes=self.config.sunrise_obs_max_age_minutes,
                 sunrise_obs_max_age_overrides=dict(sorted(self.config.sunrise_obs_max_age_overrides.items())),
                 sunrise_obs_source=self.config.sunrise_obs_source,
+                entry_obs_calibration_enabled=getattr(
+                    self.config, "entry_obs_calibration_enabled", False
+                ),
+                entry_obs_calibration_offsets=dict(
+                    sorted(
+                        (getattr(self.config, "entry_obs_calibration_offsets", None) or {}).items()
+                    )
+                ),
             )
 
         hedge_max = int(self.config.hedge_max_factor)
