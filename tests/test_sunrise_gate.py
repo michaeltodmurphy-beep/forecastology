@@ -649,17 +649,25 @@ def test_temp_rise_no_observations_blocks(monkeypatch):
     assert result.allowed is False
 
 
-def test_temp_rise_latch_resets_on_new_running_minimum(monkeypatch):
-    """After latching, a new obs below the latch baseline resets the latch."""
+def test_temp_rise_latch_is_immutable_for_the_day(monkeypatch):
+    """Once the morning rise latch sticks, a later new low does NOT reset it.
+
+    The rise is a ONE-TIME, once-per-day confirmation: after it latches, the
+    gate stays OPEN for the rest of the local trading day even if a later
+    observation dips below the latch baseline.  (The previous behavior re-armed
+    the latch on a new low, which made the "once" gate flip OPEN<->BLOCKED
+    every cycle as afternoon obs went flat/falling -- see the latched_for_day
+    rationale in core/sunrise_gate.py.)
+    """
     tz = ZoneInfo("America/New_York")
     now_utc_1 = datetime.datetime(2026, 8, 9, 10, 35, tzinfo=datetime.timezone.utc)
     now_utc_2 = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)
 
-    # First call: obs that satisfy the SUSTAINED rise requirement → latch
+    # First call: obs that satisfy the SUSTAINED rise requirement -> latch
     obs1 = _obs_features([
-        ("2026-08-09T09:50:00+00:00", 20.0),   # running min = 20°C = 68°F
-        ("2026-08-09T10:20:00+00:00", 20.56),  # ~69°F
-        ("2026-08-09T10:30:00+00:00", 20.56),  # ~69°F (confirms) → latch
+        ("2026-08-09T09:50:00+00:00", 20.0),   # running min = 68F
+        ("2026-08-09T10:20:00+00:00", 20.56),  # ~69F
+        ("2026-08-09T10:30:00+00:00", 20.56),  # ~69F (confirms) -> latch
     ])
     cfg = _make_config(
         sunrise_require_am_low=False,
@@ -672,7 +680,7 @@ def test_temp_rise_latch_resets_on_new_running_minimum(monkeypatch):
     fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)
 
     call_count = [0]
-    payloads = [obs1, None]  # second call will have reset obs
+    payloads = [obs1, None]
 
     class _SequentialClient(_FakeNWSClient):
         def _get_json(self, url):
@@ -695,12 +703,16 @@ def test_temp_rise_latch_resets_on_new_running_minimum(monkeypatch):
     obs2 = _obs_features([
         ("2026-08-09T09:50:00+00:00", 20.0),
         ("2026-08-09T10:30:00+00:00", 20.56),  # this latched it
-        ("2026-08-09T10:35:00+00:00", 19.5),   # NEW lower reading → reset latch
+        ("2026-08-09T10:35:00+00:00", 19.5),   # NEW lower reading
     ])
     payloads[1] = obs2
 
     r2 = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc_2)
-    assert r2.allowed is False  # latch was reset
+    # The once-per-day latch is immutable: the new low does NOT re-arm it, so
+    # the gate stays OPEN for the rest of the local trading day.
+    assert r2.allowed is True
+    assert gate._rise_state["KXLOWTNYC"].latched is True
+    assert gate._rise_state["KXLOWTNYC"].latched_for_day is True
 
 
 def test_temp_rise_latched_state_resets_on_new_local_day(monkeypatch):
@@ -1545,10 +1557,15 @@ def test_day_has_dipped_below_awc_window_grows_through_the_day(monkeypatch):
     assert captured[1] > captured[0], "evening fetch must cover a longer window than morning"
 
 
-def test_temp_rise_latch_uses_default_awc_window(monkeypatch):
-    """The temp-rise latch window is only sunrise - baseline_minutes (~15 min),
-    so it should NOT request a whole-day AWC window (leave ``hours`` unset so the
-    client's 2h default applies)."""
+def test_temp_rise_latch_requests_window_covering_baseline(monkeypatch):
+    """The temp-rise latch must bound its AWC fetch to cover the whole
+    baseline->now stretch, NOT rely on the AWC 2h default.
+
+    Without an explicit ``hours`` the AWC primary source silently truncates to
+    its 2h default, so the running-min "baseline" was really just the trailing
+    two hours rather than the sunrise baseline.  The gate must therefore pass an
+    explicit window that is at least the elapsed baseline->now span.
+    """
     import core.sunrise_gate as gate_module
 
     captured: dict = {}
@@ -1560,7 +1577,8 @@ def test_temp_rise_latch_uses_default_awc_window(monkeypatch):
     monkeypatch.setattr(gate_module, "fetch_obs_with_fallback", _fake_fetch)
 
     gate = SunriseEntryGate(_make_config(sunrise_obs_source="awc"))
-    # _check_temp_rise_latch is called by evaluate(); drive it directly for clarity.
+    # baseline_start 13:45 UTC -> now 14:00 UTC is only ~15 min, so the explicit
+    # window floors at the AWC-reasonable minimum of 2h (max(2.0, ...)).
     gate._check_temp_rise_latch(
         "KXLOWTNYC",
         "KNYC",
@@ -1571,7 +1589,8 @@ def test_temp_rise_latch_uses_default_awc_window(monkeypatch):
         local_date=datetime.date(2026, 8, 9),
     )
 
-    assert captured["hours"] is None, "latch should rely on the AWC default window"
+    assert captured["hours"] is not None, "latch must pass an explicit AWC window"
+    assert captured["hours"] >= 2.0, "explicit window must be at least the 2h AWC default"
 
 
 # ---------------------------------------------------------------------------
