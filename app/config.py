@@ -649,9 +649,16 @@ class AppConfig(BaseSettings):
     instance_lock_enabled: bool = True
     instance_lock_file: str = "/tmp/forecastology.lock"
     instance_id: str = ""
-    log_file: str = "logs/run.log"
+        log_file: str = "logs/run.log"
     log_max_bytes: int = 104857600
     log_backup_count: int = 10
+    # Sink toggles.  Both default ON.  When both are on, every event is written
+    # once to stdout AND once to the log file; if those two streams are merged
+    # (e.g. stdout redirected into the same file, or a tool that tails both),
+    # each line appears twice.  Set LOG_TO_CONSOLE=no or LOG_TO_FILE=no to run a
+    # single sink and eliminate the apparent duplication.
+    log_to_console: bool = True
+    log_to_file: bool = True
     # ── Unprotected-position remediation ────────────────────────────────────
     # When a restored/adopted position goes blind (no price feed) for more than
     # this many consecutive SL evaluation cycles, the bot escalates to a
@@ -664,8 +671,15 @@ class AppConfig(BaseSettings):
     #   of app_owned_qty once the escalation threshold is exceeded. Only
     #   app-owned quantity is ever sold — MANAGE_EXTERNAL_POSITIONS semantics
     #   are fully respected. Default: false (conservative; alert only).
-    sl_unprotected_max_blind_cycles: int = 30
+        sl_unprotected_max_blind_cycles: int = 30
     sl_flatten_unprotected_on_blind: bool = False
+    # SL_UNPROTECTED_STARTUP_ALERT_SECONDS: wall-clock seconds after
+    # reconciliation completes that a still-blind (no price feed) held position
+    # is tolerated before a one-time CRITICAL startup alert is emitted.  This
+    # catches restored/adopted positions that come up blind and never receive a
+    # WS tick or REST price — a state the cycle-count-based escalation above can
+    # miss when the loop cadence is slow.  Default: 30 s.  0 disables the alert.
+    sl_unprotected_startup_alert_seconds: int = 30
     # ── Settlement reconciler ────────────────────────────────────────────────
     # Background loop that backfills TradeOutcome rows by querying Kalshi for
     # settled market results.
@@ -1129,15 +1143,30 @@ class AppConfig(BaseSettings):
             "LOG_BACKUP_COUNT",
             default=10,
         )
+        log_to_console = _parse_trade_toggle(
+            os.getenv("LOG_TO_CONSOLE"),
+            "LOG_TO_CONSOLE",
+            default=True,
+        )
+        log_to_file = _parse_trade_toggle(
+            os.getenv("LOG_TO_FILE"),
+            "LOG_TO_FILE",
+            default=True,
+        )
         sl_unprotected_max_blind_cycles = _parse_positive_int(
             os.getenv("SL_UNPROTECTED_MAX_BLIND_CYCLES"),
             "SL_UNPROTECTED_MAX_BLIND_CYCLES",
             default=30,
         )
-        sl_flatten_unprotected_on_blind = _parse_trade_toggle(
+                sl_flatten_unprotected_on_blind = _parse_trade_toggle(
             os.getenv("SL_FLATTEN_UNPROTECTED_ON_BLIND"),
             "SL_FLATTEN_UNPROTECTED_ON_BLIND",
             default=False,
+        )
+        sl_unprotected_startup_alert_seconds = _parse_non_negative_int(
+            os.getenv("SL_UNPROTECTED_STARTUP_ALERT_SECONDS"),
+            "SL_UNPROTECTED_STARTUP_ALERT_SECONDS",
+            default=30,
         )
         enable_settlement_reconciler = _parse_trade_toggle(
             os.getenv("ENABLE_SETTLEMENT_RECONCILER"),
@@ -1279,11 +1308,14 @@ class AppConfig(BaseSettings):
             instance_lock_enabled=instance_lock_enabled,
             instance_lock_file=instance_lock_file,
             instance_id=instance_id,
-            log_file=log_file,
+                        log_file=log_file,
             log_max_bytes=log_max_bytes,
             log_backup_count=log_backup_count,
-            sl_unprotected_max_blind_cycles=sl_unprotected_max_blind_cycles,
+            log_to_console=log_to_console,
+            log_to_file=log_to_file,
+                        sl_unprotected_max_blind_cycles=sl_unprotected_max_blind_cycles,
             sl_flatten_unprotected_on_blind=sl_flatten_unprotected_on_blind,
+            sl_unprotected_startup_alert_seconds=sl_unprotected_startup_alert_seconds,
             enable_settlement_reconciler=enable_settlement_reconciler,
             reconciler_interval_minutes=reconciler_interval_minutes,
             intraday_exit_enabled=intraday_exit_enabled,

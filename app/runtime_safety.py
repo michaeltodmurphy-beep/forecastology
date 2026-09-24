@@ -82,7 +82,31 @@ def maybe_acquire_instance_lock(
     return acquire_instance_lock(base_lock_file=base_lock_file, account_id_hash=account_id_hash)
 
 
-def configure_logging(*, log_file: str, log_max_bytes: int, log_backup_count: int) -> RotatingFileHandler:
+
+def configure_logging(
+    *,
+    log_file: str,
+    log_max_bytes: int,
+    log_backup_count: int,
+    log_to_console: bool = True,
+    log_to_file: bool = True,
+) -> RotatingFileHandler | None:
+    """Configure the root logger with console and/or rotating-file sinks.
+
+    The console and file sinks are independent: each renders every event
+    exactly once.  When the process's stdout and the log file are collected
+    into the same view (a terminal whose stdout *is* the redirected log, or a
+    tool that concatenates console and file output), every line therefore
+    appears TWICE.  ``log_to_console`` / ``log_to_file`` let an operator select
+    a single sink when that duplicate is not wanted; both default to True so
+    historical behavior is preserved.
+
+    This function is idempotent: it removes only the handlers it previously
+    installed (tagged ``_forecastology_managed``) before adding new ones, so
+    calling it more than once never accumulates duplicate handlers.
+
+    Returns the rotating file handler when a file sink is installed, else None.
+    """
     log_path = Path(log_file)
     if log_path.parent and str(log_path.parent) != ".":
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,20 +130,38 @@ def configure_logging(*, log_file: str, log_max_bytes: int, log_backup_count: in
         processor=structlog.dev.ConsoleRenderer(colors=False),
     )
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(stream_formatter)
-
-    rotating_file_handler = RotatingFileHandler(
-        filename=str(log_path),
-        maxBytes=log_max_bytes,
-        backupCount=log_backup_count,
-    )
-    rotating_file_handler.setFormatter(file_formatter)
     root_logger = logging.getLogger()
-    root_logger.handlers.clear()
+    # Remove ONLY the handlers we previously installed.  A blanket
+    # ``handlers.clear()`` also dropped a *previous* configure_logging()'s
+    # handlers without closing them, so a second call could leave stale
+    # handlers alive (double emission) or close a file another sink still used.
+    for existing in list(root_logger.handlers):
+        if getattr(existing, "_forecastology_managed", False):
+            root_logger.removeHandler(existing)
+            try:
+                existing.close()
+            except Exception:
+                pass
+
+    rotating_file_handler: RotatingFileHandler | None = None
+
+    if log_to_console:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(stream_formatter)
+        stream_handler._forecastology_managed = True  # type: ignore[attr-defined]
+        root_logger.addHandler(stream_handler)
+
+    if log_to_file:
+        rotating_file_handler = RotatingFileHandler(
+            filename=str(log_path),
+            maxBytes=log_max_bytes,
+            backupCount=log_backup_count,
+        )
+        rotating_file_handler.setFormatter(file_formatter)
+        rotating_file_handler._forecastology_managed = True  # type: ignore[attr-defined]
+        root_logger.addHandler(rotating_file_handler)
+
     root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(stream_handler)
-    root_logger.addHandler(rotating_file_handler)
 
     # httpx logs every outbound HTTP request at INFO, which floods the log.
     logging.getLogger("httpx").setLevel(logging.WARNING)

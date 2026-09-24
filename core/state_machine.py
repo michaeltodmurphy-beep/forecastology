@@ -344,7 +344,13 @@ class TemperatureStrategy:
         self._sunrise_entry_gate = SunriseEntryGate(config)
         self._am_low_brief_gate = DailyBriefGate(config)
         self._log_dedupe = DedupeLogger(summary_interval_seconds=300)
-
+        # Ownership classification is derived state recomputed on every
+        # reconciliation cycle (~every held_position_price_refresh_seconds) for
+        # every held position.  Logging it raw produced a steady drip of
+        # identical `ownership.classified` lines.  Dedupe it so a line is
+        # emitted only when the classification actually CHANGES, with periodic
+        # `.repeated` summaries in between.
+        self._ownership_dedupe = DedupeLogger(summary_interval_seconds=300)
         # Gate ledger (observability ONLY): a deduped, per-ticker lifecycle
         # record of which entry gates a candidate PASSED or was BLOCKED by.
         # Emits ``phase.b.decision`` lines on verdict CHANGE only (reusing the
@@ -650,8 +656,16 @@ class TemperatureStrategy:
         external_qty = max(total_qty - app_qty, 0)
         self._app_owned_qty[ticker] = app_qty
         ownership = "app_owned" if app_qty > 0 else "external_manual"
-        logger.info(
+        # Deduped: emit only when the classification (or its quantities)
+        # changes, with a periodic `.repeated` summary.  Periodic reconciliation
+        # calls this every cycle with identical values, which previously
+        # produced a stream of duplicate `ownership.classified` lines.
+        self._ownership_dedupe.log(
+            logger,
+            "info",
             "ownership.classified",
+            ticker,
+            day=self._ticker_market_day(ticker),
             ticker=ticker,
             ownership=ownership,
             total_position_qty=total_qty,
@@ -4528,6 +4542,43 @@ class TemperatureStrategy:
                     )
                     await self._remove_active_position(ticker, bracket)
                     continue
+            # Startup blind-position guard: a restored/adopted position that is
+            # still blind (no resolvable live price) for more than
+            # sl_unprotected_startup_alert_seconds of wall-clock time after
+            # reconciliation completes gets a one-time CRITICAL alert.  It does
+            # not depend on loop cadence, so a position that never receives a
+            # WS tick / REST price cannot sit silently unprotected.
+            if current_price is None and self.config.sl_unprotected_startup_alert_seconds > 0:
+                if getattr(bracket, "_blind_since_reconcile", None) is None:
+                    bracket._blind_since_reconcile = time.monotonic()
+                blind_seconds = time.monotonic() - bracket._blind_since_reconcile
+                if (
+                    blind_seconds >= self.config.sl_unprotected_startup_alert_seconds
+                    and not getattr(bracket, "_startup_blind_alerted", False)
+                ):
+                    bracket._startup_blind_alerted = True
+                    managed_qty_sb, app_owned_qty_sb, external_qty_sb = self._managed_exit_quantity(
+                        ticker,
+                        bracket.position_quantity,
+                    )
+                    logger.critical(
+                        "phase.c.unprotected_on_startup",
+                        ticker=ticker,
+                        qty=bracket.position_quantity,
+                        managed_qty=managed_qty_sb,
+                        app_owned_qty=app_owned_qty_sb,
+                        external_qty=external_qty_sb,
+                        blind_seconds=int(blind_seconds),
+                        last_known_price=last_known_price,
+                        stop_loss_price=self.config.stop_loss_price,
+                        reason="no_price_after_reconciliation",
+                    )
+            elif current_price is not None:
+                # A live price arrived; reset the startup-blind tracker so a
+                # later genuine loss of feed can re-alert.
+                if getattr(bracket, "_blind_since_reconcile", None) is not None:
+                    bracket._blind_since_reconcile = None
+                bracket._startup_blind_alerted = False
 
             if current_price is None:
                 last_price = self.cache.get_last_price(ticker)

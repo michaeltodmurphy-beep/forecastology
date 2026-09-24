@@ -116,16 +116,20 @@ async def main():
     stop_loss_task = None
     try:
         config = AppConfig.from_env()
-        configure_logging(
+                configure_logging(
             log_file=config.log_file,
             log_max_bytes=config.log_max_bytes,
             log_backup_count=config.log_backup_count,
+            log_to_console=config.log_to_console,
+            log_to_file=config.log_to_file,
         )
         logger.info(
             "app.logging_configured",
             log_file=config.log_file,
             log_max_bytes=config.log_max_bytes,
             log_backup_count=config.log_backup_count,
+            log_to_console=config.log_to_console,
+            log_to_file=config.log_to_file,
         )
 
         account_id_hash = _account_id_hash(config)
