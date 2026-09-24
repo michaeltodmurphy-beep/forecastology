@@ -90,6 +90,13 @@ class _TempRiseState:
     # is >= running_min + required.  Used to require the rise to be SUSTAINED
     # (>= _RISE_CONFIRM_OBS of them) so a single sub-degree blip cannot latch.
     consecutive_rise_obs: int = 0
+    # Once the rise latch has been satisfied for the local trading day it stays
+    # satisfied: the morning rise is a ONE-TIME, once-per-day confirmation.
+    # Without this, a later-afternoon flat/falling obs run (or a temporary
+    # stale METAR feed) re-opened and re-closed the gate every cycle, making a
+    # "once" gate flip OPEN<->BLOCKED dozens of times a day.  It is cleared
+    # only on the cross-day state reset above.
+    latched_for_day: bool = False
 
 
 class SunriseEntryGate:
@@ -115,7 +122,7 @@ class SunriseEntryGate:
         event: str,
         key: str,
         local_date: datetime.date,
-                **fields,
+        **fields,
     ) -> None:
         self._log_dedupe.log(logger, "info", event, key, day=local_date, **fields)
 
@@ -507,7 +514,7 @@ class SunriseEntryGate:
             #   T<n>  ("strictly greater than n"): a reading EQUAL to n already
             #         fails to satisfy the market, so block on day_min <= n.
             #   B<n>  ("greater-than-or-equal-to n"): equality still satisfies
-                        #         the market, so block only on day_min < n.
+            #         the market, so block only on day_min < n.
             # Collapsing both to a single "<" comparison let a T-bracket entry
             # through when the observed minimum merely touched the line.
             bracket_kind = parse_bracket_kind(ticker)
@@ -570,7 +577,7 @@ class SunriseEntryGate:
         """Return True when the day's *observed* low has reached the range that
         *ticker*'s bracket can win -- i.e. the bracket is actually tradeable.
 
-                Mirror of :meth:`day_has_dipped_below`.  That method blocks when the low
+        Mirror of :meth:`day_has_dipped_below`.  That method blocks when the low
         has fallen *below* the line (too cold).  This method ALSO blocks when the
         low has *overshot above* a bounded window and never got cold enough to
         land in it -- the "hard bracket the temp never reached" bug (a 55-to-56
@@ -624,7 +631,7 @@ class SunriseEntryGate:
         ctx["range_hi"] = hi
         if kind == "above":
             # Open-ended top: exempt from reachability.
-                        return False, ctx
+            return False, ctx
 
         day_min_int = int(day_min_f)
         # Apply the per-station entry-obs calibration offset to the reachability
@@ -840,8 +847,26 @@ class SunriseEntryGate:
                     new_date=local_date.isoformat(),
                 )
 
-        # Fetch recent observations since baseline start
+        # Once-per-day latch: the morning rise is a ONE-TIME confirmation for
+        # the local trading day.  If it has already been satisfied, stay OPEN
+        # for the rest of the day WITHOUT re-fetching or re-evaluating.  This is
+        # what stops the gate from flip-flopping OPEN<->BLOCKED every cycle as a
+        # "once" gate whose window (sunrise_+1min .. sunrise_+721min) spans the
+        # whole day: after the morning window the afternoon obs are flat or
+        # falling, so the rise condition keeps failing and a non-latched gate
+        # would re-block every cycle.
+        if state.latched_for_day:
+            return True
+
+        # Fetch recent observations since baseline start.  Bound the AWC
+        # primary path to cover the whole baseline->now stretch: without an
+        # explicit ``hours`` the AWC client silently truncates to its 2h
+        # default, so the "baseline" the running-min is computed against was
+        # really just the trailing two hours -- not the sunrise baseline.  The
+        # NWS fallback ignores ``hours`` and uses the ``start=`` query below.
         start_iso = baseline_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        hours_since_baseline = (now_utc - baseline_start_utc).total_seconds() / 3600.0
+        obs_hours = max(2.0, math.ceil(hours_since_baseline) + 1.0)
         try:
             raw_obs, _obs_source = self._fetch_station_obs(
                 station_id,
@@ -849,6 +874,7 @@ class SunriseEntryGate:
                     f"https://api.weather.gov/stations/{station_id}/observations"
                     f"?start={start_iso}"
                 ),
+                hours=obs_hours,
             )
         except Exception as exc:  # noqa: BLE001
             self._deduped_info(
@@ -883,6 +909,12 @@ class SunriseEntryGate:
         )
 
         if not parsed_obs:
+            # No observations in the baseline window.  If we already latched on
+            # an earlier cycle today, keep the day-latch (state.latched may have
+            # been set before a feed gap); otherwise fail CLOSED as before.
+            if state.latched:
+                state.latched_for_day = True
+                return True
             self._deduped_info(
                 "sunrise.obs_unavailable",
                 series,
@@ -917,6 +949,13 @@ class SunriseEntryGate:
         age_minutes = (now_utc - latest_ts).total_seconds() / 60.0
         max_age_minutes = self._station_obs_max_age_minutes(station_id)
         if age_minutes > max_age_minutes:
+            # A stale feed must not re-close a gate that already latched today.
+            # Many smaller stations report METARs hourly (or less frequently),
+            # so a 30-minute age ceiling produces spurious "stale" blocks even
+            # though the genuine morning rise was long since confirmed.
+            if state.latched:
+                state.latched_for_day = True
+                return True
             self._deduped_info(
                 "sunrise.obs_unavailable",
                 series,
@@ -937,7 +976,13 @@ class SunriseEntryGate:
         # whole-number scale the market settles on.
         for obs_ts, obs_f in parsed_obs:
             if obs_f < state.running_min_f:
-                if state.latched and obs_f < (state.latch_baseline_f or float("inf")):
+                # The once-per-day latch (state.latched_for_day) is IMMUTABLE:
+                # once the morning rise has been confirmed we never re-arm the
+                # reset, so an afternoon dip cannot re-close the gate.  The
+                # intra-day reset below still applies while the rise is only
+                # provisionally latched (latched=True, latched_for_day=False),
+                # e.g. within the same cycle run before the day-latch sticks.
+                if state.latched and not state.latched_for_day and obs_f < (state.latch_baseline_f or float("inf")):
                     # New low below the baseline used when latched → reset latch
                     logger.info(
                         "sunrise.temp_rise_reset",
@@ -972,6 +1017,8 @@ class SunriseEntryGate:
             rise = latest_f - state.running_min_f
             if rise >= required and consecutive >= _RISE_CONFIRM_OBS:
                 state.latched = True
+                # Stick the day-latch: the morning rise is confirmed ONCE.
+                state.latched_for_day = True
                 state.latch_baseline_f = state.running_min_f
                 state.latch_current_f = latest_f
                 state.latch_time_utc = latest_ts
@@ -1275,7 +1322,7 @@ class SunriseEntryGate:
         #       so require projected >= n + cushion.
         # Cushion is 1°F by default (matches the original behavior for B), but
         # for T brackets we require strictly greater than n + cushion.  This
-                # closes the gap where a forecast merely touching the line slipped an
+        # closes the gap where a forecast merely touching the line slipped an
         # exclusive-bracket entry through.
         bracket_kind = parse_bracket_kind(ticker)
         offset_f = self._calibrated_offset_f(station_id)
@@ -1424,7 +1471,7 @@ class SunriseEntryGate:
 
         # Bracket-kind-aware STRICT boundary (no cushion).  Compare whole-degree
         # integers: the forecast is rounded half-up (matches settled values); the
-                # bracket line is a half-integer split point, so floor it to the
+        # bracket line is a half-integer split point, so floor it to the
         # representative integer before comparing.
         bracket_kind = parse_bracket_kind(ticker)
         offset_f = self._calibrated_offset_f(station_id)
