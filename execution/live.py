@@ -63,8 +63,8 @@ def _extract_fill(data: dict) -> tuple[int, int]:
     maker_cost = _to_dollars_float(order.get("maker_fill_cost_dollars"))
     total_cost_dollars = taker_cost + maker_cost
 
-    if total_cost_dollars > 0:
-        avg_price_cents = round((total_cost_dollars / fill_count_raw) * 100)
+    if total_cost_dollars != 0:
+        avg_price_cents = round((abs(total_cost_dollars) / fill_count_raw) * 100)
     else:
         # Fallback chain when fill-cost is absent (older/partial responses):
         #  1) an explicit fill avg price, if present

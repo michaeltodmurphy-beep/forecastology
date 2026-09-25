@@ -1506,7 +1506,7 @@ def test_day_has_dipped_below_requests_whole_day_awc_window(monkeypatch):
 
     captured: dict = {}
 
-    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None):
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None, **kwargs):
         captured["hours"] = hours
         captured["nws_url"] = nws_url
         return [], "awc"
@@ -1532,7 +1532,7 @@ def test_day_has_dipped_below_awc_window_grows_through_the_day(monkeypatch):
 
     captured: list = []
 
-    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None):
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None, **kwargs):
         captured.append(hours)
         return [], "awc"
 
@@ -1570,7 +1570,7 @@ def test_temp_rise_latch_requests_window_covering_baseline(monkeypatch):
 
     captured: dict = {}
 
-    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None):
+    def _fake_fetch(station_id, *, nws_client, nws_url, obs_source="awc", hours=None, **kwargs):
         captured["hours"] = hours
         return [], "awc"
 
