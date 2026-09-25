@@ -116,7 +116,7 @@ async def main():
     stop_loss_task = None
     try:
         config = AppConfig.from_env()
-                configure_logging(
+        configure_logging(
             log_file=config.log_file,
             log_max_bytes=config.log_max_bytes,
             log_backup_count=config.log_backup_count,

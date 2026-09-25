@@ -649,7 +649,7 @@ class AppConfig(BaseSettings):
     instance_lock_enabled: bool = True
     instance_lock_file: str = "/tmp/forecastology.lock"
     instance_id: str = ""
-        log_file: str = "logs/run.log"
+    log_file: str = "logs/run.log"
     log_max_bytes: int = 104857600
     log_backup_count: int = 10
     # Sink toggles.  Both default ON.  When both are on, every event is written
@@ -671,7 +671,7 @@ class AppConfig(BaseSettings):
     #   of app_owned_qty once the escalation threshold is exceeded. Only
     #   app-owned quantity is ever sold — MANAGE_EXTERNAL_POSITIONS semantics
     #   are fully respected. Default: false (conservative; alert only).
-        sl_unprotected_max_blind_cycles: int = 30
+    sl_unprotected_max_blind_cycles: int = 30
     sl_flatten_unprotected_on_blind: bool = False
     # SL_UNPROTECTED_STARTUP_ALERT_SECONDS: wall-clock seconds after
     # reconciliation completes that a still-blind (no price feed) held position
@@ -1158,7 +1158,7 @@ class AppConfig(BaseSettings):
             "SL_UNPROTECTED_MAX_BLIND_CYCLES",
             default=30,
         )
-                sl_flatten_unprotected_on_blind = _parse_trade_toggle(
+        sl_flatten_unprotected_on_blind = _parse_trade_toggle(
             os.getenv("SL_FLATTEN_UNPROTECTED_ON_BLIND"),
             "SL_FLATTEN_UNPROTECTED_ON_BLIND",
             default=False,
