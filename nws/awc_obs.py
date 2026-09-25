@@ -10,7 +10,8 @@ Only observation fetches live here; forecast fetches remain in nws/client.py.
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING, List, Optional, Tuple
+import time
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
 import requests
 import structlog
@@ -26,6 +27,80 @@ AWC_METAR_URL = "https://aviationweather.gov/api/data/metar"
 
 # Type alias: list of (utc_datetime, temp_celsius) tuples
 ObsList = List[Tuple[datetime.datetime, float]]
+
+
+# ---------------------------------------------------------------------------
+# Feed-stall tracking (Phase C)
+# ---------------------------------------------------------------------------
+# Number of DISTINCT stations that must report a stale newest observation
+# within one cycle window before a single CRITICAL feed-level alert is emitted.
+_STALL_ALERT_STATION_THRESHOLD = 3
+# A cycle is reset once this many seconds elapse without a staleness report.
+_STALL_CYCLE_WINDOW_SECONDS = 120.0
+
+_stall_stations: dict[str, float] = {}
+_stall_cycle_started: Optional[float] = None
+_stall_cycle_alerted: bool = False
+
+
+def _newest_age_minutes(obs: ObsList, now_utc: datetime.datetime) -> Optional[float]:
+    """Return the age (minutes) of the newest observation in *obs*, or None."""
+    if not obs:
+        return None
+    newest_ts = max(ts for ts, _temp in obs)
+    return (now_utc - newest_ts).total_seconds() / 60.0
+
+
+def note_obs_staleness(
+    station_id: str,
+    age_minutes: float,
+    *,
+    max_age_minutes: float,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Record a stale observation and alert when many stations are stale at once.
+
+    Returns ``True`` when this call triggered a feed-level CRITICAL alert.
+
+    The tracker groups staleness reports into cycles: consecutive reports
+    within :data:`_STALL_CYCLE_WINDOW_SECONDS` belong to the same cycle.  When
+    the number of distinct stale stations in a cycle reaches
+    :data:`_STALL_ALERT_STATION_THRESHOLD`, a single CRITICAL
+    ``feed.observations_stalled`` line is emitted (once per cycle).
+    """
+    global _stall_cycle_started, _stall_cycle_alerted
+    now_mono = monotonic_fn()
+
+    if (
+        _stall_cycle_started is None
+        or now_mono - _stall_cycle_started > _STALL_CYCLE_WINDOW_SECONDS
+    ):
+        _stall_stations.clear()
+        _stall_cycle_started = now_mono
+        _stall_cycle_alerted = False
+
+    _stall_stations[station_id] = age_minutes
+
+    distinct = len(_stall_stations)
+    if distinct >= _STALL_ALERT_STATION_THRESHOLD and not _stall_cycle_alerted:
+        _stall_cycle_alerted = True
+        logger.critical(
+            "feed.observations_stalled",
+            stations=sorted(_stall_stations),
+            station_count=distinct,
+            max_age_minutes=max_age_minutes,
+            oldest_age_minutes=max(_stall_stations.values()),
+        )
+        return True
+    return False
+
+
+def reset_obs_stall_tracker() -> None:
+    """Clear feed-stall tracking state (used by tests)."""
+    global _stall_cycle_started, _stall_cycle_alerted
+    _stall_stations.clear()
+    _stall_cycle_started = None
+    _stall_cycle_alerted = False
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +224,8 @@ def fetch_obs_with_fallback(
     user_agent: str = "",
     timeout: int = 15,
     hours: Optional[float] = None,
+    max_age_minutes: Optional[float] = None,
+    now_utc: Optional[datetime.datetime] = None,
 ) -> tuple[ObsList, str]:
     """Fetch station observations using the configured source with fallback.
 
@@ -167,6 +244,16 @@ def fetch_obs_with_fallback(
     truncates the window and early-day dips are missed.  The NWS fallback path
     ignores *hours* (it uses the ``start=`` query embedded in *nws_url*).
 
+    Freshness handling (Phase A):
+
+        When *max_age_minutes* is supplied and the AWC result's newest
+        observation is older than that ceiling, the NWS endpoint is ALSO
+        queried and whichever source has the *newer* newest-observation wins.
+        This defends against AWC "succeeding" (HTTP 200, >=2 records) while
+        silently serving a stale newest report -- e.g. a nationwide upstream
+        reporting gap.  When ``None`` (the default) AWC is served as-is and
+        no extra request is made, preserving existing callers' behaviour.
+
     Returns ``(obs_list, source)`` where *source* is ``"awc"`` or ``"nws"``.
     Logs source switches at INFO and per-fetch source at DEBUG.
     Raises on NWS fetch failure (let caller handle).
@@ -176,6 +263,8 @@ def fetch_obs_with_fallback(
         obs = parse_nws_obs_payload(nws_client._get_json(nws_url))  # noqa: SLF001
         _maybe_log_source_change(station_id, "nws")
         return obs, "nws"
+
+    _now = now_utc or datetime.datetime.now(datetime.timezone.utc)
 
     # ---- AWC primary path ------------------------------------------------
     reason: Optional[str] = None
@@ -187,6 +276,56 @@ def fetch_obs_with_fallback(
             timeout=timeout,
         )
         if len(obs) >= 2:
+            awc_age = _newest_age_minutes(obs, _now)
+            if (
+                max_age_minutes is not None
+                and awc_age is not None
+                and awc_age > max_age_minutes
+            ):
+                # AWC looks stale -- consult NWS and keep whichever source is
+                # fresher.  A failure of the cross-check must never lose the
+                # AWC result, so it is wrapped defensively.
+                logger.info(
+                    "sunrise.obs_freshness_crosscheck",
+                    station=station_id,
+                    awc_age_minutes=round(awc_age, 1),
+                    max_age_minutes=max_age_minutes,
+                )
+                try:
+                    nws_obs = parse_nws_obs_payload(
+                        nws_client._get_json(nws_url)  # noqa: SLF001
+                    )
+                    nws_age = _newest_age_minutes(nws_obs, _now)
+                    if nws_age is not None and (
+                        awc_age is None or nws_age < awc_age
+                    ):
+                        logger.info(
+                            "sunrise.obs_freshness_crosscheck",
+                            station=station_id,
+                            winner="nws",
+                            awc_age_minutes=round(awc_age, 1),
+                            nws_age_minutes=round(nws_age, 1),
+                        )
+                        _maybe_log_source_change(station_id, "nws")
+                        return nws_obs, "nws"
+                    logger.info(
+                        "sunrise.obs_freshness_crosscheck",
+                        station=station_id,
+                        winner="awc",
+                        awc_age_minutes=round(awc_age, 1),
+                        nws_age_minutes=(
+                            round(nws_age, 1) if nws_age is not None else None
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.info(
+                        "sunrise.obs_freshness_crosscheck",
+                        station=station_id,
+                        winner="awc",
+                        reason="nws_crosscheck_failed",
+                        error_class=type(exc).__name__,
+                        error_message=str(exc)[:200],
+                    )
             logger.debug(
                 "sunrise.obs_fetch source=awc station=%s count=%d", station_id, len(obs)
             )

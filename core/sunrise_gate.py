@@ -16,7 +16,7 @@ from core.local_time_gate import get_series_prefix, get_series_timezone
 from core.log_dedupe import DedupeLogger
 from core.station_coords import SERIES_STATION_COORDS
 from core.trade_outcome_utils import parse_bracket_kind
-from nws.awc_obs import ObsList, fetch_obs_with_fallback
+from nws.awc_obs import ObsList, fetch_obs_with_fallback, note_obs_staleness
 from nws.client import NWSClient
 
 try:
@@ -159,6 +159,8 @@ class SunriseEntryGate:
         station_id: str,
         nws_url: str,
         hours: Optional[float] = None,
+        max_age_minutes: Optional[float] = None,
+        now_utc: Optional[datetime.datetime] = None,
     ) -> tuple[ObsList, str]:
         """Fetch station observations using the configured source with fallback.
 
@@ -167,6 +169,13 @@ class SunriseEntryGate:
         fallback path ignores it and uses the ``start=`` query in *nws_url*.
         Callers that need a window longer than the AWC default (2h) -- e.g. the
         day-min tracker, anchored at station-local midnight -- must pass it.
+
+        *max_age_minutes* (Phase A): when supplied and the AWC newest obs is
+        older than that ceiling, the NWS endpoint is also consulted and the
+        fresher source wins.  This defends against AWC silently serving a
+        stale newest report (e.g. a nationwide upstream gap).  Pass *now_utc*
+        to make the freshness age deterministic in tests.
+
         Returns ``(obs_list, source)`` where *obs_list* is sorted newest first
         and *source* is ``"awc"`` or ``"nws"``.
         Raises on irrecoverable fetch failure.
@@ -177,6 +186,8 @@ class SunriseEntryGate:
             nws_url=nws_url,
             obs_source=self.config.sunrise_obs_source,
             hours=hours,
+            max_age_minutes=max_age_minutes,
+            now_utc=now_utc,
         )
 
     # ------------------------------------------------------------------
@@ -867,6 +878,9 @@ class SunriseEntryGate:
         start_iso = baseline_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
         hours_since_baseline = (now_utc - baseline_start_utc).total_seconds() / 3600.0
         obs_hours = max(2.0, math.ceil(hours_since_baseline) + 1.0)
+        # Phase A: pass the staleness ceiling so the fetcher cross-checks NWS
+        # when AWC silently hands back a stale newest obs, keeping whichever
+        # source is fresher (defends against a nationwide upstream gap).
         try:
             raw_obs, _obs_source = self._fetch_station_obs(
                 station_id,
@@ -875,6 +889,8 @@ class SunriseEntryGate:
                     f"?start={start_iso}"
                 ),
                 hours=obs_hours,
+                max_age_minutes=self._station_obs_max_age_minutes(station_id),
+                now_utc=now_utc,
             )
         except Exception as exc:  # noqa: BLE001
             self._deduped_info(
@@ -956,6 +972,15 @@ class SunriseEntryGate:
             if state.latched:
                 state.latched_for_day = True
                 return True
+            # Phase C: record this station's staleness.  When many DISTINCT
+            # stations go stale in the same cycle, a single CRITICAL
+            # feed.observations_stalled line fires (instead of a per-station
+            # INFO storm), making a feed-wide outage a visible incident.
+            note_obs_staleness(
+                station_id,
+                age_minutes,
+                max_age_minutes=max_age_minutes,
+            )
             self._deduped_info(
                 "sunrise.obs_unavailable",
                 series,
