@@ -407,6 +407,16 @@ class AppConfig(BaseSettings):
     #   MIDAM_MAX_SPREAD:   09:01 -> 12:00 local.
     #   PM_MAX_SPREAD:      12:01 local -> gate-open + SUNRISE_ENTRY_WINDOW_MINUTES.
     sunrise_max_spread: int = 0
+    # Optional per-city TIGHTER sunrise spread cap (cents; 0 = disabled).
+    # When > 0, tickers whose series prefix is listed in
+    # ``sunrise_max_spread_tight_cities`` use this tighter cap during the
+    # SUNRISE band only, while every other city keeps ``sunrise_max_spread``.
+    # Parsed from SUNRISE_MAX_SPREAD_TIGHT (dollars in .env -> cents).
+    sunrise_max_spread_tight: int = 0
+    # Comma-separated lowercase series prefixes, e.g. "kxlowtlv,kxlowtchi".
+    # Prefix match (lowercased) against the ticker, so "kxlowtlv" covers all
+    # KXLOWTLV-* markets.  Empty = no city uses the tight cap.
+    sunrise_max_spread_tight_cities: Annotated[set[str], NoDecode] = set()
     midam_max_spread: int = 0
     pm_max_spread: int = 0
     stop_loss_price_ask: int
@@ -808,6 +818,7 @@ class AppConfig(BaseSettings):
     @field_validator(
         'buy_trigger_price_low', 'buy_trigger_price_high', 'buy_trigger_price_low_warm', 'spread_monitor_price',
         'sunrise_max_spread', 'midam_max_spread', 'pm_max_spread',
+        'sunrise_max_spread_tight',
         'stop_loss_price_ask', 'monitor_start_price',
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
@@ -837,6 +848,20 @@ class AppConfig(BaseSettings):
         if isinstance(v, (set, list)):
             return {str(t).strip().upper() for t in v if str(t).strip()}
         return {t.strip().upper() for t in str(v).split(',') if t.strip()}
+
+    @field_validator('sunrise_max_spread_tight_cities', mode='before')
+    @classmethod
+    def parse_sunrise_tight_cities(cls, v):
+        """Parse SUNRISE_MAX_SPREAD_TIGHT_CITIES into a lowercased set.
+
+        Lowercase series prefixes (e.g. "kxlowtlv") for easy copy/paste from
+        Kalshi.  Comma-separated; whitespace and empty entries dropped.
+        """
+        if not v:
+            return set()
+        if isinstance(v, (set, list)):
+            return {str(t).strip().lower() for t in v if str(t).strip()}
+        return {t.strip().lower() for t in str(v).split(',') if t.strip()}
 
     @model_validator(mode='before')
     @classmethod
@@ -894,6 +919,10 @@ class AppConfig(BaseSettings):
         sunrise_max_spread = os.getenv("SUNRISE_MAX_SPREAD", "0")
         midam_max_spread = os.getenv("MIDAM_MAX_SPREAD", "0")
         pm_max_spread = os.getenv("PM_MAX_SPREAD", "0")
+        # Optional per-city tighter SUNRISE spread (dollars in .env -> cents)
+        # plus the lowercase series-prefix list it applies to.
+        sunrise_max_spread_tight = os.getenv("SUNRISE_MAX_SPREAD_TIGHT", "0")
+        sunrise_max_spread_tight_cities = os.getenv("SUNRISE_MAX_SPREAD_TIGHT_CITIES", "")
         low_trades = _parse_trade_toggle(os.getenv("LOW_TRADES"), "LOW_TRADES", default=True)
         high_trades = _parse_trade_toggle(os.getenv("HIGH_TRADES"), "HIGH_TRADES", default=True)
         manage_external_positions = _parse_trade_toggle(
@@ -1294,6 +1323,8 @@ class AppConfig(BaseSettings):
             buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
             buy_trigger_price_low_warm=buy_trigger_price_low_warm,
             sunrise_max_spread=sunrise_max_spread,
+            sunrise_max_spread_tight=sunrise_max_spread_tight,
+            sunrise_max_spread_tight_cities=sunrise_max_spread_tight_cities,
             midam_max_spread=midam_max_spread,
             pm_max_spread=pm_max_spread,
             low_ticker_daily_closeout_enabled=low_ticker_daily_closeout_enabled,

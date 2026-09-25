@@ -98,6 +98,16 @@ _MIDAM_BAND_START = datetime.time(9, 1)   # 09:01 local starts the mid-AM band
 _PM_BAND_START = datetime.time(12, 1)     # 12:01 local starts the PM band
 
 
+def _ticker_series_prefix(ticker: str) -> str:
+    """Return the lowercased series prefix of a market ticker.
+
+    ``"KXLOWTLV-26SEP25-B72.5"`` -> ``"kxlowtlv"``.  Used to match the
+    per-city tight-spread list, which is stored lowercase so it can be
+    copy/pasted straight from Kalshi.
+    """
+    return ticker.split("-", 1)[0].strip().lower()
+
+
 def get_max_spread_for_entry(
     config: "AppConfig",
     market_ticker: str,
@@ -137,6 +147,14 @@ def get_max_spread_for_entry(
     now_time = now_utc.astimezone(ZoneInfo(tz_name)).time()
 
     if now_time < _MIDAM_BAND_START:
+        # SUNRISE-band-only, per-city TIGHTER cap (e.g. KXLOWTLV).
+        # Applied only when enabled (>0) AND the ticker's series prefix
+        # is listed; every other city keeps the global sunrise_max_spread.
+        # Purely a sunrise-band override -- midam/pm are never affected.
+        tight = int(getattr(config, "sunrise_max_spread_tight", 0) or 0)
+        tight_cities = getattr(config, "sunrise_max_spread_tight_cities", None) or set()
+        if tight > 0 and _ticker_series_prefix(market_ticker) in tight_cities:
+            return tight, "sunrise"
         return sunrise_max, "sunrise"
     if now_time < _PM_BAND_START:
         return midam_max, "midam"

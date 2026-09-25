@@ -259,7 +259,7 @@ The hedge engine has been removed. The strategy is now a simple entry + stop-los
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ the time-of-day max-spread band (city-local), one of `SUNRISE_MAX_SPREAD` (gate-open → 09:00), `MIDAM_MAX_SPREAD` (09:01 → 12:00), `PM_MAX_SPREAD` (12:01 → gate-close and the rest of the local day). There is no fallback — set all three:
+**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ the time-of-day max-spread band (city-local), one of `SUNRISE_MAX_SPREAD` (gate-open → 09:00), `MIDAM_MAX_SPREAD` (09:01 → 12:00), `PM_MAX_SPREAD` (12:01 → gate-close and the rest of the local day). There is no fallback — set all three. **Optional per-city tighter sunrise cap:** when `SUNRISE_MAX_SPREAD_TIGHT` > 0, cities whose lowercase series prefix appears in `SUNRISE_MAX_SPREAD_TIGHT_CITIES` (CSV, e.g. `kxlowtlv,kxlowtchi`) use that tighter cap **during the SUNRISE band only**; all other cities keep `SUNRISE_MAX_SPREAD`. `MIDAM`/`PM` bands are unaffected:
 - `KXLOW*` uses `BUY_TRIGGER_PRICE_LOW` (default 85¢)
 - `KXHIGH*` uses `BUY_TRIGGER_PRICE_HIGH` (default 85¢)
 
@@ -506,7 +506,7 @@ The hedge engine has been removed. The strategy is now a simple entry + stop-los
 All temperature bracket markets are monitored via the WebSocket ticker feed (YES ask price and bid-ask spread).
 
 ### Phase B — Entry
-**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ the time-of-day max-spread band (city-local), one of `SUNRISE_MAX_SPREAD` (gate-open → 09:00), `MIDAM_MAX_SPREAD` (09:01 → 12:00), `PM_MAX_SPREAD` (12:01 → gate-close and the rest of the local day). There is no fallback — set all three:
+**Buy signal**: YES ask price ≥ family-specific trigger AND bid-ask spread ≤ the time-of-day max-spread band (city-local), one of `SUNRISE_MAX_SPREAD` (gate-open → 09:00), `MIDAM_MAX_SPREAD` (09:01 → 12:00), `PM_MAX_SPREAD` (12:01 → gate-close and the rest of the local day). There is no fallback — set all three. **Optional per-city tighter sunrise cap:** when `SUNRISE_MAX_SPREAD_TIGHT` > 0, cities whose lowercase series prefix appears in `SUNRISE_MAX_SPREAD_TIGHT_CITIES` (CSV, e.g. `kxlowtlv,kxlowtchi`) use that tighter cap **during the SUNRISE band only**; all other cities keep `SUNRISE_MAX_SPREAD`. `MIDAM`/`PM` bands are unaffected:
 - `KXLOW*` uses `BUY_TRIGGER_PRICE_LOW` (default 85¢)
 - `KXHIGH*` uses `BUY_TRIGGER_PRICE_HIGH` (default 85¢)
 
