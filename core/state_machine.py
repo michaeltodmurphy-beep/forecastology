@@ -2082,10 +2082,36 @@ class TemperatureStrategy:
             # RISK FIRST: Feed orderbook-derived prices into the SL watcher before
             # any discovery/bookkeeping. Forward both best_ask and best_bid so the
             # watcher can log bid prices for context.
+            #
+            # Spoof guard (ASK_SPREAD_PROTECTION): a lone thin ask placed far
+            # below the rest of the book must not trip the SL. Use the
+            # corroborated ask (next-best level) for SL evaluation when the top
+            # ask is an outlier; fall back to the raw top ask otherwise.
             if self.stop_loss_watcher is not None and price > 0:
+                sl_ask = price
+                try:
+                    confirmed = self.cache.get_confirmed_ask(
+                        market_ticker, self.config.ask_spread_protection
+                    )
+                    if confirmed is not None and confirmed > price:
+                        logger.warning(
+                            "sl.spoof_guard_ignored",
+                            ticker=market_ticker,
+                            top_ask=price,
+                            confirmed_ask=confirmed,
+                            gap_cents=confirmed - price,
+                            threshold_cents=self.config.ask_spread_protection,
+                        )
+                        sl_ask = confirmed
+                except Exception as exc:  # fail-open: never block the SL path
+                    logger.warning(
+                        "sl.spoof_guard_error",
+                        ticker=market_ticker,
+                        error=str(exc),
+                    )
                 best_bid = ob.best_bid if ob.best_bid is not None else None
                 await self.stop_loss_watcher.on_market_update(
-                    market_ticker, best_ask=price, best_bid=best_bid
+                    market_ticker, best_ask=sl_ask, best_bid=best_bid
                 )
 
         # Auto-discover new temperature markets (non-critical path)
@@ -2118,10 +2144,36 @@ class TemperatureStrategy:
             # RISK FIRST: Feed orderbook-derived prices into the SL watcher before
             # any discovery/bookkeeping. Forward both best_ask and best_bid so the
             # watcher can log bid prices for context.
+            #
+            # Spoof guard (ASK_SPREAD_PROTECTION): a lone thin ask placed far
+            # below the rest of the book must not trip the SL. Use the
+            # corroborated ask (next-best level) for SL evaluation when the top
+            # ask is an outlier; fall back to the raw top ask otherwise.
             if self.stop_loss_watcher is not None and current_price > 0:
+                sl_ask = current_price
+                try:
+                    confirmed = self.cache.get_confirmed_ask(
+                        market_ticker, self.config.ask_spread_protection
+                    )
+                    if confirmed is not None and confirmed > current_price:
+                        logger.warning(
+                            "sl.spoof_guard_ignored",
+                            ticker=market_ticker,
+                            top_ask=current_price,
+                            confirmed_ask=confirmed,
+                            gap_cents=confirmed - current_price,
+                            threshold_cents=self.config.ask_spread_protection,
+                        )
+                        sl_ask = confirmed
+                except Exception as exc:  # fail-open: never block the SL path
+                    logger.warning(
+                        "sl.spoof_guard_error",
+                        ticker=market_ticker,
+                        error=str(exc),
+                    )
                 best_bid = ob.best_bid if ob.best_bid is not None else None
                 await self.stop_loss_watcher.on_market_update(
-                    market_ticker, best_ask=current_price, best_bid=best_bid
+                    market_ticker, best_ask=sl_ask, best_bid=best_bid
                 )
 
         # Auto-discover new temperature markets (non-critical path)

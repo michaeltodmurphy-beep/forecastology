@@ -787,6 +787,19 @@ class AppConfig(BaseSettings):
     hwm_arm_price: int = 93
     hwm_exit_price: int = 88
 
+    # ── Ask-spread spoof protection ─────────────────────────────────────────
+    # Guards the stop-loss ask trigger against order-book spoofing: a lone
+    # thin ask placed far below the real market (e.g. one 1-lot at 65¢ in a
+    # book whose next-best ask is 93¢) must NOT be allowed to trip the SL.
+    #
+    # ASK_SPREAD_PROTECTION=<dollars>  (default: 0.05 → 5¢; 0 disables)
+    #   When the gap between the lowest YES ask and the next-distinct YES ask
+    #   is greater than this value, the lowest ask is treated as an outlier and
+    #   the next-best (corroborated) ask is used for SL evaluation instead.
+    #   A genuine full-book collapse (small gap, e.g. 65¢/68¢) still triggers.
+    #   Parsed by from_env() via the dollars→cents validator.
+    ask_spread_protection: int = 5
+
     # ── Partial-fill chaser ─────────────────────────────────────────────────
     # When an entry order partially fills due to insufficient ask liquidity,
     # automatically work a pegged limit bid for the remaining contracts,
@@ -823,6 +836,7 @@ class AppConfig(BaseSettings):
         'eval_price_floor', 'hedge_trigger_price', 'hedge_buy',
         'sl_exit_max_slippage', 'low_ticker_10pm_max_ask', 'sl_backstop_offset',
         'hwm_arm_price', 'hwm_exit_price', 'profit_take_sell_price',
+        'ask_spread_protection',
         mode='before'
     )
     @classmethod
@@ -1261,6 +1275,9 @@ class AppConfig(BaseSettings):
         )
         hwm_arm_price = os.getenv("HWM_ARM_PRICE", "0.93")
         hwm_exit_price = os.getenv("HWM_EXIT_PRICE", "0.88")
+        # Spoof guard: dollars in .env (e.g. 0.05 -> 5¢).  Default 0.05; "0"
+        # disables the guard (top ask always used as-is).
+        ask_spread_protection = os.getenv("ASK_SPREAD_PROTECTION", "0.05")
         partial_fill_chase = _parse_trade_toggle(
             os.getenv("PARTIAL_FILL_CHASE"),
             "PARTIAL_FILL_CHASE",
@@ -1357,6 +1374,7 @@ class AppConfig(BaseSettings):
             hwm_exit_enabled=hwm_exit_enabled,
             hwm_arm_price=hwm_arm_price,
             hwm_exit_price=hwm_exit_price,
+            ask_spread_protection=ask_spread_protection,
             partial_fill_chase=partial_fill_chase,
             chase_interval_seconds=chase_interval_seconds,
             chase_max_minutes=chase_max_minutes,

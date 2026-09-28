@@ -6740,7 +6740,9 @@ async def test_held_positions_loop_independent_of_blocked_watchlist(monkeypatch)
 @pytest.mark.asyncio
 async def test_handle_orderbook_snapshot_calls_watcher_with_derived_ask(monkeypatch):
     """_handle_orderbook_snapshot passes the YES ask derived from NO bids to the watcher."""
-    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    # ask_spread_protection=0 disables the spoof guard so this test exercises
+    # the raw book-derived ask (see test_ask_spread_protection.py for the guard).
+    strategy = make_strategy(monkeypatch, stop_loss_price=50, ask_spread_protection=0)
     watcher_calls = []
 
     class FakeWatcher:
@@ -6770,7 +6772,10 @@ async def test_handle_orderbook_snapshot_calls_watcher_with_derived_ask(monkeypa
 @pytest.mark.asyncio
 async def test_handle_orderbook_delta_calls_watcher_with_derived_ask(monkeypatch):
     """_handle_orderbook_delta passes the YES ask derived from NO bids to the watcher."""
-    strategy = make_strategy(monkeypatch, stop_loss_price=50)
+    # ask_spread_protection=0 disables the spoof guard so this test exercises
+    # the raw book-derived ask.  The guard's effect on this exact book
+    # (asks 60c/68c, gap 8 > 5) is covered in test_ask_spread_protection.py.
+    strategy = make_strategy(monkeypatch, stop_loss_price=50, ask_spread_protection=0)
     watcher_calls = []
 
     class FakeWatcher:

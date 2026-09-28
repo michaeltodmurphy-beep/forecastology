@@ -114,5 +114,48 @@ class TickerCache:
     def get_last_price(self, ticker: str) -> Optional[int]:
         return self.last_prices.get(ticker)
 
+    def get_confirmed_ask(self, ticker: str, max_gap_cents: int = 0) -> Optional[int]:
+        """Return the effective YES ask, ignoring a lone outlier NO-bid (spoof).
+
+        YES ask = 100 - NO_bid.  ``no_bids`` is stored sorted descending (best
+        NO bid first, i.e. the LOWEST YES ask first), so a lone thin NO-bid
+        placed far above the rest of the book shows up as the top level and
+        yields an artificially low YES ask.
+
+        Spoof guard (Option A): if a next-distinct NO-bid level exists and the
+        gap between the lowest YES ask (from the best NO bid) and the next-lowest
+        YES ask (from the next NO bid) exceeds ``max_gap_cents``, the top ask is
+        treated as an outlier and the next-best (corroborated) ask is returned
+        instead.  A genuine full-book collapse (every level low, small gap)
+        still returns the true best ask.
+
+        ``max_gap_cents <= 0`` disables the guard (returns the raw top ask).
+        Returns ``None`` when there is no usable NO-bid level.
+        """
+        ob = self.orderbooks.get(ticker)
+        if ob is None:
+            return None
+        # Distinct YES asks derived from live NO bids, lowest first.
+        asks: list[int] = []
+        seen: set[int] = set()
+        for level in ob.no_bids:  # sorted desc by NO bid -> ascending YES ask
+            if level.quantity <= 0:
+                continue
+            ask = 100 - level.price
+            if ask in seen:
+                continue
+            seen.add(ask)
+            asks.append(ask)
+        if not asks:
+            return None
+        top_ask = asks[0]
+        if max_gap_cents <= 0 or len(asks) < 2:
+            return top_ask
+        next_ask = asks[1]
+        if (next_ask - top_ask) > max_gap_cents:
+            # Outlier/spoof: the top ask is not corroborated by the book.
+            return next_ask
+        return top_ask
+
     def get_orderbook(self, ticker: str) -> Optional[OrderBook]:
         return self.orderbooks.get(ticker)
