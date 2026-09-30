@@ -119,17 +119,25 @@ class LiveTradeExecutor(BaseExecutor):
     def _headers(self, method: str, path: str) -> dict:
         return build_auth_headers(self._private_key, self.api_key, method, path)
 
-    async def _current_position_qty(self, ticker: str) -> int:
+    async def _current_position_qty(self, ticker: str) -> Optional[int]:
+        """Return the live position quantity for *ticker*, or ``None`` when it
+        cannot be verified (lookup error / malformed count).
+
+        Callers enforcing a position cap MUST treat ``None`` as "unknown" and
+        fail closed (block the buy) rather than assuming a flat position.
+        """
         try:
             positions = await self.get_positions()
         except Exception as e:
             logger.warning("live.position_cap_lookup_failed", ticker=ticker, error=str(e))
-            return 0
+            return None
         raw = (positions.get(ticker) or {}).get("count", 0)
         try:
             return max(int(float(raw or 0)), 0)
         except (TypeError, ValueError):
-            return 0
+            logger.warning("live.position_cap_lookup_failed", ticker=ticker,
+                           error=f"unparseable position count: {raw!r}")
+            return None
 
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         if self.max_buy_qty is not None and order.quantity > self.max_buy_qty:
@@ -152,8 +160,74 @@ class LiveTradeExecutor(BaseExecutor):
                 status="REJECTED",
                 notes=f"hard_cap_blocked: qty={order.quantity} exceeds max_buy_qty={self.max_buy_qty}",
             )
+        if max_price is not None and order.price > max_price:
+            # Ceiling invariant (last line of defence): never submit a buy whose
+            # requested price is above the configured max buy price.
+            logger.warning(
+                "live.buy_price_above_ceiling",
+                ticker=order.market_ticker,
+                price=order.price,
+                max_price=max_price,
+                action="executor_ceiling_blocked_submission",
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="REJECTED",
+                notes=f"price_above_ceiling: price={order.price} exceeds max_price={max_price}",
+            )
+        if self.dry_run:
+            # Checked before the (HTTP) position lookup so a DRY_RUN executor
+            # never touches the network on the buy path.
+            logger.warning(
+                "live.dry_run_skip_order",
+                ticker=order.market_ticker,
+                side="buy_yes",
+                price=order.price,
+                quantity=order.quantity,
+                max_price=max_price,
+            )
+            return ExecutionResult(
+                success=False,
+                market_ticker=order.market_ticker,
+                side="yes",
+                price=order.price,
+                quantity=order.quantity,
+                fill_price=0,
+                fill_quantity=0,
+                total_cost_cents=0,
+                status="DRY_RUN",
+                notes="dry_run",
+            )
         if self.max_buy_qty is not None:
             existing_position_qty = await self._current_position_qty(order.market_ticker)
+            if existing_position_qty is None:
+                # Fail closed: exposure cannot be verified, so refuse the buy.
+                logger.critical(
+                    "live.position_cap_unverifiable",
+                    ticker=order.market_ticker,
+                    proposed_qty=order.quantity,
+                    max_allowed_qty=self.max_buy_qty,
+                    action="position_cap_unverifiable_blocked_submission",
+                )
+                return ExecutionResult(
+                    success=False,
+                    market_ticker=order.market_ticker,
+                    side="yes",
+                    price=order.price,
+                    quantity=order.quantity,
+                    fill_price=0,
+                    fill_quantity=0,
+                    total_cost_cents=0,
+                    status="REJECTED",
+                    notes="position_cap_unverifiable: position lookup failed",
+                )
             total_position_qty = existing_position_qty + max(int(order.quantity or 0), 0)
             if total_position_qty > self.max_buy_qty:
                 logger.critical(
@@ -180,33 +254,27 @@ class LiveTradeExecutor(BaseExecutor):
                         f"proposed={order.quantity} exceeds max_buy_qty={self.max_buy_qty}"
                     ),
                 )
-        if self.dry_run:
-            logger.warning(
-                "live.dry_run_skip_order",
-                ticker=order.market_ticker,
-                side="buy_yes",
-                price=order.price,
-                quantity=order.quantity,
-                max_price=max_price,
-            )
-            return ExecutionResult(
-                success=False,
-                market_ticker=order.market_ticker,
-                side="yes",
-                price=order.price,
-                quantity=order.quantity,
-                fill_price=0,
-                fill_quantity=0,
-                total_cost_cents=0,
-                status="DRY_RUN",
-                notes="dry_run",
-            )
         path = REST_PORTFOLIO_ORDERS
         url = f"{self.base_url}{path}"
         payload = order.to_kalshi_payload(
             max_price,
             time_in_force="immediate_or_cancel",
         )
+        if max_price is not None and round(float(payload["price"]) * 100) > max_price:
+            logger.critical(
+                "live.buy_price_above_ceiling",
+                ticker=order.market_ticker,
+                payload_price=payload["price"],
+                max_price=max_price,
+                action="executor_payload_ceiling_blocked",
+            )
+            return ExecutionResult(
+                success=False, market_ticker=order.market_ticker,
+                side="yes", price=order.price, quantity=order.quantity,
+                fill_price=0, fill_quantity=0, total_cost_cents=0,
+                status="REJECTED",
+                notes=f"payload_price_above_ceiling: {payload['price']} > {max_price}",
+            )
         logger.info("live.buy_yes_payload", ticker=order.market_ticker,
                      payload=json.dumps(payload), price=order.price)
         headers = self._headers("POST", path)

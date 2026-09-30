@@ -15,6 +15,7 @@ from core.local_time_gate import is_entry_allowed, get_series_station_code, get_
 from core.sunrise_gate import SunriseEntryGate
 from nws.daily_brief import DailyBriefGate, SERIES_CITY as DAILY_BRIEF_SERIES_CITY
 from core.log_dedupe import DedupeLogger
+from core.event_exposure import event_exposure_allows_buy
 from data.ticker_cache import TickerCache
 from data.websocket_manager import WebSocketManager
 from execution.base import BaseExecutor, ExecutionResult
@@ -3147,6 +3148,22 @@ class TemperatureStrategy:
         if ob and ob.yes_asks:
             price = ob.yes_asks[0].price
 
+        # Ceiling re-check on the FRESH ask: the watchlist ceiling gate ran on
+        # a cached quote; the market may have moved since.  Never submit a buy
+        # whose price is above the configured max buy price.
+        _ceiling = self.config.spread_monitor_price
+        if price > _ceiling:
+            logger.warning(
+                "phase.b.entry_blocked_above_ceiling",
+                ticker=bracket.market_ticker,
+                fresh_ask=price,
+                max_price=_ceiling,
+                action="ceiling_recheck_blocked_submission",
+            )
+            bracket.phase = Phase.MONITORING
+            bracket.crossed_buy = False
+            return
+
         proposed_qty = quantity or self.config.initial_contract_count
 
         # Hard pre-submit cap guard ΓÇö last line of defence in case upstream logic
@@ -3170,10 +3187,12 @@ class TemperatureStrategy:
             return
 
         existing_position_qty = max(int(bracket.position_quantity or 0), 0)
+        _position_verified = False
         try:
             positions = await self.executor.get_positions()
             existing_raw = (positions.get(bracket.market_ticker) or {}).get("count", 0)
             existing_position_qty = max(existing_position_qty, int(float(existing_raw or 0)))
+            _position_verified = True
         except Exception as e:
             logger.warning(
                 "phase.b.entry_position_lookup_failed",
@@ -3193,6 +3212,22 @@ class TemperatureStrategy:
                 hedge_factor=hedge_max,
                 action="hard_cap_guard_position_total_blocked_submission",
             )
+            bracket.phase = Phase.MONITORING
+            return
+
+        # Per-event (city/day) aggregate exposure cap across all brackets of
+        # this event.  DB-backed so it persists across watchlist cycles.
+        if not await event_exposure_allows_buy(
+            self.config,
+            self.db,
+            bracket.market_ticker,
+            proposed_qty,
+            price,
+            extra_holdings=self._event_exposure_known_holdings(),
+            inflight=self._event_exposure_inflight(),
+            source="state_machine_entry",
+            target_existing_qty=existing_position_qty if _position_verified else None,
+        ):
             bracket.phase = Phase.MONITORING
             return
 
@@ -3353,6 +3388,32 @@ class TemperatureStrategy:
             bracket.phase = Phase.MONITORING
             logger.warning("phase.b.entry_failed", ticker=bracket.market_ticker,
                            notes=result.notes)
+
+    def _event_exposure_known_holdings(self) -> dict[str, tuple[int, int]]:
+        """In-memory held positions (qty, avg entry cents) keyed by ticker, used
+        alongside DB positions for the per-event exposure cap."""
+        out: dict[str, tuple[int, int]] = {}
+        for ticker, b in list(self.active_positions.items()):
+            qty = max(int(b.position_quantity or 0), 0)
+            if qty > 0:
+                out[ticker] = (qty, int(b.avg_entry or 0))
+        return out
+
+    def _event_exposure_inflight(self) -> dict[str, tuple[int, int]]:
+        """Unfilled quantity still being worked by active partial-fill chasers,
+        priced at the ceiling (the most a chaser will pay)."""
+        out: dict[str, tuple[int, int]] = {}
+        ceiling = int(self.config.spread_monitor_price)
+        for ticker, task in list(self._chase_tasks.items()):
+            if task is None or task.done():
+                continue
+            b = self.active_positions.get(ticker) or self.brackets.get(ticker)
+            if b is None:
+                continue
+            remaining = max(0, self._entry_target_qty(b) - max(int(b.position_quantity or 0), 0))
+            if remaining > 0:
+                out[ticker] = (remaining, ceiling)
+        return out
 
     def _entry_target_qty(self, bracket: MarketBracket, fallback: Optional[int] = None) -> int:
         """Target entry size for a bracket = INITIAL_CONTRACT_COUNT.

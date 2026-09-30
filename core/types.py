@@ -121,11 +121,14 @@ class OrderRequest:
         kalshi_side = "bid" if self.side == OrderSide.BUY_YES else "ask"
         self.client_order_id = ensure_app_client_order_id(self.client_order_id)
         
-        # For buys: use max_price if given (allows crossing the spread to get filled)
+        # For buys: max_price is a hard CEILING — the limit price submitted is
+        # min(requested_price, max_price), so a bid is never placed above it.
+        # (Callers/executors reject requested prices above the ceiling upstream.)
         # For sells: use the actual price
-        price_str = f"{self.price / 100:.4f}"
-        if kalshi_side == "bid" and max_price is not None and max_price > self.price:
-            price_str = f"{max_price / 100:.4f}"
+        limit_price = self.price
+        if kalshi_side == "bid" and max_price is not None:
+            limit_price = min(self.price, max_price)
+        price_str = f"{limit_price / 100:.4f}"
         
         return {
             "ticker": self.market_ticker,

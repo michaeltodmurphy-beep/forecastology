@@ -430,6 +430,16 @@ class AppConfig(BaseSettings):
     # Example: initial=3, factor=3 → counts 0,1,2 allowed → sizes 3,6,12;
     #          max_allowed_qty = 3 * 2^(3-1) = 12.  count >= 3 is blocked.
     hedge_max_factor: int = 3
+    # ── Per-event (series + date, i.e. city/day) aggregate exposure cap ──────
+    # Bounds TOTAL exposure across all (mutually exclusive) brackets of one
+    # event, persisted across watchlist cycles (DB positions + in-flight).
+    #   EVENT_MAX_CONTRACTS:  max total contracts per event.
+    #   EVENT_MAX_COST_CENTS: max total cost basis (cents) per event.
+    # 0 (default) = auto: contracts = INITIAL_CONTRACT_COUNT *
+    # 2**(HEDGE_MAX_FACTOR-1) (one full per-ticker ladder), cost = that
+    # contract count * SPREAD_MONITOR_PRICE.  A negative value disables that cap.
+    event_max_contracts: int = 0
+    event_max_cost_cents: int = 0
     eval_price_floor: int = 5
     # DEPRECATED / UNUSED by trading logic. Kept only so existing .env files that
     # still define HEDGE_TRIGGER_PRICE / HEDGE_BUY continue to load, and so .env

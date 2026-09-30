@@ -33,6 +33,7 @@ from app.config import AppConfig
 from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
 from core.constants import SERIES_LIST, get_eastern_today_date_prefix
+from core.event_exposure import event_exposure_allows_buy
 from core.state_machine import hedge_policy, get_buy_trigger_price, get_max_spread_for_entry
 from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
 from data.ticker_cache import TickerCache
@@ -260,13 +261,25 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
             if ask is None or bid is None or spread is None:
                 continue
 
-            # Condition: ask >= buy_trigger AND spread <= max_spread band for
-            # the ticker's own city-local time (shared with the main bot).
+            # Condition: buy_trigger <= ask <= ceiling (SPREAD_MONITOR_PRICE)
+            # AND spread <= max_spread band for the ticker's own city-local
+            # time (shared with the main bot).
+            ceiling = config.spread_monitor_price
+            if buy_trigger <= ask and ask > ceiling:
+                logger.info("scanner.ask_above_ceiling", ticker=ticker,
+                            ask=ask, max_price=ceiling)
+                continue
             max_spread, band = get_max_spread_for_entry(config, ticker)
-            if ask >= buy_trigger and spread <= max_spread:
+            if buy_trigger <= ask <= ceiling and spread <= max_spread:
                 logger.info("scanner.buy_signal", ticker=ticker,
                             ask=ask, bid=bid, spread=spread,
                             max_spread=max_spread, band=band)
+
+                if not await event_exposure_allows_buy(
+                    config, db, ticker, config.initial_contract_count, ask,
+                    source="scanner",
+                ):
+                    continue
 
                 success = await buy_market(config, ticker, ask, client)
 
