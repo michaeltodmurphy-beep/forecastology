@@ -143,6 +143,8 @@ Key variables:
 | `LOG_MAX_BYTES` | Max log file size in bytes before rollover (default `104857600` = 100 MB) |
 | `LOG_BACKUP_COUNT` | Number of rotated log files to keep (default `10`) |
 | `HEDGE_MAX_FACTOR` | Total number of allowed buy levels per `(series_ticker, date_prefix)` (counting from 0). Buying is allowed while `stop_loss_count < HEDGE_MAX_FACTOR`; default `3` gives sizes `2/4/8` when `INITIAL_CONTRACT_COUNT=2`. With `INITIAL_CONTRACT_COUNT=3` and `HEDGE_MAX_FACTOR=3` the max is `12` |
+| `EVENT_MAX_CONTRACTS` | Per-event (series + date, i.e. city/day) cap on **total** contracts held across all brackets of that event, checked before every buy (state machine, scanner, monitor hedge) against DB positions + in-memory/in-flight orders; persists across cycles. `0` (default) = auto: `INITIAL_CONTRACT_COUNT * 2**(HEDGE_MAX_FACTOR-1)`; negative disables. Blocked buys log `entry.event_exposure_cap_blocked` (or `entry.event_exposure_unverifiable` if the DB lookup fails — fails closed) |
+| `EVENT_MAX_COST_CENTS` | Per-event cap on **total** cost basis in cents (qty × entry price, in-flight priced at the ceiling). `0` (default) = auto: auto contract cap × `SPREAD_MONITOR_PRICE`; negative disables |
 | `HEDGE_TRIGGER_PRICE` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `HEDGE_BUY` | Deprecated and ignored by the trading logic; retained only so older `.env` files still load |
 | `LOW_TRADES` | `yes` (default) / `no` — set to `no` to disable new **Low** ticker entries (existing positions still managed) |
@@ -208,6 +210,8 @@ python scanner.py
 ```bash
 python monitor.py
 ```
+
+Hedge buys are routed through the shared executor (`execution/factory.create_executor`), so they use the V2 `/portfolio/events/orders` endpoint and honour `TRADING_MODE=PAPER` (simulated, never reaches the exchange) and `DRY_RUN` (no order submitted). Orders are immediate-or-cancel at or below `SPREAD_MONITOR_PRICE`. A position is only marked hedged (`hedge_market_ticker` set, trade `FILLED`) once the full quantity has filled; a partial fill is recorded as `PARTIAL` with the actual filled quantity (accumulated in `hedge_quantity`) and the remainder is retried next cycle; a zero fill leaves nothing resting and is retried next cycle.
 
 ### Bracket Scanner (diagnostic tool)
 
@@ -297,6 +301,9 @@ The general formula: `max_allowed_qty = INITIAL_CONTRACT_COUNT * 2 ** (HEDGE_MAX
 3. **Executor layer** (`LiveTradeExecutor` / `PaperTradeExecutor`) enforces `max_buy_qty = INITIAL_CONTRACT_COUNT * 2**(HEDGE_MAX_FACTOR-1)` as a per-order backstop **and** a position-aware guard (`existing + proposed <= cap`) at `buy_yes` entry.
 4. **`scanner.py` and `monitor.py` buy paths** apply the same position-aware total-cap check before submitting orders, so side-path entries cannot stack a market past cap.
 5. **`stop_loss_count` clamp**: `_increment_stop_loss_count_for_market` now clamps the stored count to `hedge_max_factor` so a stale or corrupt ledger row can never produce an oversized quantity on the next sizing calculation. A `hedge.stop_loss_count_clamped` warning is logged when clamping fires.
+6. **Price ceiling (`SPREAD_MONITOR_PRICE`)** is a hard limit: `_execute_entry` re-checks the *fresh* ask and skips with `phase.b.entry_blocked_above_ceiling`; the scanner only signals when `trigger <= ask <= ceiling`; `OrderRequest.to_kalshi_payload(max_price=...)` submits `min(price, max_price)`; and the executors reject any buy whose price exceeds `max_price`.
+7. **Fail-closed position cap**: if `LiveTradeExecutor` cannot verify the current position (API error / malformed response) the buy is refused (`live.position_cap_unverifiable`) instead of assuming a flat position.
+8. **Per-event aggregate cap** (`EVENT_MAX_CONTRACTS` / `EVENT_MAX_COST_CENTS`) bounds combined exposure across mutually exclusive brackets of the same city/day.
 
 Root cause of the 16-contract order: `monitor.py`'s `_buy_hedge` computed `qty = pos.quantity` from a live position and POSTed directly to Kalshi with no cap check, bypassing all guards in the state machine. The fix adds an explicit cap check in `_buy_hedge` (step 4) and at the executor layer (step 3) so no order path can bypass the cap.
 
