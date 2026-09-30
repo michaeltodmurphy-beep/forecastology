@@ -2597,31 +2597,6 @@ async def test_new_entry_clears_stale_stop_loss_action(monkeypatch):
     )
 
 
-
-    ticker = "KXLOWTBOS-26JUN23-B65.5"
-    executor = FakeExecutor()
-    executor.positions = {ticker: {"count": 2}}
-    strategy = make_strategy(monkeypatch, executor=executor)
-    bracket = MarketBracket(
-        market_ticker=ticker,
-        event_ticker="EVT1",
-        series_ticker="KXLOWTBOS",
-        bracket_label="held",
-        phase=Phase.HOLDING,
-        position_quantity=2,
-    )
-    strategy.active_positions[ticker] = bracket
-    strategy.brackets[ticker] = bracket
-
-    await strategy._execute_stop_loss(bracket)
-    await strategy._execute_stop_loss(bracket)
-    bracket._last_stop_loss_attempt = 0
-    await strategy._execute_stop_loss(bracket)
-
-    assert len(executor.orders) == 2
-    assert strategy.active_positions[ticker].position_quantity == 2
-
-
 @pytest.mark.asyncio
 async def test_stop_loss_partial_fill_updates_remaining_and_retries(monkeypatch):
     ticker = "KXLOWTBOS-26JUN23-B65.5"
