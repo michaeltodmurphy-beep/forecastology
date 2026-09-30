@@ -92,6 +92,21 @@ class PaperTradeExecutor(BaseExecutor):
                         f"proposed={order.quantity} exceeds max_buy_qty={self.max_buy_qty}"
                     ),
                 )
+        if max_price is not None and order.price > max_price:
+            logger.warning(
+                "paper.buy_price_above_ceiling",
+                ticker=order.market_ticker,
+                price=order.price,
+                max_price=max_price,
+                action="executor_ceiling_blocked_submission",
+            )
+            return ExecutionResult(
+                success=False, market_ticker=order.market_ticker,
+                side="yes", price=order.price, quantity=order.quantity,
+                fill_price=0, fill_quantity=0, total_cost_cents=0,
+                status="REJECTED",
+                notes=f"price_above_ceiling: price={order.price} exceeds max_price={max_price}",
+            )
         # Simulate: fill at the lowest available ask from cache
         ob = self.ticker_cache.get_orderbook(order.market_ticker)
         fill_price = order.price  # default to requested price

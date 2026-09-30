@@ -164,6 +164,10 @@ async def test_live_executor_buy_yes_allows_at_cap(monkeypatch):
         async def post(self, *_, **__):
             return _FakeResp()
 
+        async def get(self, *_, **__):
+            # Verified flat position (the cap now fails closed on lookup errors).
+            return MagicMock(status_code=200, json=lambda: {"market_positions": []})
+
     ex = _make_live_executor(max_buy_qty=8)
     ex._client = _FakeClient()
     order = _make_order(qty=8)
@@ -336,12 +340,12 @@ async def test_monitor_buy_hedge_allows_at_cap(monkeypatch):
 
     config = make_config(initial_contract_count=4, hedge_max_factor=2)
 
-    class _FakeResp:
-        status_code = 201
+    post_called = []
 
     class _FakeClient:
         async def post(self, *_, **__):
-            return _FakeResp()
+            post_called.append(True)
+            return MagicMock(status_code=201)
 
     result = await mon._buy_hedge(
         ticker="KXLOWTLAX-26JUL30-B60.5",
@@ -351,7 +355,12 @@ async def test_monitor_buy_hedge_allows_at_cap(monkeypatch):
         client=_FakeClient(),
     )
 
-    assert result is True
+    # PAPER config: routed through the shared (paper) executor, which fills
+    # the full quantity without any raw HTTP from the monitor.
+    assert isinstance(result, ExecutionResult)
+    assert result.success is True
+    assert result.fill_quantity == 8
+    assert not post_called
     assert not any(ev == "hedge.cap_blocked" for ev, _ in critical_logged)
 
 

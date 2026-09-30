@@ -114,6 +114,12 @@ async def test_run_scan_cycle_uses_family_specific_buy_triggers(monkeypatch):
         def fetchall(self):
             return []
 
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
     class FakeSession:
         def add(self, *_args, **_kwargs):
             return None
