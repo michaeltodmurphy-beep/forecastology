@@ -439,6 +439,29 @@ async def test_monitor_zero_hedge_fill_is_not_recorded_as_hedged(monkeypatch):
     assert held.hedge_market_ticker == SIBLING
 
 
+@pytest.mark.asyncio
+async def test_monitor_records_fill_even_when_result_not_success(monkeypatch):
+    executor = _HedgeExecutor([2])
+    orig = executor.buy_yes
+
+    async def failing_but_filled(order, max_price=None):
+        result = await orig(order, max_price)
+        result.success = False
+        result.status = "ERROR"
+        return result
+
+    executor.buy_yes = failing_but_filled
+    db, config, held = _setup_monitor(monkeypatch, executor)
+
+    await mon.run_monitor_cycle(config, db)
+
+    trades = db.store[ExecutedTrade]
+    assert len(trades) == 1 and trades[0].quantity == 2
+    assert trades[0].status == TradeStatus.PARTIAL
+    assert held.hedge_quantity == 2
+    assert held.hedge_market_ticker is None
+
+
 # ---------------------------------------------------------------------------
 # 4. Per-event aggregate exposure cap
 # ---------------------------------------------------------------------------

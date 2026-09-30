@@ -354,7 +354,9 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                 if not isinstance(result, ExecutionResult):
                     continue  # blocked before submission; retried next cycle
 
-                filled_qty = max(int(result.fill_quantity or 0), 0) if result.success else 0
+                # Trust the reported fill quantity even on a non-success status so
+                # contracts that did fill are never forgotten (and re-bought).
+                filled_qty = max(int(result.fill_quantity or 0), 0)
                 if filled_qty <= 0:
                     # Nothing filled (IOC expired / rejected / DRY_RUN): do NOT
                     # mark hedged, so the next monitor cycle retries.
