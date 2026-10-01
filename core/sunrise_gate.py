@@ -1011,9 +1011,10 @@ class SunriseEntryGate:
         """Return ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` as an int (0-23)."""
         _raw = getattr(self.config, "am_low_snapshot_local_hour", "03:00") or "03:00"
         try:
-            return int(str(_raw).strip().split(":")[0])
+            hour = int(str(_raw).strip().split(":")[0])
         except (ValueError, TypeError, IndexError):
             return 3
+        return hour if 0 <= hour <= 23 else 3
 
     # ------------------------------------------------------------------
     # Temperature rise-from-baseline latch

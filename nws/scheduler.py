@@ -285,20 +285,46 @@ def _run_daily_brief_snapshot(series: str, city: str, lat: float, lon: float) ->
 
 def _am_low_forecast_enabled() -> bool:
     """Return True when ``SUNRISE_REQUIRE_AM_LOW`` is truthy in the env."""
-    import os
-    return (os.getenv("SUNRISE_REQUIRE_AM_LOW", "") or "").strip().lower() in (
-        "yes", "true", "1",
+    from core.sunrise_gate import am_low_forecast_enabled
+    return am_low_forecast_enabled()
+
+
+def _schedule_am_low_job(series: str, tz_name: str, now_utc: datetime) -> None:
+    """(Re)register the one-shot AM-low snapshot job for *series*."""
+    run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
+    _scheduler.add_job(
+        _run_am_low_forecast_snapshot,
+        trigger="date",
+        run_date=run_at,
+        args=[series],
+        id=f"am_low_forecast_{series}",
+        replace_existing=True,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "nws.am_low_forecast.scheduled series=%s local=%s run_utc=%s",
+        series, tz_name, run_at.isoformat(),
     )
 
 
+def _am_low_series_tz(series: str) -> Optional[str]:
+    """Return the IANA timezone name for a KXLOW series prefix, or None."""
+    try:
+        from core.local_time_gate import SERIES_TIMEZONE
+        return SERIES_TIMEZONE.get(series)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def schedule_am_low_forecast_jobs() -> None:
-    """Register one-shot jobs that snapshot each KXLOW AM-low forecast decision.
+    """Register the per-series AM-low forecast snapshot jobs.
 
     The NWS ``forecastHourly`` endpoint only returns FUTURE hours, so the
     decision must be taken (and persisted) while the morning is still ahead.
     Each job fires at that city's local ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` and
     writes the ``daily_am_low_forecast`` row that ``SunriseEntryGate`` reads
-    back after a restart.
+    back after a restart.  Each run re-registers itself for the next day.
     """
     global _scheduler
     if _scheduler is None or not _scheduler.running:
@@ -313,39 +339,32 @@ def schedule_am_low_forecast_jobs() -> None:
     now_utc = datetime.now(timezone.utc)
 
     for series in SERIES_STATION_COORDS:
-        try:
-            from core.local_time_gate import SERIES_TIMEZONE
-            tz_name = SERIES_TIMEZONE.get(series)
-        except Exception:  # noqa: BLE001
-            tz_name = None
+        tz_name = _am_low_series_tz(series)
         if tz_name is None:
             logger.warning("nws.am_low_forecast.no_tz series=%s", series)
             continue
-
-        run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
-        _scheduler.add_job(
-            _run_am_low_forecast_snapshot,
-            trigger="date",
-            run_date=run_at,
-            args=[series],
-            id=f"am_low_forecast_{series}",
-            replace_existing=True,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
-        logger.info(
-            "nws.am_low_forecast.scheduled series=%s local=%s run_utc=%s",
-            series, tz_name, run_at.isoformat(),
-        )
+        _schedule_am_low_job(series, tz_name, now_utc)
 
 
 def _run_am_low_forecast_snapshot(series: str) -> None:
-    """APScheduler job entry: evaluate + persist the AM-low forecast decision."""
+    """APScheduler job entry: evaluate + persist the AM-low forecast decision.
+
+    Re-registers itself for the next local snapshot hour so the one-shot job
+    keeps running for the lifetime of the process.
+    """
     try:
         from core.sunrise_gate import snapshot_am_low_forecast
         snapshot_am_low_forecast(series)
     except Exception:  # noqa: BLE001
         logger.exception("nws.am_low_forecast.snapshot_error series=%s", series)
+
+    tz_name = _am_low_series_tz(series)
+    if tz_name is None or _scheduler is None or not _scheduler.running:
+        return
+    try:
+        _schedule_am_low_job(series, tz_name, datetime.now(timezone.utc))
+    except Exception:  # noqa: BLE001
+        logger.exception("nws.am_low_forecast.reschedule_error series=%s", series)
 
 
 def shutdown() -> None:
