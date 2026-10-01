@@ -283,12 +283,6 @@ def _run_daily_brief_snapshot(series: str, city: str, lat: float, lon: float) ->
 # AM-low hourly-forecast snapshot scheduler
 # ---------------------------------------------------------------------------
 
-def _am_low_forecast_enabled() -> bool:
-    """Return True when ``SUNRISE_REQUIRE_AM_LOW`` is truthy in the env."""
-    from core.sunrise_gate import am_low_forecast_enabled
-    return am_low_forecast_enabled()
-
-
 def _schedule_am_low_job(series: str, tz_name: str, now_utc: datetime) -> None:
     """(Re)register the one-shot AM-low snapshot job for *series*."""
     run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
@@ -330,7 +324,9 @@ def schedule_am_low_forecast_jobs() -> None:
     if _scheduler is None or not _scheduler.running:
         logger.warning("nws.am_low_forecast.scheduler_not_running")
         return
-    if not _am_low_forecast_enabled():
+    from core.sunrise_gate import am_low_forecast_enabled
+
+    if not am_low_forecast_enabled():
         logger.info("nws.am_low_forecast.disabled")
         return
 

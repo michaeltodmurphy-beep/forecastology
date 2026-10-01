@@ -189,7 +189,6 @@ def _store(session, passed: bool) -> None:
             forecast_min_temp_f=55.0,
             min_time_local="2026-10-01T07:00:00-04:00",
             evaluated_at_local_hour=4,
-            id=1,
         )
     )
     session.commit()
@@ -269,5 +268,25 @@ def test_scheduler_am_low_job_id_is_whitelisted_and_starts(monkeypatch):
         scheduler.schedule_am_low_forecast_jobs()
         job_ids = {j.id for j in scheduler._scheduler.get_jobs()}
         assert any(jid.startswith("am_low_forecast_") for jid in job_ids)
+    finally:
+        scheduler.shutdown()
+
+
+def test_am_low_snapshot_job_reschedules_itself(monkeypatch):
+    """The one-shot job must re-register itself so it keeps firing daily."""
+    import nws.scheduler as scheduler
+
+    monkeypatch.setenv("SUNRISE_REQUIRE_AM_LOW", "yes")
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    monkeypatch.setattr(scheduler, "run_forecast_update_job", lambda: None)
+    monkeypatch.setattr(
+        "core.sunrise_gate.snapshot_am_low_forecast", lambda series: True
+    )
+    try:
+        scheduler.start_scheduler()
+        scheduler._run_am_low_forecast_snapshot(SERIES)
+        job = scheduler._scheduler.get_job(f"am_low_forecast_{SERIES}")
+        assert job is not None
+        assert job.next_run_time > datetime.datetime.now(datetime.timezone.utc)
     finally:
         scheduler.shutdown()

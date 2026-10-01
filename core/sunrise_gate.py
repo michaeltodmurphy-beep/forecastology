@@ -113,6 +113,16 @@ def _scan_day_min(
     return min_temp_f, min_time_local, (first_local.hour if first_local else None)
 
 
+def _is_lockable(first_period_local_hour: Optional[int], snapshot_hour: int) -> bool:
+    """Return True when a forecast covered the morning and may be locked/persisted.
+
+    The NWS ``forecastHourly`` endpoint only returns FUTURE hours, so a fetch
+    whose earliest period for the local date is *after* the snapshot hour is a
+    partial-day view: it cannot prove the morning low happened late.
+    """
+    return first_period_local_hour is not None and first_period_local_hour <= snapshot_hour
+
+
 # ---------------------------------------------------------------------------
 # AM-low forecast decision persistence (restart-safety)
 # ---------------------------------------------------------------------------
@@ -938,10 +948,7 @@ class SunriseEntryGate:
         # the morning, i.e. its earliest period for this local date is at/before the
         # snapshot hour.  Otherwise it is a partial-day view that cannot prove the
         # morning low happened late.
-        lockable = (
-            first_period_local_hour is not None
-            and first_period_local_hour <= snapshot_hour
-        )
+        lockable = _is_lockable(first_period_local_hour, snapshot_hour)
 
         logger.info(
             "sunrise.am_low_check",
@@ -1715,7 +1722,7 @@ class SunriseEntryGate:
 # Standalone AM-low forecast snapshot (used by the background scheduler)
 # ---------------------------------------------------------------------------
 
-def _env_int(name: str, default: int) -> int:
+def _env_hour(name: str, default: int) -> int:
     """Return an int env var (``HH`` or ``HH:MM``), falling back to *default*."""
     import os
     raw = os.getenv(name, "") or ""
@@ -1786,10 +1793,10 @@ def snapshot_am_low_forecast(
         )
         return False
 
-    deadline_hour = _env_int("NWS_LOW_DEADLINE_HOUR", 12)
-    snapshot_hour = _env_int("AM_LOW_SNAPSHOT_LOCAL_HOUR", 3)
+    deadline_hour = _env_hour("NWS_LOW_DEADLINE_HOUR", 12)
+    snapshot_hour = _env_hour("AM_LOW_SNAPSHOT_LOCAL_HOUR", 3)
     passed = min_time_local.hour < deadline_hour
-    if first_period_local_hour is None or first_period_local_hour > snapshot_hour:
+    if not _is_lockable(first_period_local_hour, snapshot_hour):
         logger.info(
             "sunrise.am_low_snapshot_partial_forecast",
             series=series,
