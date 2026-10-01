@@ -255,6 +255,21 @@ sudo chmod 644 /etc/logrotate.d/forecastology
 sudo logrotate -f /etc/logrotate.d/forecastology
 ```
 
+## Development / Running tests
+
+```bash
+pip install -r requirements.txt pytest pytest-asyncio greenlet
+python -m pytest tests -q
+```
+
+Tests are hermetic and **never touch the database in `MYSQL_URL` / `MYSQL_DATABASE_URL`**, even when your `.env` points at production:
+
+- An autouse fixture in `tests/conftest.py` backs `nws.db.get_session()` with a fresh in-memory SQLite database per test (all `app.models` tables are created; nothing persists between tests).
+- A second autouse fixture overrides `MYSQL_URL` / `MYSQL_DATABASE_URL` (env vars and `nws.config.MYSQL_URL`) with `sqlite://`, so no code path can resolve a MySQL URL.
+- `tests/test_db_isolation.py` fails if the sync engine is ever anything other than SQLite.
+
+Writing new DB-backed tests: just call code that uses `nws.db.get_session()` — the fixture already routes it to SQLite. To use a custom engine, call `nws.db.configure_engine(engine)` (and `nws.db.reset_engine()` afterwards); in production, with no override configured, `nws.db` lazily creates the pymysql engine from `MYSQL_URL` as before.
+
 ## Trading Strategy
 
 The hedge engine has been removed. The strategy is now a simple entry + stop-loss + martingale recovery system keyed by `(series_ticker, date_prefix)`.

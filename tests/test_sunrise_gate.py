@@ -3,7 +3,9 @@ import os
 import warnings
 
 from app.config import AppConfig
+from app.models import DailyAmLowForecast
 from core.sunrise_gate import SunriseEntryGate, _c_to_f
+from nws.db import get_session
 from structlog.testing import capture_logs
 
 try:
@@ -358,6 +360,15 @@ def _gate_with_am_low(forecast_periods, tz, deadline_hour=12, raise_meta=False, 
     return gate
 
 
+def _am_low_rows() -> list[tuple[str, datetime.date, bool]]:
+    """Return every persisted ``daily_am_low_forecast`` row as (series, date, passed)."""
+    with get_session() as session:
+        return sorted(
+            (r.series_prefix, r.local_date, bool(r.passed))
+            for r in session.query(DailyAmLowForecast).all()
+        )
+
+
 def test_am_low_passes_when_min_before_deadline(monkeypatch):
     tz = ZoneInfo("America/New_York")
     local_date = datetime.date(2026, 8, 9)
@@ -374,8 +385,11 @@ def test_am_low_blocks_when_min_after_deadline(monkeypatch):
     periods = _make_forecast_periods_local_low_after_noon(tz, local_date)
     gate = _gate_with_am_low(periods, tz, deadline_hour=12, monkeypatch=monkeypatch)
     now_utc = datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc)  # 07:00 EDT
+    assert _am_low_rows() == []
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     assert result.allowed is False
+    # Lockable (forecast covers the morning) → decision persisted as passed=0.
+    assert _am_low_rows() == [("KXLOWTNYC", local_date, False)]
 
 
 def test_am_low_blocks_on_metadata_unavailable(monkeypatch):
@@ -428,8 +442,12 @@ def test_am_low_deadline_boundary_one_hour_before_passes(monkeypatch):
     ]
     gate = _gate_with_am_low(periods, tz, deadline_hour=deadline, monkeypatch=monkeypatch)
     now_utc = datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc)
+    # Must exercise the fetch path, not a previously persisted decision.
+    assert _am_low_rows() == []
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     assert result.allowed is True
+    # Partial-day forecast (starts 09:00, after the snapshot hour) is never persisted.
+    assert _am_low_rows() == []
 
 
 def test_am_low_forecast_cache_is_used(monkeypatch):
@@ -461,6 +479,8 @@ def test_am_low_forecast_cache_is_used(monkeypatch):
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed_sunrise, "astral"))
     now_utc = datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc)
 
+    # Must exercise the fetch path, not a previously persisted decision.
+    assert _am_low_rows() == []
     gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     assert call_count[0] == 1  # second call used cache
@@ -473,13 +493,52 @@ def test_am_low_cached_result_logs_at_debug(monkeypatch):
     gate = _gate_with_am_low(periods, tz, deadline_hour=12, monkeypatch=monkeypatch)
     now_utc = datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc)
 
+    # Must exercise the fetch path (a DB hit would log at INFO with source=db).
+    assert _am_low_rows() == []
     with capture_logs() as logs:
         gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
         gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
 
+    assert not any(e.get("source") == "db" for e in logs)
     cached_logs = [e for e in logs if e.get("event") == "sunrise.am_low_check" and e.get("cached") is True]
     assert cached_logs
     assert all(e.get("log_level") == "debug" for e in cached_logs)
+
+
+def test_am_low_persisted_false_row_does_not_leak_to_other_series_or_date(monkeypatch):
+    """A passed=False row for one (series, local_date) must not affect another key."""
+    tz = ZoneInfo("America/New_York")
+    day1 = datetime.date(2026, 8, 9)
+    day2 = datetime.date(2026, 8, 10)
+
+    # 1) Lockable after-deadline forecast for NYC on day1 → persists passed=0.
+    blocking_gate = _gate_with_am_low(
+        _make_forecast_periods_local_low_after_noon(tz, day1), tz, monkeypatch=monkeypatch
+    )
+    now_day1 = datetime.datetime(2026, 8, 9, 11, 0, tzinfo=datetime.timezone.utc)  # 07:00 EDT
+    assert blocking_gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_day1).allowed is False
+    assert _am_low_rows() == [("KXLOWTNYC", day1, False)]
+
+    # 2) Different series, same date: fresh gate (no in-memory cache), same DB.
+    other_series_gate = _gate_with_am_low(
+        _make_forecast_periods_local_low_before_noon(tz, day1), tz, monkeypatch=monkeypatch
+    )
+    assert other_series_gate.evaluate("KXLOWTPHIL-26AUG09-B73.5", now_utc=now_day1).allowed is True
+
+    # 3) Same series, next local date.  The helper's monkeypatch pins sunrise to
+    #    day1, so patch a day2 sunrise directly instead.
+    next_day_gate = _gate_with_am_low(
+        _make_forecast_periods_local_low_before_noon(tz, day2), tz
+    )
+    fixed_sunrise_day2 = datetime.datetime(2026, 8, 10, 6, 0, tzinfo=tz)
+    monkeypatch.setattr(
+        next_day_gate, "_get_sunrise_local", lambda *a, **k: (fixed_sunrise_day2, "astral")
+    )
+    now_day2 = datetime.datetime(2026, 8, 10, 11, 0, tzinfo=datetime.timezone.utc)
+    assert next_day_gate.evaluate("KXLOWTNYC-26AUG10-B73.5", now_utc=now_day2).allowed is True
+
+    # Only the original blocking row exists.
+    assert _am_low_rows() == [("KXLOWTNYC", day1, False)]
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1039,8 @@ def test_combined_gate_ordering_all_pass(monkeypatch):
     fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *a, **k: (fixed_sunrise, "astral"))
     now_utc = datetime.datetime(2026, 8, 9, 10, 40, tzinfo=datetime.timezone.utc)  # 06:40 EDT
+    # Must exercise the fetch path, not a previously persisted decision.
+    assert _am_low_rows() == []
     result = gate.evaluate("KXLOWTNYC-26AUG09-B73.5", now_utc=now_utc)
     assert result.allowed is True
 

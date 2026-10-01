@@ -46,6 +46,26 @@ def _get_engine():
     return _engine
 
 
+def configure_engine(engine) -> None:
+    """Use *engine* for all subsequent ``get_session()`` / ``init_nws_db()`` calls.
+
+    Intended for tests (e.g. an in-memory SQLite engine) so nothing ever
+    reaches the database configured via ``MYSQL_URL``.  Resets the cached
+    session factory so it is rebuilt against the new engine.  The caller
+    owns disposal of both the injected engine and any engine it replaces.
+    """
+    global _engine, _SessionLocal
+    _engine = engine
+    _SessionLocal = None
+
+
+def reset_engine() -> None:
+    """Forget any configured engine; the next use rebuilds it from config."""
+    global _engine, _SessionLocal
+    _engine = None
+    _SessionLocal = None
+
+
 def _get_session_factory() -> sessionmaker:
     """Return the session factory, creating it on first call."""
     global _SessionLocal

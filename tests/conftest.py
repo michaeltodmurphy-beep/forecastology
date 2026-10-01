@@ -1,8 +1,13 @@
 import os
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
+import nws.config
+import nws.db
 from app.config import AppConfig
+from app.models import Base
 
 
 _LEAKY_APP_CONFIG_ENV_VARS = (
@@ -101,3 +106,35 @@ def isolate_app_config_from_ambient_env(monkeypatch, request):
     for env_var in _LEAKY_APP_CONFIG_ENV_VARS:
         if os.environ.get(env_var) == _INITIAL_ENV_VALUES[env_var]:
             monkeypatch.delenv(env_var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def block_real_mysql_url(monkeypatch):
+    """Belt-and-braces: no test can ever resolve the production MySQL URL."""
+    monkeypatch.setenv("MYSQL_URL", "sqlite://")
+    monkeypatch.setenv("MYSQL_DATABASE_URL", "sqlite://")
+    monkeypatch.setattr(nws.config, "MYSQL_URL", "sqlite://")
+    # nws.db binds MYSQL_URL at import time; patch that reference too.
+    monkeypatch.setattr(nws.db, "MYSQL_URL", "sqlite://")
+
+
+@pytest.fixture(autouse=True)
+def sqlite_nws_db(block_real_mysql_url):
+    """Back ``nws.db.get_session()`` with a fresh in-memory SQLite DB per test.
+
+    ``StaticPool`` + ``check_same_thread=False`` share the single in-memory
+    database across connections and threads (the NWS scheduler runs in a
+    background thread).
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    nws.db.configure_engine(engine)
+    try:
+        yield engine
+    finally:
+        nws.db.reset_engine()
+        engine.dispose()
