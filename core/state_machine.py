@@ -2465,6 +2465,11 @@ class TemperatureStrategy:
             # book via adoption (periodic_reconciliation) or were restored on
             # restart as crossed_buy=True — the exact case that let
             # KXLOWTSATX-26SEP18-B76.5 be held against an active keyword.
+            #
+            # The decision comes ONLY from the once-per-day scheduler snapshot
+            # taken at AM_LOW_SNAPSHOT_LOCAL_HOUR local (write-once, governs the
+            # whole local day).  get_block() never fetches NWS: before that
+            # snapshot exists it returns (False, set()) → fail open / PASS.
             # ------------------------------------------------------------------
             am_low_forecast_blocked = False
             am_low_forecast_matched: set[str] = set()
