@@ -91,9 +91,15 @@ def _make_forecast_periods_local_low_before_noon(tz: ZoneInfo, local_date: datet
 
 
 def _make_forecast_periods_local_low_after_noon(tz: ZoneInfo, local_date: datetime.date) -> list:
-    """Return hourly periods where the day-min is at 14:00 (past noon deadline)."""
+    """Return hourly periods where the day-min is at 14:00 (past noon deadline).
+
+    Periods start at local midnight so the forecast covers the morning and the
+    decision is lockable (a forecast that only starts after the snapshot hour is
+    a partial-day view and fails open — see ``sunrise.am_low_partial_forecast_fail_open``).
+    """
     periods = []
-    temps = {6: 70.0, 7: 68.0, 8: 66.0, 9: 65.0, 10: 64.0, 11: 63.0, 12: 62.0, 13: 61.0, 14: 60.0, 15: 62.0}
+    temps = {0: 74.0, 1: 73.0, 2: 72.0, 3: 71.0, 4: 71.0, 5: 70.0,
+             6: 70.0, 7: 68.0, 8: 66.0, 9: 65.0, 10: 64.0, 11: 63.0, 12: 62.0, 13: 61.0, 14: 60.0, 15: 62.0}
     for hour, temp in temps.items():
         t = datetime.datetime(local_date.year, local_date.month, local_date.day, hour, 0, tzinfo=tz)
         periods.append({"startTime": t.isoformat(), "temperature": temp, "temperatureUnit": "F"})
@@ -396,7 +402,10 @@ def test_am_low_deadline_boundary_exact_hour_blocks(monkeypatch):
     # Build periods where min is at exactly hour=10
     t_min = datetime.datetime(local_date.year, local_date.month, local_date.day, deadline, 0, tzinfo=tz)
     t_other = datetime.datetime(local_date.year, local_date.month, local_date.day, 8, 0, tzinfo=tz)
+    # Start at local midnight so the forecast covers the morning (lockable).
+    t_early = datetime.datetime(local_date.year, local_date.month, local_date.day, 0, 0, tzinfo=tz)
     periods = [
+        {"startTime": t_early.isoformat(), "temperature": 72.0, "temperatureUnit": "F"},
         {"startTime": t_other.isoformat(), "temperature": 70.0, "temperatureUnit": "F"},
         {"startTime": t_min.isoformat(), "temperature": 60.0, "temperatureUnit": "F"},  # min at deadline
     ]

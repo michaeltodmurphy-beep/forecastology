@@ -1600,6 +1600,7 @@ class TemperatureStrategy:
                 sunrise_require_temp_rising=self.config.sunrise_require_temp_rising,
                 sunrise_source=self.config.sunrise_source,
                 sunrise_require_am_low=self.config.sunrise_require_am_low,
+                am_low_forecast_persisted=True,
                 nws_low_deadline_hour=self.config.nws_low_deadline_hour,
                 sunrise_temp_rise_required=self.config.sunrise_temp_rise_required,
                 sunrise_temp_baseline_minutes=self.config.sunrise_temp_baseline_minutes,
