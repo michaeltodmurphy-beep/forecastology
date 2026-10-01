@@ -1734,10 +1734,16 @@ def _env_hour(name: str, default: int) -> int:
 
 
 def am_low_forecast_enabled() -> bool:
-    """Return True when ``SUNRISE_REQUIRE_AM_LOW`` is truthy in the environment."""
+    """Return True when ``SUNRISE_REQUIRE_AM_LOW`` is enabled in the environment.
+
+    Uses the same yes/no parsing (and the same *enabled-by-default* semantics)
+    as ``AppConfig.from_env``, so the scheduler snapshot and the live gate can
+    never disagree about whether the check is active.
+    """
     import os
-    return (os.getenv("SUNRISE_REQUIRE_AM_LOW", "") or "").strip().lower() in (
-        "yes", "true", "1",
+    from app.config import _parse_trade_toggle
+    return _parse_trade_toggle(
+        os.getenv("SUNRISE_REQUIRE_AM_LOW"), "SUNRISE_REQUIRE_AM_LOW", default=True
     )
 
 
