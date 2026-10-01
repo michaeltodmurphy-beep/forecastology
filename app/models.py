@@ -329,3 +329,44 @@ class DailyForecastBlock(Base):
     # Raw daily brief forecast text (diagnostic only).
     forecast_text = Column(Text, nullable=True)
     fetched_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class DailyAmLowForecast(Base):
+    """Per-series daily AM-low *hourly forecast* decision (one row/day).
+
+    Stores whether the NWS hourly forecast minimum for a city-local calendar
+    date falls before ``NWS_LOW_DEADLINE_HOUR``.  The ``forecastHourly``
+    endpoint only returns *future* hours, so a process restarted after the
+    morning low has already occurred can no longer observe it; persisting the
+    snapshot taken at ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` makes the decision
+    restart-safe.
+
+    One row per (series_prefix, local_date).  Mirrors ``DailyForecastBlock``.
+    """
+
+    __tablename__ = "daily_am_low_forecast"
+    __table_args__ = (
+        UniqueConstraint(
+            "series_prefix", "local_date", name="uq_daily_am_low_forecast"
+        ),
+        Index("idx_dalf_series_prefix", "series_prefix"),
+    )
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    # Series prefix, e.g. "KXLOWTATL"
+    series_prefix = Column(String(50), nullable=False, index=True)
+    # City-local calendar date the forecast applies to.
+    local_date = Column(Date, nullable=False)
+    # True when the forecast day-min occurs before the deadline hour.
+    passed = Column(Boolean, nullable=False, default=False)
+    # The forecast minimum temperature (°F) for the local day.
+    forecast_min_temp_f = Column(Float, nullable=True)
+    # ISO-8601 local timestamp of the forecast minimum (diagnostic).
+    min_time_local = Column(String(64), nullable=True)
+    # Local hour at which the decision was evaluated (diagnostic).
+    evaluated_at_local_hour = Column(Integer, nullable=True)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now())

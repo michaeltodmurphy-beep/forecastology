@@ -12,12 +12,14 @@ from astral import Observer
 from astral.sun import sun
 
 from app.config import AppConfig
+from app.models import DailyAmLowForecast
 from core.local_time_gate import get_series_prefix, get_series_timezone
 from core.log_dedupe import DedupeLogger
 from core.station_coords import SERIES_STATION_COORDS
 from core.trade_outcome_utils import parse_bracket_kind
 from nws.awc_obs import ObsList, fetch_obs_with_fallback, note_obs_staleness
 from nws.client import NWSClient
+from nws.db import get_session
 
 try:
     from zoneinfo import ZoneInfo
@@ -59,6 +61,135 @@ def _bracket_line_int(bracket_temp_f: float) -> int:
     effective integer boundary is therefore `floor(line)`: 70.5 -> 70.
     """
     return int(math.floor(bracket_temp_f))
+
+
+def _scan_day_min(
+    periods, local_date: datetime.date, tz: ZoneInfo
+) -> tuple[Optional[float], Optional[datetime.datetime], Optional[int]]:
+    """Return ``(min_temp_f, min_time_local, first_period_local_hour)``.
+
+    Only hourly periods whose local timestamp falls inside *local_date* are
+    considered.  ``first_period_local_hour`` is the local hour of the EARLIEST
+    period on that date; it tells the caller whether the fetched forecast still
+    covered the morning (the NWS ``forecastHourly`` endpoint only returns future
+    hours, so a late fetch yields a partial-day view).
+    """
+    day_start_local = datetime.datetime.combine(local_date, datetime.time.min, tzinfo=tz)
+    day_end_local = day_start_local + datetime.timedelta(days=1)
+
+    min_temp_f: Optional[float] = None
+    min_time_local: Optional[datetime.datetime] = None
+    first_local: Optional[datetime.datetime] = None
+
+    for period in periods or []:
+        if not isinstance(period, dict):
+            continue
+        start_str = period.get("startTime")
+        temp_raw = period.get("temperature")
+        temp_unit = period.get("temperatureUnit", "F")
+        if start_str is None or temp_raw is None:
+            continue
+        try:
+            t_dt = datetime.datetime.fromisoformat(str(start_str))
+            if t_dt.tzinfo is None:
+                t_dt = t_dt.replace(tzinfo=datetime.timezone.utc)
+            t_local = t_dt.astimezone(tz)
+        except ValueError:
+            continue
+        if not (day_start_local <= t_local < day_end_local):
+            continue
+        try:
+            temp_f = float(temp_raw)
+            if temp_unit == "C":
+                temp_f = _c_to_f(temp_f)
+        except (TypeError, ValueError):
+            continue
+        if first_local is None or t_local < first_local:
+            first_local = t_local
+        if min_temp_f is None or temp_f < min_temp_f:
+            min_temp_f = temp_f
+            min_time_local = t_local
+
+    return min_temp_f, min_time_local, (first_local.hour if first_local else None)
+
+
+# ---------------------------------------------------------------------------
+# AM-low forecast decision persistence (restart-safety)
+# ---------------------------------------------------------------------------
+
+def _stored_am_low_row(
+    series: str, local_date: datetime.date
+) -> Optional[tuple[bool, Optional[float], Optional[str]]]:
+    """Return the stored ``(passed, min_temp_f, min_time_local)`` row, or None.
+
+    Best-effort: any DB failure degrades to "no stored row" and never raises
+    into the gate.  Scalar attributes are read inside the session so the ORM
+    object is never used while detached.
+    """
+    try:
+        with get_session() as session:
+            row = (
+                session.query(DailyAmLowForecast)
+                .filter(
+                    DailyAmLowForecast.series_prefix == series,
+                    DailyAmLowForecast.local_date == local_date,
+                )
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            return (
+                bool(row.passed),
+                float(row.forecast_min_temp_f) if row.forecast_min_temp_f is not None else None,
+                str(row.min_time_local) if row.min_time_local else None,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("sunrise.am_low_db_read_failed", series=series, error=str(exc))
+        return None
+
+
+def _upsert_am_low_row(
+    series: str,
+    local_date: datetime.date,
+    *,
+    passed: bool,
+    min_temp_f: Optional[float],
+    min_time_iso: Optional[str],
+    evaluated_at_local_hour: Optional[int],
+) -> None:
+    """Persist the AM-low forecast decision (best-effort; never raises)."""
+    try:
+        with get_session() as session:
+            row = (
+                session.query(DailyAmLowForecast)
+                .filter(
+                    DailyAmLowForecast.series_prefix == series,
+                    DailyAmLowForecast.local_date == local_date,
+                )
+                .one_or_none()
+            )
+            if row is None:
+                row = DailyAmLowForecast(
+                    series_prefix=series,
+                    local_date=local_date,
+                    passed=passed,
+                    forecast_min_temp_f=min_temp_f,
+                    min_time_local=min_time_iso,
+                    evaluated_at_local_hour=evaluated_at_local_hour,
+                )
+                session.add(row)
+            else:
+                row.passed = passed
+                row.forecast_min_temp_f = min_temp_f
+                row.min_time_local = min_time_iso
+                row.evaluated_at_local_hour = evaluated_at_local_hour
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sunrise.am_low_persist_failed",
+            series=series,
+            local_date=local_date.isoformat(),
+            error=str(exc),
+        )
 
 
 @dataclass(frozen=True)
@@ -718,6 +849,42 @@ class SunriseEntryGate:
                 )
                 return passed
 
+        # Restart-safety: the NWS hourly endpoint only returns FUTURE hours, so a
+        # process (re)started after the morning low already happened can no longer
+        # see it.  Read the persisted snapshot for this local day first.
+        snapshot_hour = self._am_low_snapshot_hour()
+        stored = _stored_am_low_row(series, local_date)
+        if stored is not None:
+            stored_passed, stored_min_temp_f, stored_min_time_iso = stored
+            self._am_low_cache[cache_key] = (
+                True,
+                stored_passed,
+                stored_min_temp_f,
+                stored_min_time_iso,
+                now_mono,
+            )
+            logger.info(
+                "sunrise.am_low_check",
+                series=series,
+                forecast_min_temp_f=stored_min_temp_f,
+                min_time_local=stored_min_time_iso,
+                deadline_hour=self.config.nws_low_deadline_hour,
+                passed=stored_passed,
+                cached=True,
+                locked=True,
+                source="db",
+            )
+            if not stored_passed:
+                logger.info(
+                    "sunrise.am_low_blocked",
+                    series=series,
+                    forecast_min_temp_f=stored_min_temp_f,
+                    min_time_local=stored_min_time_iso,
+                    deadline_hour=self.config.nws_low_deadline_hour,
+                    source="db",
+                )
+            return stored_passed
+
         try:
             _lat, _lon, hourly_url, _tz_name = self.nws_client._get_station_metadata(station_id)  # noqa: SLF001
         except Exception as exc:  # noqa: BLE001
@@ -747,36 +914,9 @@ class SunriseEntryGate:
             return False
 
         # Find the minimum temperature period within the LOCAL calendar day
-        day_start_local = datetime.datetime.combine(local_date, datetime.time.min, tzinfo=tz)
-        day_end_local = day_start_local + datetime.timedelta(days=1)
-
-        min_temp_f: Optional[float] = None
-        min_time_local: Optional[datetime.datetime] = None
-
-        for period in periods:
-            start_str = period.get("startTime")
-            temp_raw = period.get("temperature")
-            temp_unit = period.get("temperatureUnit", "F")
-            if start_str is None or temp_raw is None:
-                continue
-            try:
-                t_dt = datetime.datetime.fromisoformat(str(start_str))
-                if t_dt.tzinfo is None:
-                    t_dt = t_dt.replace(tzinfo=datetime.timezone.utc)
-                t_local = t_dt.astimezone(tz)
-            except ValueError:
-                continue
-            if not (day_start_local <= t_local < day_end_local):
-                continue
-            try:
-                temp_f = float(temp_raw)
-                if temp_unit == "C":
-                    temp_f = _c_to_f(temp_f)
-            except (TypeError, ValueError):
-                continue
-            if min_temp_f is None or temp_f < min_temp_f:
-                min_temp_f = temp_f
-                min_time_local = t_local
+        min_temp_f, min_time_local, first_period_local_hour = _scan_day_min(
+            periods, local_date, tz
+        )
 
         if min_temp_f is None or min_time_local is None:
             logger.warning(
@@ -793,6 +933,16 @@ class SunriseEntryGate:
         min_time_iso = min_time_local.isoformat()
         passed = min_time_local.hour < deadline_hour
 
+        # The hourly endpoint only returns FUTURE hours.  A decision may only be
+        # trusted (and locked/persisted) when the fetched forecast actually covered
+        # the morning, i.e. its earliest period for this local date is at/before the
+        # snapshot hour.  Otherwise it is a partial-day view that cannot prove the
+        # morning low happened late.
+        lockable = (
+            first_period_local_hour is not None
+            and first_period_local_hour <= snapshot_hour
+        )
+
         logger.info(
             "sunrise.am_low_check",
             series=series,
@@ -801,7 +951,30 @@ class SunriseEntryGate:
             deadline_hour=deadline_hour,
             passed=passed,
             cached=False,
+            first_period_local_hour=first_period_local_hour,
+            lockable=lockable,
         )
+
+        if not lockable:
+            if not passed:
+                logger.info(
+                    "sunrise.am_low_partial_forecast_fail_open",
+                    series=series,
+                    first_period_local_hour=first_period_local_hour,
+                    forecast_min_temp_f=round(min_temp_f, 1),
+                    min_time_local=min_time_iso,
+                )
+            # Never lock and never persist a partial-forecast decision; keep it on
+            # the normal TTL so it is re-checked.
+            self._am_low_cache[cache_key] = (
+                False,
+                True,
+                round(min_temp_f, 1),
+                min_time_iso,
+                now_mono,
+            )
+            return True
+
         if not passed:
             logger.info(
                 "sunrise.am_low_blocked",
@@ -815,12 +988,16 @@ class SunriseEntryGate:
         # or past the configured snapshot hour (default 03:00). Before that, store
         # it as a mutable provisional (still TTL-guarded) so the overnight window
         # is not left blind, but it will be recomputed and frozen at the snapshot.
-        _raw = getattr(self.config, "am_low_snapshot_local_hour", "03:00") or "03:00"
-        try:
-            snapshot_hour = int(str(_raw).strip().split(":")[0])
-        except (ValueError, TypeError, IndexError):
-            snapshot_hour = 3
         lock_for_day = now_local.hour >= snapshot_hour
+        if lock_for_day:
+            _upsert_am_low_row(
+                series,
+                local_date,
+                passed=passed,
+                min_temp_f=round(min_temp_f, 1),
+                min_time_iso=min_time_iso,
+                evaluated_at_local_hour=now_local.hour,
+            )
         self._am_low_cache[cache_key] = (
             lock_for_day,
             passed,
@@ -829,6 +1006,14 @@ class SunriseEntryGate:
             now_mono,
         )
         return passed
+
+    def _am_low_snapshot_hour(self) -> int:
+        """Return ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` as an int (0-23)."""
+        _raw = getattr(self.config, "am_low_snapshot_local_hour", "03:00") or "03:00"
+        try:
+            return int(str(_raw).strip().split(":")[0])
+        except (ValueError, TypeError, IndexError):
+            return 3
 
     # ------------------------------------------------------------------
     # Temperature rise-from-baseline latch
@@ -1523,3 +1708,110 @@ class SunriseEntryGate:
                 offset_f=offset_f,
             )
         return ctx["blocked"], ctx
+
+
+# ---------------------------------------------------------------------------
+# Standalone AM-low forecast snapshot (used by the background scheduler)
+# ---------------------------------------------------------------------------
+
+def _env_int(name: str, default: int) -> int:
+    """Return an int env var (``HH`` or ``HH:MM``), falling back to *default*."""
+    import os
+    raw = os.getenv(name, "") or ""
+    try:
+        value = int(str(raw).strip().split(":")[0])
+    except (ValueError, IndexError, TypeError, AttributeError):
+        return default
+    return value if 0 <= value <= 23 else default
+
+
+def am_low_forecast_enabled() -> bool:
+    """Return True when ``SUNRISE_REQUIRE_AM_LOW`` is truthy in the environment."""
+    import os
+    return (os.getenv("SUNRISE_REQUIRE_AM_LOW", "") or "").strip().lower() in (
+        "yes", "true", "1",
+    )
+
+
+def snapshot_am_low_forecast(
+    series: str, nws_client: Optional[NWSClient] = None
+) -> bool:
+    """Evaluate + persist today's AM-low forecast decision for *series*.
+
+    Used by the APScheduler job that fires at each city's local
+    ``AM_LOW_SNAPSHOT_LOCAL_HOUR``, so the decision is taken while the NWS
+    hourly forecast still covers the morning and survives process restarts.
+    Reads config from the environment (no full ``AppConfig``), mirroring
+    ``nws.daily_brief.snapshot_city``.
+
+    Returns True on success, False on any failure.
+    """
+    coords = SERIES_STATION_COORDS.get(series)
+    if coords is None:
+        return False
+    station_id = coords[0]
+    tz_name = get_series_timezone(series)
+    if tz_name is None:
+        return False
+    tz = ZoneInfo(tz_name)
+
+    client = nws_client or NWSClient()
+    now_local = datetime.datetime.now(datetime.timezone.utc).astimezone(tz)
+    local_date = now_local.date()
+
+    try:
+        _lat, _lon, hourly_url, _tz_name = client._get_station_metadata(station_id)  # noqa: SLF001
+        periods = client._get_hourly_periods(hourly_url)  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sunrise.am_low_snapshot_failed",
+            series=series,
+            station=station_id,
+            error_class=type(exc).__name__,
+            error_message=str(exc),
+        )
+        return False
+
+    min_temp_f, min_time_local, first_period_local_hour = _scan_day_min(
+        periods, local_date, tz
+    )
+    if min_temp_f is None or min_time_local is None:
+        logger.warning(
+            "sunrise.am_low_snapshot_failed",
+            series=series,
+            station=station_id,
+            reason="no_periods_for_local_date",
+            local_date=local_date.isoformat(),
+        )
+        return False
+
+    deadline_hour = _env_int("NWS_LOW_DEADLINE_HOUR", 12)
+    snapshot_hour = _env_int("AM_LOW_SNAPSHOT_LOCAL_HOUR", 3)
+    passed = min_time_local.hour < deadline_hour
+    if first_period_local_hour is None or first_period_local_hour > snapshot_hour:
+        logger.info(
+            "sunrise.am_low_snapshot_partial_forecast",
+            series=series,
+            first_period_local_hour=first_period_local_hour,
+            min_time_local=min_time_local.isoformat(),
+        )
+        return False
+
+    _upsert_am_low_row(
+        series,
+        local_date,
+        passed=passed,
+        min_temp_f=round(min_temp_f, 1),
+        min_time_iso=min_time_local.isoformat(),
+        evaluated_at_local_hour=now_local.hour,
+    )
+    logger.info(
+        "sunrise.am_low_snapshot",
+        series=series,
+        local_date=local_date.isoformat(),
+        passed=passed,
+        forecast_min_temp_f=round(min_temp_f, 1),
+        min_time_local=min_time_local.isoformat(),
+        deadline_hour=deadline_hour,
+    )
+    return True

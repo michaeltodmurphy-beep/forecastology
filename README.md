@@ -732,6 +732,68 @@ Unique index on `(station_code, forecast_date_utc)` with upsert semantics.
 (for non-`KPHX`, local `00:00`–`00:59:59` still maps to the prior trading day),
 so it may differ from the UTC calendar date when the updater runs near rollovers.
 
+### Sunrise gate — AM-low forecast decision (restart-safe)
+
+When `SUNRISE_REQUIRE_AM_LOW=yes`, `SunriseEntryGate` decides once per
+`(series, local_date)` whether the NWS **hourly** forecast minimum for the city
+occurs before `NWS_LOW_DEADLINE_HOUR` (default `12` local). That decision is
+locked for the rest of the local day at/after `AM_LOW_SNAPSHOT_LOCAL_HOUR`.
+
+**Restart safety.** The NWS `forecastHourly` endpoint only returns **future**
+hours. A process restarted after the morning low has already happened would
+otherwise see only the remaining hours, find the minimum in the evening and
+block the city for the rest of the day. Two mechanisms prevent this:
+
+1. **Persistence.** Lockable decisions are written to the `daily_am_low_forecast`
+   table (one row per `(series_prefix, local_date)`), and are read back *before*
+   any NWS fetch on a fresh process. A restored decision logs
+   `sunrise.am_low_check cached=True locked=True source=db`. Storage is
+   best-effort: a DB failure never raises into the gate (it simply re-evaluates).
+   The background scheduler registers one `am_low_forecast_<SERIES>` job per
+   KXLOW series that fires at that city's local `AM_LOW_SNAPSHOT_LOCAL_HOUR` and
+   writes the row while the forecast still covers the morning.
+2. **Partial-forecast fail-open.** A decision is only *lockable* when the
+   earliest fetched hourly period for the local date is at/before
+   `AM_LOW_SNAPSHOT_LOCAL_HOUR` — i.e. the fetched forecast actually covered the
+   morning. A post-morning (partial) forecast cannot prove the morning low
+   happened late, so if it would block, the gate instead logs
+   `sunrise.am_low_partial_forecast_fail_open` and **returns open**. Such
+   decisions are cached on the normal 30-minute TTL and never persisted.
+
+Startup logs `strategy.sunrise_gate_config ... am_low_forecast_persisted=True`.
+
+#### daily_am_low_forecast Table
+
+| Column | Type | Description |
+|---|---|---|
+| `series_prefix` | VARCHAR(50) | Series prefix, e.g. `KXLOWTSATX` |
+| `local_date` | DATE | City-local calendar date the decision applies to |
+| `passed` | BOOLEAN | True when the forecast day-min is before the deadline hour |
+| `forecast_min_temp_f` | FLOAT | Forecast minimum temperature (°F) |
+| `min_time_local` | VARCHAR(64) | ISO-8601 local timestamp of the forecast minimum |
+| `evaluated_at_local_hour` | INT | Local hour at which the decision was taken |
+| `fetched_at` | DATETIME | Row write timestamp (server default `NOW()`) |
+
+**Migration note.** As with `daily_forecast_block`, the table is created by
+`Base.metadata.create_all()` in `nws.db.init_nws_db()` at startup, so no manual
+step is required. To create it by hand:
+
+```sql
+CREATE TABLE IF NOT EXISTS daily_am_low_forecast (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  series_prefix VARCHAR(50) NOT NULL,
+  local_date DATE NOT NULL,
+  passed BOOLEAN NOT NULL DEFAULT 0,
+  forecast_min_temp_f FLOAT NULL,
+  min_time_local VARCHAR(64) NULL,
+  evaluated_at_local_hour INT NULL,
+  fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_daily_am_low_forecast (series_prefix, local_date),
+  KEY idx_dalf_series_prefix (series_prefix)
+);
+```
+
 ---
 
 ## Trade Outcome Tracking & City P&L Analysis

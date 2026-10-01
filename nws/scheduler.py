@@ -174,7 +174,9 @@ def start_scheduler() -> None:
         jid
         for jid in registered_ids
         if not (
-            jid == _PREFIX_ALLOWED[0] or jid.startswith("daily_brief_")
+            jid == _PREFIX_ALLOWED[0]
+            or jid.startswith("daily_brief_")
+            or jid.startswith("am_low_forecast_")
         )
     }
     if unexpected:  # pragma: no cover
@@ -277,6 +279,75 @@ def _run_daily_brief_snapshot(series: str, city: str, lat: float, lon: float) ->
     snapshot_city(series=series, city=city, lat=lat, lon=lon)
 
 
+# ---------------------------------------------------------------------------
+# AM-low hourly-forecast snapshot scheduler
+# ---------------------------------------------------------------------------
+
+def _am_low_forecast_enabled() -> bool:
+    """Return True when ``SUNRISE_REQUIRE_AM_LOW`` is truthy in the env."""
+    import os
+    return (os.getenv("SUNRISE_REQUIRE_AM_LOW", "") or "").strip().lower() in (
+        "yes", "true", "1",
+    )
+
+
+def schedule_am_low_forecast_jobs() -> None:
+    """Register one-shot jobs that snapshot each KXLOW AM-low forecast decision.
+
+    The NWS ``forecastHourly`` endpoint only returns FUTURE hours, so the
+    decision must be taken (and persisted) while the morning is still ahead.
+    Each job fires at that city's local ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` and
+    writes the ``daily_am_low_forecast`` row that ``SunriseEntryGate`` reads
+    back after a restart.
+    """
+    global _scheduler
+    if _scheduler is None or not _scheduler.running:
+        logger.warning("nws.am_low_forecast.scheduler_not_running")
+        return
+    if not _am_low_forecast_enabled():
+        logger.info("nws.am_low_forecast.disabled")
+        return
+
+    from core.station_coords import SERIES_STATION_COORDS
+
+    now_utc = datetime.now(timezone.utc)
+
+    for series in SERIES_STATION_COORDS:
+        try:
+            from core.local_time_gate import SERIES_TIMEZONE
+            tz_name = SERIES_TIMEZONE.get(series)
+        except Exception:  # noqa: BLE001
+            tz_name = None
+        if tz_name is None:
+            logger.warning("nws.am_low_forecast.no_tz series=%s", series)
+            continue
+
+        run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
+        _scheduler.add_job(
+            _run_am_low_forecast_snapshot,
+            trigger="date",
+            run_date=run_at,
+            args=[series],
+            id=f"am_low_forecast_{series}",
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+        logger.info(
+            "nws.am_low_forecast.scheduled series=%s local=%s run_utc=%s",
+            series, tz_name, run_at.isoformat(),
+        )
+
+
+def _run_am_low_forecast_snapshot(series: str) -> None:
+    """APScheduler job entry: evaluate + persist the AM-low forecast decision."""
+    try:
+        from core.sunrise_gate import snapshot_am_low_forecast
+        snapshot_am_low_forecast(series)
+    except Exception:  # noqa: BLE001
+        logger.exception("nws.am_low_forecast.snapshot_error series=%s", series)
+
+
 def shutdown() -> None:
     """Stop the background scheduler gracefully."""
     global _scheduler
@@ -296,9 +367,11 @@ def bootstrap() -> None:
     before the main trading loop begins, so that gate data is available from
     the first second of operation.
 
-    Also schedules the per-city daily-brief keyword-gate snapshot jobs.
+    Also schedules the per-city daily-brief keyword-gate snapshot jobs and the
+    per-series AM-low hourly-forecast snapshot jobs.
     """
     init_nws_db()
     run_forecast_update_job()
     start_scheduler()
     schedule_daily_brief_jobs()
+    schedule_am_low_forecast_jobs()
