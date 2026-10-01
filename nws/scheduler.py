@@ -212,19 +212,59 @@ def _next_local_hour_utc(tz_name: str, hour: int, now_utc: datetime) -> datetime
     return candidate.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
 
 
-def schedule_daily_brief_jobs() -> None:
-    """Register one-shot jobs that pull each city's NWS daily brief once per day.
+def _schedule_daily_brief_job(
+    series: str,
+    city: str,
+    lat: float,
+    lon: float,
+    tz_name: str,
+    now_utc: datetime,
+) -> None:
+    """(Re)register the one-shot daily-brief snapshot job for *series*."""
+    run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
+    _scheduler.add_job(
+        _run_daily_brief_snapshot,
+        trigger="date",
+        run_date=run_at,
+        args=[series, city, lat, lon],
+        id=f"daily_brief_{series}",
+        replace_existing=True,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "nws.daily_brief.scheduled series=%s city=%s local=%s run_utc=%s",
+        series, city, tz_name, run_at.isoformat(),
+    )
 
-    Each job fires at that city's local ``AM_LOW_SNAPSHOT_LOCAL_HOUR``.  The
-    ``DailyBriefGate`` is independently restart-safe (lazy fetch on first query),
-    so a missed schedule never leaves trading blind.
+
+def _daily_brief_series_tz(series: str) -> Optional[str]:
+    """Return the IANA timezone name for a daily-brief series, or None."""
+    try:
+        from core.local_time_gate import SERIES_TIMEZONE
+        return SERIES_TIMEZONE.get(series)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def schedule_daily_brief_jobs() -> None:
+    """Register the per-city daily-brief keyword snapshot jobs.
+
+    Each job fires at that city's local ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` and
+    re-registers itself for the next day.  The snapshot is the ONLY writer of
+    the day's decision (``DailyBriefGate.get_block`` never fetches).  When the
+    process starts after today's snapshot hour and no decision is stored yet,
+    a one-time catch-up snapshot is run immediately.
     """
     global _scheduler
     if _scheduler is None or not _scheduler.running:
         logger.warning("nws.daily_brief.scheduler_not_running")
         return
 
+    from nws.daily_brief import snapshot_city, snapshot_exists
+
     now_utc = datetime.now(timezone.utc)
+    snapshot_hour = _snapshot_hour_int()
 
     for series, city in SERIES_CITY.items():
         coords = CITY_COORDS.get(city)
@@ -233,33 +273,33 @@ def schedule_daily_brief_jobs() -> None:
                 "nws.daily_brief.no_coords series=%s city=%s", series, city
             )
             continue
-        # Resolve the timezone via core.local_time_gate.SERIES_TIMEZONE.
-        try:
-            from core.local_time_gate import SERIES_TIMEZONE
-            tz_name = SERIES_TIMEZONE.get(series)
-        except Exception:  # noqa: BLE001
-            tz_name = None
+        tz_name = _daily_brief_series_tz(series)
         if tz_name is None:
             logger.warning(
                 "nws.daily_brief.no_tz series=%s city=%s", series, city
             )
             continue
 
-        run_at = _next_local_hour_utc(tz_name, _snapshot_hour_int(), now_utc)
-        _scheduler.add_job(
-            _run_daily_brief_snapshot,
-            trigger="date",
-            run_date=run_at,
-            args=[series, city, coords[0], coords[1]],
-            id=f"daily_brief_{series}",
-            replace_existing=True,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
-        logger.info(
-            "nws.daily_brief.scheduled series=%s city=%s local=%s run_utc=%s",
-            series, city, tz_name, run_at.isoformat(),
-        )
+        _schedule_daily_brief_job(series, city, coords[0], coords[1], tz_name, now_utc)
+
+        now_local = now_utc.astimezone(ZoneInfo(tz_name))
+        if now_local.hour >= snapshot_hour and not snapshot_exists(
+            series, now_local.date()
+        ):
+            _scheduler.add_job(
+                snapshot_city,
+                trigger="date",
+                run_date=now_utc,
+                kwargs={"series": series, "city": city, "lat": coords[0], "lon": coords[1]},
+                id=f"daily_brief_catchup_{series}",
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+            logger.info(
+                "nws.daily_brief.catchup_scheduled series=%s city=%s local_date=%s",
+                series, city, now_local.date().isoformat(),
+            )
 
 
 def _snapshot_hour_int() -> int:
@@ -274,9 +314,26 @@ def _snapshot_hour_int() -> int:
 
 
 def _run_daily_brief_snapshot(series: str, city: str, lat: float, lon: float) -> None:
-    """APScheduler job entry: fetch + persist the daily brief for a city."""
-    from nws.daily_brief import snapshot_city
-    snapshot_city(series=series, city=city, lat=lat, lon=lon)
+    """APScheduler job entry: fetch + persist the daily brief for a city.
+
+    Re-registers itself for the next local snapshot hour so the one-shot job
+    keeps running for the lifetime of the process.
+    """
+    try:
+        from nws.daily_brief import snapshot_city
+        snapshot_city(series=series, city=city, lat=lat, lon=lon)
+    except Exception:  # noqa: BLE001
+        logger.exception("nws.daily_brief.snapshot_error series=%s", series)
+
+    tz_name = _daily_brief_series_tz(series)
+    if tz_name is None or _scheduler is None or not _scheduler.running:
+        return
+    try:
+        _schedule_daily_brief_job(
+            series, city, lat, lon, tz_name, datetime.now(timezone.utc)
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("nws.daily_brief.reschedule_error series=%s", series)
 
 
 # ---------------------------------------------------------------------------

@@ -732,6 +732,32 @@ Unique index on `(station_code, forecast_date_utc)` with upsert semantics.
 (for non-`KPHX`, local `00:00`–`00:59:59` still maps to the prior trading day),
 so it may differ from the UTC calendar date when the updater runs near rollovers.
 
+### AM-low daily-brief keyword gate (`AM_LOW_FORECAST`)
+
+When `AM_LOW_FORECAST=keyword1,keyword2,...` is set, KXLOW* entries/adds for a
+city are blocked for the local day if that city's NWS **daily brief** forecast
+matches ANY keyword (case-insensitive substring).
+
+* **One snapshot per city per day.** The background scheduler registers one
+  `daily_brief_<SERIES>` job per KXLOW series that fires at that city's local
+  `AM_LOW_SNAPSHOT_LOCAL_HOUR` (default `03:00`), fetches the daily brief,
+  matches keywords and persists the decision to `daily_forecast_block`. Each
+  run re-registers itself for the next day.
+* **Today's low-relevant periods only.** Only periods that start on today's
+  local date **before** `NWS_LOW_DEADLINE_HOUR` (default `12`) are scanned —
+  i.e. *Overnight* and *Today*. The *Tonight* period (which describes
+  tomorrow's low) is excluded.
+* **Write-once.** The stored decision governs the whole local day. Nothing
+  else fetches or rewrites it; a later snapshot for the same day logs
+  `nws.daily_brief.snapshot_exists` and does nothing.
+* **Fail open before the snapshot.** `DailyBriefGate.get_block()` never calls
+  NWS; it only reads the stored row. With no row yet (before the snapshot hour,
+  or if the snapshot fetch failed) it allows trading and logs
+  `am_low_brief.no_snapshot_yet` once per series/day.
+* **Restart catch-up.** If the process starts after today's snapshot hour and
+  no row exists for today, a one-time `daily_brief_catchup_<SERIES>` snapshot
+  runs immediately (`nws.daily_brief.catchup_scheduled`).
+
 ### Sunrise gate — AM-low forecast decision (restart-safe)
 
 When `SUNRISE_REQUIRE_AM_LOW=yes`, `SunriseEntryGate` decides once per

@@ -10,10 +10,15 @@ Key behaviours
 --------------
 * Cities are resolved by **lat/lon** (city-centre coordinates), not ICAO codes.
 * Matching is **case-insensitive** substring match; **ANY** match gates the series.
-* The decision is snapshotted **once per city-local date** and locked in for the rest
-  of the day at/after ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` (mirrors ``sunrise_gate``), stored
-  in the ``daily_forecast_block`` table so it survives process restarts.
-* On fetch/API failure the gate **fails open** (does not block trading) and logs loudly.
+* The decision is taken **once per city-local date** by the scheduler snapshot
+  (:func:`snapshot_city`) at ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` local and stored in the
+  ``daily_forecast_block`` table.  It is **write-once**: nothing re-fetches or
+  rewrites it for the rest of that local day (except ``force=True`` manual re-runs).
+* Only periods that start on today's local date **before** ``NWS_LOW_DEADLINE_HOUR``
+  are scanned, so the "Tonight" period (tomorrow morning's weather) is excluded.
+* :meth:`DailyBriefGate.get_block` never calls NWS — it only reads the stored
+  decision.  Before the snapshot exists (or on fetch/API failure) the gate
+  **fails open** (does not block trading) and logs loudly.
 """
 from __future__ import annotations
 
@@ -132,14 +137,16 @@ def _fetch_daily_brief_text(
     lon: float,
     tz_name: str,
     now_utc: datetime.datetime,
+    deadline_hour: int = 12,
 ) -> str:
     """Fetch the NWS daily brief forecast text for *lat*/*lon* for *today*.
 
     Uses the **daily** (non-hourly) ``/forecast`` grid endpoint.  Only periods
-    whose local (city-timezone) date matches *now_utc*'s local date are included,
-    so the gate checks the **current calendar day only** — not the rest of the
-    multi-day forecast array.  Raises on any HTTP/model failure so the caller can
-    fail open.
+    whose local (city-timezone) start falls on *now_utc*'s local date **and**
+    before *deadline_hour* local are included.  This keeps the low-relevant
+    *Overnight* (~00:00) and *Today* (~06:00) periods and drops *Tonight*
+    (~18:00), which describes **tomorrow** morning's weather.  Raises on any
+    HTTP/model failure so the caller can fail open.
     """
     points = nws_client._get_json(  # noqa: SLF001
         f"https://api.weather.gov/points/{round(float(lat), 4):.4f},{round(float(lon), 4):.4f}"
@@ -165,8 +172,8 @@ def _fetch_daily_brief_text(
             period_local = start_dt.astimezone(tz)
         except Exception:  # noqa: BLE001
             continue
-        # Only include periods that fall within the current local calendar day.
-        if period_local.date() != today_date:
+        # Only include today's periods that start before the low deadline hour.
+        if period_local.date() != today_date or period_local.hour >= deadline_hour:
             continue
         text = p.get("detailedForecast") or p.get("shortForecast") or ""
         if text:
@@ -188,6 +195,8 @@ class DailyBriefGate:
         self.nws_client = nws_client or NWSClient()
         # (series, local_date) -> (locked, blocked, matched_keywords, cached_at)
         self._cache: dict[Tuple[str, datetime.date], Tuple[bool, bool, set[str], float]] = {}
+        # (series, local_date) keys for which ``no_snapshot_yet`` was already logged.
+        self._no_snapshot_logged: set[Tuple[str, datetime.date]] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -198,8 +207,11 @@ class DailyBriefGate:
     ) -> Tuple[bool, set[str]]:
         """Return ``(blocked, matched_keywords)`` for *series* for its local day.
 
-        *blocked* is True when the day's brief forecast contains any configured
-        keyword.  On fetch failure it fails open → ``(False, set())``.
+        Reads ONLY the decision persisted by the scheduler snapshot
+        (:func:`snapshot_city`); never calls NWS.  *blocked* is True when that
+        snapshot matched any configured keyword.  When no snapshot exists yet
+        for the local day the gate fails open → ``(False, set())`` and the DB
+        is re-polled after the cache TTL.
         """
         keywords = self.config.am_low_forecast_keywords or None
         if not keywords:
@@ -207,13 +219,6 @@ class DailyBriefGate:
 
         city = SERIES_CITY.get(series)
         if city is None:
-            return False, set()
-        coords = CITY_COORDS.get(city)
-        if coords is None:
-            logger.warning(
-                "am_low_brief.no_coords", series=series, city=city,
-                message="No lat/lon for city — failing open",
-            )
             return False, set()
 
         if now_utc is None:
@@ -224,8 +229,7 @@ class DailyBriefGate:
         if tz_name is None:
             return False, set()
         tz = ZoneInfo(tz_name)
-        now_local = now_utc.astimezone(tz)
-        local_date = now_local.date()
+        local_date = now_utc.astimezone(tz).date()
 
         cache_key = (series, local_date)
         now_mono = time.monotonic()
@@ -239,42 +243,30 @@ class DailyBriefGate:
                 )
                 return _blocked, set(_matched)
 
-        # Try a stored DB row first (restart-safe, avoids double pull).
+        # The snapshot row is the single source of truth for the local day.
         stored = self._stored_row(series, local_date)
         if stored is not None:
             blocked, matched_keywords = stored
             matched = self._parse_matched(matched_keywords)
-            lock_for_day = now_local.hour >= _snapshot_hour(self.config)
-            self._cache[cache_key] = (lock_for_day, blocked, matched, now_mono)
+            self._cache[cache_key] = (True, blocked, matched, now_mono)
+            logger.info(
+                "am_low_brief.evaluated", series=series, city=city,
+                local_date=local_date.isoformat(), blocked=blocked,
+                matched=sorted(matched), locked=True, source="db",
+            )
             return blocked, matched
 
-        # Otherwise fetch (lazy / scheduled path) and persist.
-        lat, lon = coords
-        try:
-            text = _fetch_daily_brief_text(
-                self.nws_client, lat, lon, tz_name=tz_name, now_utc=now_utc
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "am_low_brief.fetch_failed", series=series, city=city,
+        # No snapshot yet → fail open; re-poll the DB after the TTL.
+        self._cache[cache_key] = (False, False, set(), now_mono)
+        if cache_key not in self._no_snapshot_logged:
+            self._no_snapshot_logged.add(cache_key)
+            logger.info(
+                "am_low_brief.no_snapshot_yet", series=series,
                 local_date=local_date.isoformat(),
-                error_class=type(exc).__name__, error_message=str(exc),
-                message="Failing open on AM-low daily brief fetch failure",
+                snapshot_hour=_snapshot_hour(self.config),
+                message="No daily-brief snapshot for today yet — failing open",
             )
-            self._cache[cache_key] = (False, False, set(), now_mono)
-            return False, set()
-
-        matched = matches_any_keyword(text, keywords)
-        blocked = bool(matched)
-        lock_for_day = now_local.hour >= _snapshot_hour(self.config)
-        self._upsert(series, local_date, blocked, matched, text)
-        self._cache[cache_key] = (lock_for_day, blocked, matched, now_mono)
-        logger.info(
-            "am_low_brief.evaluated", series=series, city=city,
-            local_date=local_date.isoformat(), blocked=blocked,
-            matched=sorted(matched), locked=lock_for_day,
-        )
-        return blocked, matched
+        return False, set()
 
     # ------------------------------------------------------------------
     # Timezone helper
@@ -353,6 +345,7 @@ class DailyBriefGate:
                     row.blocked = blocked
                     row.matched_keywords = matched_str
                     row.forecast_text = text
+                    row.fetched_at = datetime.datetime.now(datetime.timezone.utc)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "am_low_brief.persist_failed", series=series,
@@ -391,12 +384,44 @@ def _snapshot_hour_from_env() -> int:
         return 3
 
 
-def snapshot_city(series: str, city: str, lat: float, lon: float) -> bool:
+def _deadline_hour_from_env() -> int:
+    """Return ``NWS_LOW_DEADLINE_HOUR`` (int 0–23) from the env (default 12)."""
+    import os
+    raw = os.getenv("NWS_LOW_DEADLINE_HOUR", "") or ""
+    try:
+        hh = int(str(raw).strip().split(":")[0])
+        return hh if 0 <= hh <= 23 else 12
+    except (ValueError, IndexError, TypeError, AttributeError):
+        return 12
+
+
+def _new_snapshot_gate() -> DailyBriefGate:
+    """Build a config-less :class:`DailyBriefGate` for storage helpers."""
+    gate = DailyBriefGate.__new__(DailyBriefGate)  # noqa: SLF001
+    gate.config = None
+    gate.nws_client = None
+    gate._cache = {}  # noqa: SLF001
+    gate._no_snapshot_logged = set()  # noqa: SLF001
+    return gate
+
+
+def snapshot_exists(series: str, local_date: datetime.date) -> bool:
+    """Return True when a daily-brief decision is already stored for the day."""
+    return _new_snapshot_gate()._stored_row(series, local_date) is not None  # noqa: SLF001
+
+
+def snapshot_city(
+    series: str, city: str, lat: float, lon: float, force: bool = False
+) -> bool:
     """Fetch + persist the daily-brief keyword decision for *city* for today.
 
-    Prepared for use by APScheduler background jobs.  Reads ``AM_LOW_FORECAST``
-    from the environment (so no full ``AppConfig`` is required) and writes to
-    the ``daily_forecast_block`` table via :meth:`DailyBriefGate._upsert`.
+    Used by the APScheduler background jobs.  Reads ``AM_LOW_FORECAST`` and
+    ``NWS_LOW_DEADLINE_HOUR`` from the environment (so no full ``AppConfig`` is
+    required) and writes to the ``daily_forecast_block`` table via
+    :meth:`DailyBriefGate._upsert`.
+
+    The decision is **write-once**: when a row already exists for today the
+    snapshot is skipped (no NWS call, no overwrite) unless *force* is True.
 
     Returns True on success, False on any failure (the gate fails open).
     """
@@ -405,21 +430,29 @@ def snapshot_city(series: str, city: str, lat: float, lon: float) -> bool:
         return True  # feature disabled — nothing to do
 
     try:
-        gate = DailyBriefGate.__new__(DailyBriefGate)  # noqa: SLF001
-        gate.config = None
-        gate.nws_client = NWSClient()
-        gate._cache = {}  # noqa: SLF001
+        gate = _new_snapshot_gate()
         tz_name = _series_tz_name(series) or "UTC"
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+        local_date = now_utc.astimezone(ZoneInfo(tz_name)).date()
+        if not force and gate._stored_row(series, local_date) is not None:  # noqa: SLF001
+            logger.info(
+                "nws.daily_brief.snapshot_exists", series=series, city=city,
+                local_date=local_date.isoformat(),
+            )
+            return True
+        gate.nws_client = NWSClient()
+        deadline_hour = _deadline_hour_from_env()
         text = _fetch_daily_brief_text(
-            gate.nws_client, lat, lon, tz_name=tz_name, now_utc=now_utc
+            gate.nws_client, lat, lon, tz_name=tz_name, now_utc=now_utc,
+            deadline_hour=deadline_hour,
         )
         matched = matches_any_keyword(text, keywords)
         blocked = bool(matched)
-        gate._upsert(series, _today_local(series), blocked, matched, text)  # noqa: SLF001
+        gate._upsert(series, local_date, blocked, matched, text)  # noqa: SLF001
         logger.info(
             "nws.daily_brief.snapshotted", series=series, city=city,
-            blocked=blocked, matched=sorted(matched),
+            local_date=local_date.isoformat(), deadline_hour=deadline_hour,
+            blocked=blocked, matched=sorted(matched), forced=force,
         )
         return True
     except Exception:  # noqa: BLE001
@@ -438,13 +471,3 @@ def _series_tz_name(series: str) -> Optional[str]:
     except Exception:  # noqa: BLE001
         return None
 
-
-def _today_local(series: str) -> datetime.date:
-    """Return the current local calendar date for a series (best-effort)."""
-    tz_name = _series_tz_name(series)
-    if tz_name:
-        try:
-            return datetime.datetime.now(ZoneInfo(tz_name)).date()
-        except Exception:  # noqa: BLE001
-            pass
-    return datetime.datetime.now(datetime.timezone.utc).date()
