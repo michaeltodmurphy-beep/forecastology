@@ -280,7 +280,11 @@ class StationForecast(Base):
         Index("idx_sf_station_code", "station_code"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     # ICAO airport code, e.g. "KATL"
     station_code = Column(String(8), nullable=False)
     # UTC midnight of the station-local trading-day start date
@@ -317,7 +321,11 @@ class DailyForecastBlock(Base):
         Index("idx_dfb_series_prefix", "series_prefix"),
     )
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     # Series prefix, e.g. "KXLOWTATL"
     series_prefix = Column(String(50), nullable=False, index=True)
     # City-local calendar date the forecast applies to.
