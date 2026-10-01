@@ -525,7 +525,8 @@ def test_am_low_persisted_false_row_does_not_leak_to_other_series_or_date(monkey
     )
     assert other_series_gate.evaluate("KXLOWTPHIL-26AUG09-B73.5", now_utc=now_day1).allowed is True
 
-    # 3) Same series, next local date.
+    # 3) Same series, next local date.  The helper's monkeypatch pins sunrise to
+    #    day1, so patch a day2 sunrise directly instead.
     next_day_gate = _gate_with_am_low(
         _make_forecast_periods_local_low_before_noon(tz, day2), tz
     )

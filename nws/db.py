@@ -51,7 +51,8 @@ def configure_engine(engine) -> None:
 
     Intended for tests (e.g. an in-memory SQLite engine) so nothing ever
     reaches the database configured via ``MYSQL_URL``.  Resets the cached
-    session factory so it is rebuilt against the new engine.
+    session factory so it is rebuilt against the new engine.  The caller
+    owns disposal of both the injected engine and any engine it replaces.
     """
     global _engine, _SessionLocal
     _engine = engine
