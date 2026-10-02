@@ -2353,6 +2353,10 @@ class TemperatureStrategy:
                         ticker=ticker,
                         reason="NO_TRADE_TICKERS",
                     )
+                    self._record_gate(
+                        ticker, "no_trade_tickers", "BLOCKED",
+                        gate_type="continuous", reason="NO_TRADE_TICKERS",
+                    )
                     continue
 
             price = None
@@ -2388,6 +2392,15 @@ class TemperatureStrategy:
                         spread = rest_data["spread"]
 
             if price is None:
+                # Ledger: no quote at all for this bracket this cycle (no WS
+                # tick yet and the REST fallback returned nothing).  Record the
+                # skip so the ledger is never silent for a candidate that is
+                # merely waiting on its first price.
+                self._record_gate(
+                    ticker, "price_feed", "SKIPPED",
+                    gate_type="continuous", reason="no_price",
+                    should_evaluate_entry=should_evaluate_entry,
+                )
                 continue
 
             bracket.last_price = price
@@ -2505,14 +2518,38 @@ class TemperatureStrategy:
                 continue
 
             if not should_evaluate_entry:
+                # Ledger: a bracket that is NOT an entry candidate this cycle
+                # (already crossed_buy, or not in MONITORING) never reaches the
+                # per-gate checks below.  Record WHY so the Gate Ledger is never
+                # silent for restored / adopted / already-entered brackets --
+                # the exact case that previously produced "No ledger data".
+                self._record_gate(
+                    ticker, "entry_eligibility", "SKIPPED",
+                    gate_type="continuous",
+                    reason=("already_crossed_buy" if bracket.crossed_buy
+                            else "phase_not_monitoring"),
+                    phase=str(getattr(bracket.phase, "name", bracket.phase)),
+                )
                 continue
 
             if buy_trigger is None:
                 logger.info("phase.b.entry_blocked_unknown_family", ticker=ticker)
+                self._record_gate(
+                    ticker, "price_trigger", "SKIPPED",
+                    gate_type="continuous", reason="unknown_family",
+                )
                 continue
 
             # Skip if we don't have both price (yes_ask) and spread
             if spread is None:
+                # Ledger: a bracket with a quote but no derivable spread cannot
+                # be gated (the spread gate needs it).  Record the skip so the
+                # ledger is never silent here.
+                self._record_gate(
+                    ticker, "spread", "SKIPPED",
+                    gate_type="continuous", reason="no_spread",
+                    price=price,
+                )
                 continue
 
             if (
@@ -2521,10 +2558,27 @@ class TemperatureStrategy:
                 and yes_ask >= 99
                 and yes_bid <= self.config.eval_price_floor
             ):
+                # Ledger: settled / one-sided book (ask 99+, bid at/below the
+                # floor) is a dead market and was previously skipped silently.
+                self._record_gate(
+                    ticker, "price_ceiling", "SKIPPED",
+                    gate_type="continuous", reason="settled_one_sided_book",
+                    price=price, yes_bid=yes_bid, yes_ask=yes_ask,
+                    eval_price_floor=self.config.eval_price_floor,
+                )
                 continue
 
             # Skip near-dead brackets early (quietly) ΓÇö they will never reach buy_trigger.
             if price <= self.config.eval_price_floor:
+                # Ledger: priced at/below the evaluation floor -> will never
+                # reach the buy trigger.  Previously skipped without a record
+                # (documented in README); now recorded so the ledger is
+                # complete.
+                self._record_gate(
+                    ticker, "price_trigger", "SKIPPED",
+                    gate_type="continuous", reason="below_eval_price_floor",
+                    price=price, eval_price_floor=self.config.eval_price_floor,
+                )
                 continue
 
             if price < buy_trigger:
@@ -2610,10 +2664,18 @@ class TemperatureStrategy:
                 if is_high and not self.config.high_trades:
                     logger.info("phase.b.entry_blocked_by_config",
                                 ticker=ticker, reason="HIGH_TRADES=no")
+                    self._record_gate(
+                        ticker, "trade_direction", "BLOCKED",
+                        gate_type="continuous", reason="HIGH_TRADES=no",
+                    )
                     continue
                 if is_low and not self.config.low_trades:
                     logger.info("phase.b.entry_blocked_by_config",
                                 ticker=ticker, reason="LOW_TRADES=no")
+                    self._record_gate(
+                        ticker, "trade_direction", "BLOCKED",
+                        gate_type="continuous", reason="LOW_TRADES=no",
+                    )
                     continue
                 # -----------------------------------
 
@@ -2627,6 +2689,16 @@ class TemperatureStrategy:
                             yes_ask=yes_ask,
                             low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
                             **_halt_ctx,
+                        )
+                        _halt_ledger_ctx = {
+                            k: v for k, v in _halt_ctx.items() if k != "ticker"
+                        }
+                        self._record_gate(
+                            ticker, "entry_halt_22et", "BLOCKED",
+                            gate_type="continuous",
+                            yes_ask=yes_ask,
+                            low_10pm_max_ask=self.config.low_ticker_10pm_max_ask,
+                            **_halt_ledger_ctx,
                         )
                         continue
                 # -----------------------------------------------------------
@@ -2645,6 +2717,13 @@ class TemperatureStrategy:
                     gate_ok, gate_ctx = is_entry_allowed(ticker, self.config, market_date=_market_date)
                     if not gate_ok:
                         logger.info("entry.blocked_local_settle_gate", **gate_ctx)
+                        _settle_ledger_ctx = {
+                            k: v for k, v in gate_ctx.items() if k != "ticker"
+                        }
+                        self._record_gate(
+                            ticker, "local_settle_gate", "BLOCKED",
+                            gate_type="continuous", **_settle_ledger_ctx,
+                        )
                         continue
                 # -------------------------------------------------------
 
@@ -2666,6 +2745,12 @@ class TemperatureStrategy:
                             logger.info(
                                 'entry.blocked_day_min_below_bracket',
                                 ticker=ticker,
+                                bracket_temp_f=_bracket_temp_f,
+                                day_min_f=_below_ctx.get('day_min_f'),
+                            )
+                            self._record_gate(
+                                ticker, "day_min_below_bracket", "BLOCKED",
+                                gate_type="continuous",
                                 bracket_temp_f=_bracket_temp_f,
                                 day_min_f=_below_ctx.get('day_min_f'),
                             )
@@ -2894,6 +2979,11 @@ class TemperatureStrategy:
                                 ticker=ticker,
                                 station=_station,
                             )
+                            self._record_gate(
+                                ticker, "nws_temp_window", "BLOCKED",
+                                gate_type="continuous",
+                                reason="no_data", station=_station,
+                            )
                             continue
                         if not _gate_open:
                             logger.info(
@@ -2902,6 +2992,11 @@ class TemperatureStrategy:
                                 station=_station,
                                 now_utc=now_utc.isoformat(),
                             )
+                            self._record_gate(
+                                ticker, "nws_temp_window", "BLOCKED",
+                                gate_type="continuous",
+                                reason="window_closed", station=_station,
+                            )
                             continue
                     except Exception:  # noqa: BLE001
                         logger.warning(
@@ -2909,6 +3004,11 @@ class TemperatureStrategy:
                             ticker=ticker,
                             station=_station,
                             exc_info=True,
+                        )
+                        self._record_gate(
+                            ticker, "nws_temp_window", "BLOCKED",
+                            gate_type="continuous",
+                            reason="gate_error", station=_station,
                         )
                         continue
                 # -----------------------------------
@@ -2945,6 +3045,14 @@ class TemperatureStrategy:
                         max_allowed_qty=max_allowed_qty,
                         action="already_holding_app_owned_qty",
                     )
+                    self._record_gate(
+                        ticker, "hedge_cap", "BLOCKED",
+                        gate_type="continuous",
+                        reason="already_holding_app_owned_qty",
+                        app_owned_qty=known_app_qty,
+                        proposed_qty=next_qty,
+                        max_allowed_qty=max_allowed_qty,
+                    )
                     continue
 
                 if not is_allowed:
@@ -2962,6 +3070,14 @@ class TemperatureStrategy:
                                 series_ticker=bracket.series_ticker,
                                 count=count,
                                 max_doublings=hedge_max)
+                    self._record_gate(
+                        ticker, "hedge_cap", "BLOCKED",
+                        gate_type="continuous",
+                        reason="entry_blocked_at_cap",
+                        hedge_step=count,
+                        hedge_factor=hedge_max,
+                        max_allowed_qty=max_allowed_qty,
+                    )
                     continue
 
                 if known_app_qty + next_qty > max_allowed_qty:
@@ -2977,6 +3093,16 @@ class TemperatureStrategy:
                         total_position_qty=known_app_qty + next_qty,
                         max_allowed_qty=max_allowed_qty,
                         action="recovery_position_cap_blocked",
+                    )
+                    self._record_gate(
+                        ticker, "hedge_cap", "BLOCKED",
+                        gate_type="continuous",
+                        reason="recovery_position_cap_blocked",
+                        hedge_step=count,
+                        hedge_factor=hedge_max,
+                        existing_position_qty=known_app_qty,
+                        proposed_qty=next_qty,
+                        max_allowed_qty=max_allowed_qty,
                     )
                     continue
 
@@ -3002,6 +3128,13 @@ class TemperatureStrategy:
                             proposed_qty=next_qty,
                             max_allowed_qty=max_allowed_qty,
                             action="duplicate_entry_suppressed",
+                        )
+                        self._record_gate(
+                            ticker, "hedge_cap", "BLOCKED",
+                            gate_type="continuous",
+                            reason="duplicate_entry_suppressed",
+                            hedge_step=count,
+                            max_allowed_qty=max_allowed_qty,
                         )
                         continue
                     self._entry_step_seen.add(step_key)

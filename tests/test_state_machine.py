@@ -881,6 +881,128 @@ async def test_phase_b_skips_settled_one_sided_book(monkeypatch):
     strategy._execute_entry.assert_not_awaited()
 
 
+# ---------------------------------------------------------------------------
+# Gate Ledger: previously-silent skip points must now emit phase.b.decision.
+# ---------------------------------------------------------------------------
+
+def _gate_decisions(logged, ticker, gate):
+    return [
+        kwargs for event, kwargs in logged
+        if event == "phase.b.decision"
+        and kwargs.get("ticker") == ticker
+        and kwargs.get("gate") == gate
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_settled_one_sided_book(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    ticker = "KXLOWTBOS-26JUN22-B53.5"
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1",
+        series_ticker="KXLOWTBOS", bracket_label="settled",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 0, 100)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    recs = _gate_decisions(logged, ticker, "price_ceiling")
+    assert recs, "settled one-sided book must record a ledger decision"
+    assert recs[0]["verdict"] == "SKIPPED"
+    assert recs[0]["reason"] == "settled_one_sided_book"
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_below_eval_floor(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    ticker = "KXLOWTBOS-26JUN22-B51.5"
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1",
+        series_ticker="KXLOWTBOS", bracket_label="floor",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 0, 5)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    recs = _gate_decisions(logged, ticker, "price_trigger")
+    assert recs, "below-floor bracket must record a ledger decision"
+    assert recs[0]["verdict"] == "SKIPPED"
+    assert recs[0]["reason"] == "below_eval_price_floor"
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_no_price(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN22-B52.5"
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1",
+        series_ticker="KXLOWTBOS", bracket_label="no price",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    recs = _gate_decisions(logged, ticker, "price_feed")
+    assert recs, "no-price bracket must record a ledger decision"
+    assert recs[0]["verdict"] == "SKIPPED"
+    assert recs[0]["reason"] == "no_price"
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_ineligible_bracket(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch, eval_price_floor=5)
+    ticker = "KXLOWTBOS-26JUN22-B52.5"
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1",
+        series_ticker="KXLOWTBOS", bracket_label="holding",
+        phase=Phase.HOLDING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 80, 82)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    recs = _gate_decisions(logged, ticker, "entry_eligibility")
+    assert recs, "non-candidate bracket must record a ledger decision"
+    assert recs[0]["verdict"] == "SKIPPED"
+    assert recs[0]["reason"] == "phase_not_monitoring"
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_unknown_family(monkeypatch):
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(monkeypatch)
+    ticker = "KXMIDTBOS-26JUN22-B52.5"
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1",
+        series_ticker="KXMIDTBOS", bracket_label="unknown",
+        phase=Phase.MONITORING,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.cache.update_quote(ticker, 85, 86)
+    strategy._execute_entry = AsyncMock()
+
+    await strategy._evaluate_watchlist()
+
+    recs = _gate_decisions(logged, ticker, "price_trigger")
+    assert recs, "unknown-family bracket must record a ledger decision"
+    assert recs[0]["verdict"] == "SKIPPED"
+    assert recs[0]["reason"] == "unknown_family"
+
+
 @pytest.mark.asyncio
 async def test_ensure_bracket_filters_to_today(monkeypatch):
     strategy = make_strategy(monkeypatch)

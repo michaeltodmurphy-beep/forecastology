@@ -36,6 +36,7 @@ from typing import Iterable, Optional
 # Gate ordering / metadata (mirrors _evaluate_watchlist execution order)
 # ---------------------------------------------------------------------------
 GATE_ORDER = [
+    ("entry_eligibility", "Entry eligible (candidate this cycle)", "continuous"),
     ("sunrise", "SUNRISE (start gate)", "once"),
     ("sunrise.time_window", "  child: time window open", "once"),
     ("sunrise.am_low_before_9am", "  child: AM low before deadline", "once"),
@@ -43,10 +44,19 @@ GATE_ORDER = [
     ("am_low_keyword", "AM-low daily-brief keyword", "once"),
     ("overnight_9pm_1am_low", "Overnight 9pm-1am low (forecast)", "continuous"),
     ("morning_forecast_low", "Morning forecast low (sunrise->deadline)", "continuous"),
+    ("day_min_below_bracket", "Day low has not breached bracket", "continuous"),
+    ("observed_bracket_reachability", "Bracket observed-range reached", "continuous"),
+    ("price_feed", "Has a live price", "continuous"),
     ("price_trigger", "Price >= buy trigger", "continuous"),
     ("price_ceiling", "Price <= max ceiling", "continuous"),
     ("falling_knife", "Falling-knife guard", "continuous"),
+    ("local_settle_gate", "City-local settle gate", "continuous"),
+    ("trade_direction", "Trade-direction toggle", "continuous"),
+    ("entry_halt_22et", "Low-ticker 22:00 ET halt", "continuous"),
+    ("nws_temp_window", "NWS temperature-window gate", "continuous"),
     ("spread", "Spread <= minimum", "continuous"),
+    ("no_trade_tickers", "Ticker not on NO_TRADE list", "continuous"),
+    ("hedge_cap", "Martingale cap allows entry", "continuous"),
 ]
 _GATE_ORDER_INDEX = {gid: i for i, (gid, _l, _t) in enumerate(GATE_ORDER)}
 
