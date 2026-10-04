@@ -29,6 +29,8 @@ an identity hash. The scanner checks **both** the legacy lock path and the
 configured daemon's real account-scoped path after loading config, and exits if
 either is held. Keep instance locking enabled and matching identities/paths;
 disabling it removes that scoped protection.
+The scanner probes then releases locks: this is not an atomic execution lease
+and does not exclude simultaneous scanners. Do not intentionally overlap them.
 Neither trading decisions nor reconciliation depend on
 `/dev/shm/forecastology_state.json`.
 
@@ -133,7 +135,7 @@ monitoring. The submission gates run in this order:
   exposure; cost is cents. With ceiling crossing enabled, proposed order cost
   reserves the **ceiling**, not the earlier ask; pending exposure is also
   conservatively priced. With crossing disabled, proposed cost uses
-  `min(ask, ceiling)`; held positions retain actual average cost basis.
+  `min(ask, ceiling)`; held positions retain actual average cost basis where known.
   The same exposure helper governs daemon, scanner, and monitor buys. With
   both caps disabled, no event-cap DB lookup is performed. Zero-quantity DB rows
   and **unverified stale DB Position rows** with strictly-past city-local ticker
@@ -148,6 +150,8 @@ monitoring. The submission gates run in this order:
   `action=event_exposure_cap_bypassed` or `action=event_exposure_cap_blocked`.
   A successfully measured cap breach blocks regardless of that switch and logs
   WARNING `entry.event_exposure_cap_blocked` with `reason=contracts` or `reason=cost`.
+  These checks are not cross-process atomic reservations; concurrent buyers can
+  race, so caps alone are not a safe coordination mechanism.
 
 Ceiling-crossing and position-lookup policy are wired through the shared executor
 factory for daemon, scanner, and monitor buys; `OrderRequest.known_position_qty`
@@ -159,16 +163,34 @@ initial `1` and factor `3`, recovery sizes are `1, 2, 4`; a single-order/positio
 cap of `4` is **not** a lifetime daily spend cap (the sequence totals `7`).
 HIGH and LOW series have separate ledger keys. PAPER fills and LIVE fills are
 not interchangeable evidence of liquidity; record actual partial/zero fills.
-Optional partial-fill chasing must stop when position lifecycle or gate safety
-disallows further buys and never authorizes prices above the ceiling.
+Transient event-exposure refusals, proposed/position-total cap refusals, NO_FILL,
+rejected orders, and buy/executor exceptions return to `MONITORING` with
+`pending_entry=true` while retaining crossed state. Sibling duplicate deferrals
+also remain pending. Later watchlist cycles reapply every applicable entry gate,
+fresh ask check, and cap before retrying, as for missing-ask/above-ceiling
+deferrals. The terminal recovery limit `stop_loss_count >= HEDGE_MAX_FACTOR`
+intentionally retains `crossed_buy=true`, `pending_entry=false`: no further
+recovery entry is permitted for that series/day.
+Optional partial-fill chasing has separate lifecycle logic and a hard price
+ceiling, but currently does **not** recheck the SUNRISE gate/close in SUNRISE mode
+or perform an aggregate event-cap pre-placement guard. Keep it disabled unless
+those limitations have been assessed; shared executors do not supply all primary
+weather gates to every buy path.
 
 Legacy scanner accounting persists the executor-reported fill quantity, price,
-and cost, including partial fills; zero fills do not create positions.
+cost, order ID, and `PARTIAL`/`FILLED` status; zero fills do not create positions.
+Boolean-only success values never fabricate a filled quantity.
 Monitor hedge caps use the maximum of standalone target quantity and summed
-parent hedge quantities, plus same-cycle fills. A partial hedge records
+parent hedge quantities, plus same-cycle fills. Event-cap checks receive all
+known target holdings, including parent-only and same-cycle hedge exposure
+across different targets. Covered standalone average costs are preserved;
+unknown parent-only costs reserve the ceiling, and same-cycle fills add actual
+cost with conservative rounded-up per-contract merging. A partial hedge records
 `hedge_market_ticker` immediately to identify the actual target, but is incomplete
 until `hedge_quantity >=` parent quantity. Retries buy only the remainder on that
 same target; the presence of a hedge ticker alone does not prove full protection.
+Older partial rows without a target use existing bracket discovery to resolve it.
+Discovery cannot guarantee the original target's identity for such legacy rows.
 
 ### Phase C — Holding, exits, and settlement
 
@@ -298,10 +320,10 @@ calendar date. Host timezone is not the city timezone.
 | `EVAL_PRICE_FLOOR` | Dollar string → integer cents | `0.05` | Ask at/below floor skips early; held quote streams remain available. |
 | `HEDGE_TRIGGER_PRICE` | Dollar string → integer cents | `0`; example `0.50` | Deprecated for primary strategy; legacy monitor still uses this for hedge buys and is not read-only. |
 | `HEDGE_BUY` | Dollar string → integer cents | `0`; example `0.60` | Deprecated compatibility value; primary strategy no longer uses the old hedge engine. |
-| `PARTIAL_FILL_CHASE` | Boolean toggle | `no` | Opt-in entry remainder chaser; never authorizes buying past initial count. |
+| `PARTIAL_FILL_CHASE` | Boolean toggle | `no` | Opt-in entry remainder chaser; bounded by initial count. See SUNRISE/event-cap limitations above. |
 | `CHASE_INTERVAL_SECONDS` | Positive integer | `60` | Repricing/fill-poll cadence, seconds. |
 | `CHASE_MAX_MINUTES` | Positive integer | `30` | Time limit when not chasing until gate close. |
-| `CHASE_UNTIL_GATE_CLOSE` | Boolean toggle | `yes` | Work remainder until gate close/lifecycle end instead of ordinary minute limit. |
+| `CHASE_UNTIL_GATE_CLOSE` | Boolean toggle | `yes` | Work remainder until checked gate/lifecycle end rather than ordinary minute limit; SUNRISE close is not currently rechecked. |
 | `CHASE_TAKE_AT_CEILING` | Boolean toggle | `yes` | Lift ask at/below ceiling; false uses maker bid+1 capped at ceiling. |
 
 ### stop-loss
@@ -495,14 +517,17 @@ Keep production PEMs out of a development checkout used for full-suite runs.
 Read structured `event`, `ticker`, reason/action, station, timestamps, quantities,
 and configured limits together. A blocked entry is not necessarily a bug.
 `phase.b.decision` is change-driven, so repeated identical verdicts need not
-produce repeated lines. `entry.blocked_summary` summarizes blocked reasons
+produce repeated lines. `entry.blocked_summary` summarizes entry-blocking reasons
 **per evaluation cycle**, including `counts_by_reason`, `total_blocks`,
 `blocked_ticker_count`, `am_low_blocked_city_count`, and `cycle_completed`.
 It is not a fill count or deployment inventory; one ticker can have more than
 one recorded gate block, so `total_blocks` need not equal the unique ticker count.
-Reason keys are stable ledger gate IDs; each ticker/reason counts once per cycle
-even when individual log messages are deduplicated. Held informational skips
-are excluded. Empty, error, and cancelled cycles also emit a summary;
+Blocked verdicts use stable ledger gate IDs; each ticker/reason counts once per
+cycle even when individual log messages are deduplicated. Candidate feed/book
+failures recorded as SKIPPED also count under `no_price`, `no_spread`,
+`settled_one_sided_book`, and `unknown_family`. Ordinary below-evaluation-floor,
+out-of-phase, already-held, and other held informational skips remain excluded.
+Empty, error, and cancelled cycles also emit a summary;
 `cycle_completed` distinguishes a completed sweep. Submission outcomes include
 `submission_quote`, `price_ceiling`, `sunrise_final`, `nws_temp_window_final`,
 `position_cap`, `position_lookup_error`, `event_exposure`, `no_fill_ioc`,
