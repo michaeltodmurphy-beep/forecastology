@@ -29,7 +29,7 @@ from app.config import AppConfig
 from app.signing import load_private_key, build_auth_headers
 from app.database import DatabaseManager
 from app.models import Position as PositionModel, ExecutedTrade, TradeAction, TradeStatus
-from core.event_exposure import event_exposure_allows_buy
+from core.event_exposure import Holdings, event_exposure_allows_buy
 from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
 from data.ticker_cache import TickerCache
 from execution.base import BaseExecutor, ExecutionResult
@@ -140,6 +140,7 @@ async def _buy_hedge(
     existing_position_qty: int = 0,
     executor: Optional[BaseExecutor] = None,
     db: Optional[DatabaseManager] = None,
+    extra_holdings: Optional[Holdings] = None,
 ) -> Union[ExecutionResult, bool]:
     """Buy a hedge bracket through the shared executor.
 
@@ -181,8 +182,13 @@ async def _buy_hedge(
             action="monitor_buy_hedge_ceiling_blocked",
         )
         return False
+    known_holdings = dict(extra_holdings or {})
+    existing_qty = max(int(existing_position_qty or 0), 0)
+    if existing_qty > known_holdings.get(ticker, (0, 0))[0]:
+        known_holdings[ticker] = (existing_qty, max_price)
     if db is not None and not await event_exposure_allows_buy(
         config, db, ticker, qty, price_cents, source="monitor_hedge",
+        extra_holdings=known_holdings,
     ):
         return False
 
@@ -265,10 +271,14 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         standalone_qty = {}
+        standalone_prices = {}
         parent_hedge_qty = {}
         legacy_targets = {}
         for pos in positions:
             standalone_qty[pos.market_ticker] = max(int(pos.quantity or 0), 0)
+            standalone_prices[pos.market_ticker] = (
+                max(int(pos.avg_entry_price or 0), 0) or config.spread_monitor_price
+            )
             qty = max(int(pos.hedge_quantity or 0), 0)
             target = pos.hedge_market_ticker
             if qty > 0 and not target:
@@ -280,6 +290,14 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
         known_qty = {
             ticker: max(standalone_qty.get(ticker, 0), parent_hedge_qty.get(ticker, 0))
             for ticker in standalone_qty.keys() | parent_hedge_qty.keys()
+        }
+        known_cost = {
+            ticker: qty * (
+                standalone_prices[ticker]
+                if standalone_qty.get(ticker, 0) >= parent_hedge_qty.get(ticker, 0)
+                else config.spread_monitor_price
+            )
+            for ticker, qty in known_qty.items()
         }
         for pos in positions:
             ticker = pos.market_ticker
@@ -364,6 +382,10 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                     client,
                     existing_position_qty=existing_hedge_qty,
                     db=db,
+                    extra_holdings={
+                        target: (qty, (known_cost[target] + qty - 1) // qty)
+                        for target, qty in known_qty.items() if qty > 0
+                    },
                 )
 
                 if not isinstance(result, ExecutionResult):
@@ -407,6 +429,9 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                     )
                     await session.commit()
                 known_qty[hedge_ticker] = existing_hedge_qty + filled_qty
+                known_cost[hedge_ticker] = (
+                    known_cost.get(hedge_ticker, 0) + max(int(result.total_cost_cents or 0), 0)
+                )
                 pos.hedge_quantity = new_hedged_qty
                 pos.hedge_market_ticker = hedge_ticker
                 if fully_filled:

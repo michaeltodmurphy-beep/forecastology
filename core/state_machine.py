@@ -3066,7 +3066,6 @@ class TemperatureStrategy:
                         continue
                 # -----------------------------------
 
-                bracket.crossed_buy = True
                 count = await self._get_stop_loss_count_for_market(ticker)
                 hedge_max = int(self.config.hedge_max_factor)
                 next_qty, is_allowed, max_allowed_qty = hedge_policy(
@@ -3131,6 +3130,8 @@ class TemperatureStrategy:
                         hedge_factor=hedge_max,
                         max_allowed_qty=max_allowed_qty,
                     )
+                    bracket.crossed_buy = True
+                    bracket.pending_entry = False
                     continue
 
                 if known_app_qty + next_qty > max_allowed_qty:
@@ -3189,6 +3190,7 @@ class TemperatureStrategy:
                             hedge_step=count,
                             max_allowed_qty=max_allowed_qty,
                         )
+                        bracket.pending_entry = True
                         continue
                     self._entry_step_seen.add(step_key)
 
@@ -3436,6 +3438,7 @@ class TemperatureStrategy:
                 action="hard_cap_guard_blocked_submission",
             )
             bracket.phase = Phase.MONITORING
+            bracket.pending_entry = True
             return
 
         existing_position_qty = max(int(bracket.position_quantity or 0), 0)
@@ -3469,6 +3472,7 @@ class TemperatureStrategy:
                 action="hard_cap_guard_position_total_blocked_submission",
             )
             bracket.phase = Phase.MONITORING
+            bracket.pending_entry = True
             return
 
         # Per-event (city/day) aggregate exposure cap across all brackets of

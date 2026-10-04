@@ -84,6 +84,10 @@ occurrence still blocks. Snapshot selection uses today's period **start**
 hour before `NWS_LOW_DEADLINE_HOUR`, not the catch-up time: a 06:00 `Today`
 period remains eligible at 13:00, while 18:00 `Tonight` is excluded at the
 default noon deadline. Missing city mapping fails open.
+Matching changes affect **newly computed** snapshots only: deployment does not
+rewrite existing same-day decisions or clear their day-long gate cache.
+Correcting a stored false-positive block requires an explicit forced snapshot
+rerun **and** a gate-cache/process refresh; restarting alone does not rewrite it.
 
 The sunrise spread band lasts through local 09:00; mid-AM covers 09:01–12:00;
 PM starts 12:01 and remains active for the rest of the day. Timing gates still
@@ -131,11 +135,13 @@ monitoring. The submission gates run in this order:
   conservatively priced. With crossing disabled, proposed cost uses
   `min(ask, ceiling)`; held positions retain actual average cost basis.
   The same exposure helper governs daemon, scanner, and monitor buys. With
-  both caps disabled, no event-cap DB lookup is performed. Existing exposure
-  excludes zero quantities and strictly-past **city-local** ticker dates
-  (unknown series fall back to Eastern); today's, future, and malformed dates
-  remain counted. Proposed quantity/cost is still checked for every target
-  date. This uses ticker dates, not ORM market status/expiry fields.
+  both caps disabled, no event-cap DB lookup is performed. Zero-quantity DB rows
+  and **unverified stale DB Position rows** with strictly-past city-local ticker
+  dates are excluded (unknown series fall back to Eastern); today's, future,
+  and malformed DB dates remain counted. Caller-verified target quantity,
+  known in-memory holdings, and live/in-flight orders **always count**, even
+  for past dates with delayed settlement. Proposed quantity/cost is checked
+  for every target date. This uses ticker dates, not ORM market status/expiry fields.
 - `EVENT_EXPOSURE_FAIL_CLOSED=false` (default): an enabled event-cap lookup
   failure permits the buy with a CRITICAL unverifiable-exposure event. `true` blocks.
   The event is `entry.event_exposure_unverifiable`, with
@@ -155,6 +161,14 @@ HIGH and LOW series have separate ledger keys. PAPER fills and LIVE fills are
 not interchangeable evidence of liquidity; record actual partial/zero fills.
 Optional partial-fill chasing must stop when position lifecycle or gate safety
 disallows further buys and never authorizes prices above the ceiling.
+
+Legacy scanner accounting persists the executor-reported fill quantity, price,
+and cost, including partial fills; zero fills do not create positions.
+Monitor hedge caps use the maximum of standalone target quantity and summed
+parent hedge quantities, plus same-cycle fills. A partial hedge records
+`hedge_market_ticker` immediately to identify the actual target, but is incomplete
+until `hedge_quantity >=` parent quantity. Retries buy only the remainder on that
+same target; the presence of a hedge ticker alone does not prove full protection.
 
 ### Phase C — Holding, exits, and settlement
 
@@ -200,176 +214,176 @@ custom trade toggles also accept `yes/no/1/0`, and invalid custom toggles warn a
 fall back to their documented default. Positive/nonnegative parsers warn and
 fall back on invalid input; required settings can prevent startup.
 
-### Credentials, database, and runtime
+### Credentials
 
-| Variable | Default / example | Meaning |
-|---|---|---|
-| `KALSHI_API_KEY` | Default empty; example placeholder | Kalshi key ID used for API authentication, not a bearer secret. Required for LIVE. |
-| `KALSHI_PRIVATE_KEY_PATH` | `kalshi_private_key.pem` | Readable RSA PEM path; protect file permissions and never commit it. |
-| `MYSQL_DATABASE_URL` | Replace template/default placeholder | Async SQLAlchemy URL using `mysql+aiomysql://`, then `USER:PASSWORD@HOST:3306/forecastology`; URL-encode password characters. |
-| `TRADING_MODE` | `PAPER` | `PAPER` simulated or `LIVE` real-money execution; use uppercase. |
-| `DRY_RUN` | `false` | Suppress live order submission; not a replacement for PAPER. |
-| `REST_BASE_URL` | `https://external-api.kalshi.com` | REST origin; API paths are appended by clients. |
-| `WS_URL` | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` | Authenticated WebSocket endpoint. LIVE rejects demo endpoints. |
-| `WEATHER_SERIES_PREFIX` | `KXWEATHER` | Weather-series configuration prefix; not a count of supported cities. |
-| `KALSHI_API_KEY_ID` | Unset | Lock identity when `INSTANCE_ID` is absent; does not replace `KALSHI_API_KEY` authentication. With neither identity set, runtime hashes the shared string `default`. |
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `KALSHI_API_KEY` | String | Empty; example placeholder | Kalshi key ID used for authentication, not a bearer secret. Required for LIVE. |
+| `KALSHI_PRIVATE_KEY_PATH` | Path string | `kalshi_private_key.pem` | RSA PEM path; protect permissions and never commit it. |
+| `MYSQL_DATABASE_URL` | URL string | Replace template/default placeholder | Async SQLAlchemy URL: `mysql+aiomysql://` followed by `USER:PASSWORD@HOST:3306/forecastology`; URL-encode password characters. |
 
-### 1. Entry prices, spreads, recovery, and exposure
+### market selection
 
-| Variable | Default / example | Meaning |
-|---|---|---|
-| `INITIAL_CONTRACT_COUNT` | `1` | Initial contracts; positive integer. Fractional strings truncate; below 1 clamps to 1. |
-| `MONITOR_START_PRICE` | Required; example `0.80` | Dollar price for monitoring threshold. |
-| `BUY_TRIGGER_PRICE_LOW` | Required; example `0.85` | LOW dollar entry trigger. Legacy single `BUY_TRIGGER_PRICE` is not an env fallback. |
-| `BUY_TRIGGER_PRICE_HIGH` | Required; example `0.85` | HIGH dollar entry trigger. |
-| `BUY_TRIGGER_PRICE_LOW_WARM` | `0` | Dollar override for warm LOW series; zero uses standard LOW trigger. |
-| `SPREAD_MONITOR_PRICE` | Required; example `0.90` | Hard dollar buy ceiling, not maximum bid/ask spread. |
-| `ENTRY_CROSS_SPREAD_TO_CEILING` | `true` | Submit buy limit at supplied `max_price`; false uses order price capped there. |
-| `FALLING_KNIFE_DECAY_MINUTES` | `10` | Continuous minutes below ceiling to clear guard; `0` retains latch without decay. |
-| `SUNRISE_MAX_SPREAD` | `0`; example `0.04` | Dollar spread cap through local 09:00; explicitly set it. |
-| `MIDAM_MAX_SPREAD` | `0`; example `0.05` | Dollar spread cap 09:01–12:00; explicitly set it. |
-| `PM_MAX_SPREAD` | `0`; example `0.07` | Dollar spread cap from 12:01; explicitly set it. |
-| `SUNRISE_MAX_SPREAD_TIGHT` | `0` | Positive dollar sunrise-only cap for selected cities; zero disables. |
-| `SUNRISE_MAX_SPREAD_TIGHT_CITIES` | Empty | CSV lowercase series prefixes, e.g. `kxlowtlv,kxlowtchi`; no matching city without a prefix. |
-| `HEDGE_MAX_FACTOR` | `3`; example `5` | Total recovery levels, including initial entry. Invalid falls back to 3; fractions truncate; values below 1 clamp. |
-| `POSITION_CAP_FAIL_CLOSED` | `false` | After three failed LIVE lookups, true blocks; false falls back to known quantity while preserving quantity guards. |
-| `EVENT_MAX_CONTRACTS` | `0` | Positive aggregate event contract cap; zero/negative disables. |
-| `EVENT_MAX_COST_CENTS` | `0` | Positive aggregate event cost-basis cap in integer cents; zero/negative disables. |
-| `EVENT_EXPOSURE_FAIL_CLOSED` | `false` | Block enabled-cap entries on unverifiable exposure only when true; measured breaches always block. |
-| `EVAL_PRICE_FLOOR` | `0.05` | Ask at/below dollar floor skips early; hedging/held quote streams remain available. |
-| `HEDGE_TRIGGER_PRICE` | `0`; example `0.50` | Deprecated for primary strategy. Legacy `monitor.py` still reads this threshold for hedge buys; do not treat that process as read-only. |
-| `HEDGE_BUY` | `0`; example `0.60` | Deprecated compatibility value; primary strategy no longer uses the old hedge engine. |
-| `LOW_TRADES` | `yes` | Enable new LOW entries; existing holdings still managed. |
-| `HIGH_TRADES` | `yes` | Enable new HIGH entries; existing holdings still managed. |
-| `NO_TRADE_TICKERS` | Empty | CSV uppercase ticker/series prefixes excluding new candidates. |
-| `WARM_TRADE_TICKERS` | Empty | CSV LOW prefixes bypassing sunrise/NWS timing, retaining AM-low/local-settle checks. |
-| `MANAGE_EXTERNAL_POSITIONS` | `false` | True permits management of aggregate manual/external holdings; false app-owned only. |
-| `PARTIAL_FILL_CHASE` | `no` | Opt-in entry remainder chaser; never authorizes buying past initial contract count. |
-| `CHASE_INTERVAL_SECONDS` | `60` | Positive repricing/fill-poll cadence. |
-| `CHASE_MAX_MINUTES` | `30` | Positive time limit when not chasing until gate close. |
-| `CHASE_UNTIL_GATE_CLOSE` | `yes` | Work remainder until gate close/lifecycle end instead of ordinary minute limit. |
-| `CHASE_TAKE_AT_CEILING` | `yes` | Lift an ask at/below ceiling; false uses maker bid+1 capped at ceiling. |
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `WEATHER_SERIES_PREFIX` | String | `KXWEATHER` | Weather-series prefix; not a count of supported cities. |
+| `LOW_TRADES` | Boolean toggle | `yes` | Enable new LOW entries; existing holdings still managed. |
+| `HIGH_TRADES` | Boolean toggle | `yes` | Enable new HIGH entries; existing holdings still managed. |
+| `NO_TRADE_TICKERS` | CSV → set of strings | Empty | Uppercase ticker/series prefixes excluding new candidates. |
+| `WARM_TRADE_TICKERS` | CSV → set of strings | Empty | LOW prefixes bypassing sunrise/NWS timing, retaining AM-low/local-settle checks. |
 
-### 2. Stop-loss, PANIC_FLATTEN, and ask-spread spoof protection
+### entry gate/timing
 
-| Variable | Default / example | Meaning |
-|---|---|---|
-| `STOP_LOSS_PRICE_ASK` | Required; example `0.25` | Dollar ask threshold; equality triggers. |
-| `STOP_LOSS_PRICE_BID` | Example `0.25`; ignored | Present in template but not an `AppConfig` field or supported bid trigger. |
-| `ENABLE_FAST_SL_EXIT` | LIVE true / PAPER false; example true | Enable immediate asynchronous exit path. |
-| `HELD_POSITION_PRICE_REFRESH_SECONDS` | `10` | Held-position REST quote refresh interval, seconds. |
-| `HELD_POSITIONS_LOOP_INTERVAL_MS` | `100` | Independent held SL loop cadence, milliseconds; intended 50–250 ms. |
-| `MAX_NO_PRICE_CYCLES` | `10` | No-price cycles before ordinary held-position protection warnings. |
-| `STOP_LOSS_MAX_UNFILLED_ATTEMPTS` | `3` | Limit for unfilled stop-loss attempts before escalation. |
-| `SL_EXECUTE_COOLDOWN_SECONDS` | `5` | Non-bypass exit cooldown; fast/watcher bypass paths unaffected. |
-| `SL_WORKER_INTERVAL_MS` | `100` | Stop-loss watcher worker polling interval. |
-| `SL_EXIT_MODE` | `PANIC_FLATTEN` | Alternative `AGGRESSIVE_LIMIT` enables repricing ladder. |
-| `SL_EXIT_RETRY_INTERVAL_MS` | `120`; example `300` | Fast aggressive-exit retry cadence. |
-| `SL_EXIT_MAX_ATTEMPTS` | `3` | Fast aggressive-exit attempt limit. |
-| `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | `2` | Initial aggressive sell offset, cents/ticks. |
-| `SL_EXIT_MAX_SLIPPAGE` | `0.20` | Dollar maximum repricing slippage. |
-| `SL_SPREAD_HOLD_MAX_SECONDS` | `120` | Legacy aggressive-mode hold window; `0` fires without waiting. |
-| `SL_PANIC_SELL_PRICE` | `1` | Integer-cent floor price for panic sell, not a promised fill price. |
-| `SL_PANIC_RETRY_MS` | `100`; example `250` | Panic resubmission interval. |
-| `SL_PANIC_MAX_RETRIES` | `5` | Panic retry limit. |
-| `SL_PANIC_MAX_QUOTE_AGE_MS` | `30000` | Cached ask age limit before panic revalidation; `0` disables freshness check. |
-| `ASK_SPREAD_PROTECTION` | `0.05` | Dollar gap to next distinct ask that identifies an outlier; `0` disables. |
-| `SL_BACKSTOP_ENABLED` | `false` | Opt-in resting disaster GTC sell, cancelled before reactive sell. |
-| `SL_BACKSTOP_OFFSET` | `0.05` | Dollar offset below SL ask threshold; resting price floored at 1¢. |
-| `PROFIT_TAKE_SELL_ENABLED` | `false` | Opt-in resting take-profit GTC sell. |
-| `PROFIT_TAKE_SELL_PRICE` | `0.99` | Dollar take-profit sell price; cancelled before reactive sells. |
-
-### 3. Startup single-instance safety lock and built-in log rotation
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `INSTANCE_LOCK_ENABLED` | `true` | Startup single-instance guard; disabling risks duplicate execution. |
-| `INSTANCE_LOCK_FILE` | `/tmp/forecastology.lock` | Base lock path; runtime adds account hash. Configure a shared readable/writable path appropriate to deployment. |
-| `FORECASTOLOGY_LOCKFILE` | `/tmp/forecastology.lock` | Legacy base-path fallback when `INSTANCE_LOCK_FILE` unset; scanner checks this legacy path and the configured enabled daemon's scoped lock. |
-| `INSTANCE_ID` | Empty | Stable account/environment lock identity; overrides `KALSHI_API_KEY_ID`, otherwise identity is `default`. Only hash logged. |
-| `LOG_FILE` | `logs/run.log` | Rotating file path, relative to working directory. |
-| `LOG_MAX_BYTES` | `104857600` | Rotation threshold in bytes (100 MiB). |
-| `LOG_BACKUP_COUNT` | `10` | Number of rotated backups. |
-| `LOG_TO_CONSOLE` | `true` | Emit console events (systemd captures these). |
-| `LOG_TO_FILE` | `true` | Emit file events; avoid merging both sinks into the same file. |
-
-### 4. City-local-time entry settle gate and Low-ticker PM / ET behavior
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `ENABLE_LOCAL_SETTLE_GATE` | `true` | LOW-only local rollover/resume gate; never suppresses exits. |
-| `DEFAULT_ENTRY_START_LOCAL` | `01:00` | Local `HH:MM` start outside Phoenix. |
-| `PHOENIX_ENTRY_START_LOCAL` | `00:00` | Phoenix `HH:MM` start, MST without DST. |
-| `LOW_TICKER_DAILY_CLOSEOUT_ENABLED` | `true` | Enable LOW PM close evaluation. |
-| `LOW_TICKER_CLOSEOUT_ON_LATE_START` | `true` | Evaluate already-past PM close on first startup loop; false skips late-start evaluation. |
-| `LOW_PM_CLOSE_TIME` | `22:00` | Per-ticker **local** `HH:MM` close evaluation time. |
-| `LOW_PM_CLOSE_AMOUNT` | `93` | Integer-cent ask threshold, strict `<`, except override prefixes. |
-| `PM_TICKERS_CLOSE` | Empty | CSV ticker/series prefixes closing regardless of ask at PM time. |
-| `LOW_TICKER_CLOSEOUT_TIME_ET` | `22:00` | Legacy compatibility setting; current PM timing uses `LOW_PM_CLOSE_TIME`. |
-| `LOW_TICKER_ENTRY_HALT_ENABLED` | `true` | Enable separate LOW **ET** late-entry halt. |
-| `LOW_TICKER_ENTRY_HALT_TIME_ET` | `22:00` | Eastern `HH:MM` halt until ET day's end. |
-| `LOW_TICKER_10PM_MAX_ASK` | `0.93` | Dollar ask threshold; ET entry halt applies only at strict `<`. |
-
-### 5. NWS forecast backend
-
-| Variable | Default / example | Meaning |
-|---|---|---|
-| `NWS_USER_AGENT` | Required; example contact placeholder | NWS custom identifying User-Agent with real operator contact. |
-| `MYSQL_URL` | Falls back to `MYSQL_DATABASE_URL` | Sync scheduler DB URL; aiomysql driver converted to pymysql. Use the same intended DB. |
-| `HIGH_LOW_UPDATE` | `60` | Forecast refresh interval, minutes. |
-| `GATE_LOW_BEFORE` | `120` | LOW NWS window minutes before forecast low. |
-| `GATE_LOW_AFTER` | `45` | LOW NWS window minutes after forecast low. |
-| `GATE_HIGH_BEFORE` | `60` | HIGH NWS window minutes before forecast high. |
-| `GATE_HIGH_AFTER` | `30` | HIGH NWS window minutes after forecast high. |
-| `ENTRY_GATE_MODE` | `NWS_WINDOW` | `NWS_WINDOW` or `SUNRISE` (LOW only); invalid mode warns/falls back. |
-| `SUNRISE_STRATEGY_TIME` | `30` | Minutes after sunrise to open LOW window. |
-| `SUNRISE_ENTRY_WINDOW_MINUTES` | `120` | Window length after open, minutes. |
-| `SUNRISE_REQUIRE_TEMP_RISING` | `true` | Deprecated, still parsed with warning; replace with rise-required amount. |
-| `SUNRISE_SOURCE` | `astral` | `astral` local calculation or `api`; invalid source falls back. |
-| `SUNRISE_REQUIRE_AM_LOW` | `yes` | Require daily forecast minimum before local deadline; partial-forecast exception described above. |
-| `NWS_LOW_DEADLINE_HOUR` | `12` | Local hour 0–23, exclusive AM-low deadline; also bounds morning gate. |
-| `AM_LOW_SNAPSHOT_LOCAL_HOUR` | `03:00`; commented example `04:00` | Local `HH`/`HH:MM` snapshot time; consumers use hour. |
-| `AM_LOW_FORECAST` | Empty | CSV case-insensitive whole-word daily-brief keywords, with occurrence-level negation handling and thunderstorm/plural matching; empty disables. |
-| `AM_LOW_FORECAST_KEYWORDS` | Empty | Pydantic field-derived name; normal `from_env()` explicitly supplies keywords from `AM_LOW_FORECAST`. Use `AM_LOW_FORECAST`, not this internal field name. |
-| `SUNRISE_TEMP_RISE_REQUIRED` | `1.0` | Required °F rise above running minimum; `0` disables. Negative/invalid falls back; subdegree values warn. |
-| `SUNRISE_TEMP_BASELINE_MINUTES` | `15` | Minutes before sunrise to begin baseline; nonnegative. |
-| `SUNRISE_OBS_MAX_AGE_MINUTES` | `15` | Positive observation-age limit, minutes. |
-| `SUNRISE_OBS_MAX_AGE_OVERRIDES` | Empty | CSV `STATION:MINUTES`, e.g. `KNYC:25,KSEA:20`; positive station limits. |
-| `SUNRISE_OBS_SOURCE` | `awc` | `awc` METAR with NWS fallback, or `nws` only. |
-| `ENTRY_OBS_CALIBRATION_ENABLED` | `no` | Opt-in LOW per-station bracket-line calibration. |
-| `ENTRY_OBS_CALIBRATION_OFFSETS` | Empty | CSV `STATION:+/-float` °F offsets, e.g. `KSEA:+1.0`; unlisted stations unchanged. |
-| `BLOCK_ENTRY_WHEN_BELOW_BRACKET` | `yes` | Sunrise-mode LOW observed-day breach guard; unavailable evidence fails open. |
-| `BLOCK_ENTRY_WHEN_BRACKET_UNREACHED` | `no` | Sunrise-mode LOW observed reachability guard; unavailable evidence fails open. |
-| `BLOCK_ENTRY_WHEN_FORECAST_DIPS_BELOW_BRACKET` | `no` | Sunrise-mode LOW remaining-day forecast guard, 1°F cushion; errors fail open. |
-| `BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET` | `no` | Sunrise-mode LOW morning forecast guard, no cushion; errors fail open. |
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `ENABLE_LOCAL_SETTLE_GATE` | Boolean toggle | `true` | LOW-only local rollover/resume gate; never suppresses exits. |
+| `DEFAULT_ENTRY_START_LOCAL` | `HH:MM` string | `01:00` | Local entry start outside Phoenix. |
+| `PHOENIX_ENTRY_START_LOCAL` | `HH:MM` string | `00:00` | Phoenix start, MST without DST. |
+| `LOW_TICKER_ENTRY_HALT_ENABLED` | Boolean toggle | `true` | Enable separate LOW ET late-entry halt. |
+| `LOW_TICKER_ENTRY_HALT_TIME_ET` | `HH:MM` string | `22:00` | Eastern halt until ET day's end. |
+| `LOW_TICKER_10PM_MAX_ASK` | Dollar string → integer cents | `0.93` | ET entry halt applies only at ask strictly below this threshold. |
+| `GATE_LOW_BEFORE` | Integer | `120` | LOW NWS window minutes before forecast low. |
+| `GATE_LOW_AFTER` | Integer | `45` | LOW NWS window minutes after forecast low. |
+| `GATE_HIGH_BEFORE` | Integer | `60` | HIGH NWS window minutes before forecast high. |
+| `GATE_HIGH_AFTER` | Integer | `30` | HIGH NWS window minutes after forecast high. |
+| `ENTRY_GATE_MODE` | Enum string | `NWS_WINDOW` | `NWS_WINDOW` or `SUNRISE` (LOW only); invalid mode warns/falls back. |
+| `SUNRISE_STRATEGY_TIME` | Nonnegative integer | `30` | Minutes after sunrise to open LOW window. |
+| `SUNRISE_ENTRY_WINDOW_MINUTES` | Positive integer | `120` | Window length after open, minutes. |
+| `SUNRISE_REQUIRE_TEMP_RISING` | Boolean toggle | `true` | Deprecated; still parsed with warning. Replace with rise-required amount. |
+| `SUNRISE_SOURCE` | Enum string | `astral` | `astral` local calculation or `api`; invalid source falls back. |
+| `SUNRISE_REQUIRE_AM_LOW` | Boolean toggle | `yes` | Require forecast minimum before local deadline; partial-forecast exception above. |
+| `NWS_LOW_DEADLINE_HOUR` | Integer, 0–23 | `12` | Exclusive AM-low local-hour deadline; also bounds morning gate. |
+| `AM_LOW_SNAPSHOT_LOCAL_HOUR` | `HH`/`HH:MM` string | `03:00`; commented example `04:00` | Local snapshot time; consumers use hour. |
+| `AM_LOW_FORECAST` | CSV → set of strings | Empty | Whole-word, case-insensitive daily-brief keywords with occurrence-level negation and thunderstorm/plural matching; empty disables. |
+| `AM_LOW_FORECAST_KEYWORDS` | Set of strings | Empty | Internal Pydantic field-derived name; `from_env()` explicitly supplies `AM_LOW_FORECAST`. Configure `AM_LOW_FORECAST`, not this internal name. |
+| `SUNRISE_TEMP_RISE_REQUIRED` | Float, °F | `1.0` | Rise above running minimum; `0` disables. Negative/invalid falls back; subdegree values warn. |
+| `SUNRISE_TEMP_BASELINE_MINUTES` | Nonnegative integer | `15` | Minutes before sunrise to begin baseline. |
+| `SUNRISE_OBS_MAX_AGE_MINUTES` | Positive integer | `15` | Observation-age limit in minutes. |
+| `SUNRISE_OBS_MAX_AGE_OVERRIDES` | CSV → dictionary of integers | Empty | `STATION:MINUTES`, e.g. `KNYC:25,KSEA:20`; positive station limits. |
+| `SUNRISE_OBS_SOURCE` | Enum string | `awc` | `awc` METAR with NWS fallback, or `nws` only. |
+| `ENTRY_OBS_CALIBRATION_ENABLED` | Boolean toggle | `no` | Opt-in LOW per-station bracket-line calibration. |
+| `ENTRY_OBS_CALIBRATION_OFFSETS` | CSV → dictionary of floats | Empty | `STATION:+/-float` °F offsets, e.g. `KSEA:+1.0`; unlisted stations unchanged. |
+| `BLOCK_ENTRY_WHEN_BELOW_BRACKET` | Boolean toggle | `yes` | Sunrise-mode LOW observed-day breach guard; unavailable evidence fails open. |
+| `BLOCK_ENTRY_WHEN_BRACKET_UNREACHED` | Boolean toggle | `no` | Sunrise-mode LOW reachability guard; unavailable evidence fails open. |
+| `BLOCK_ENTRY_WHEN_FORECAST_DIPS_BELOW_BRACKET` | Boolean toggle | `no` | Sunrise-mode LOW remaining-day forecast guard, 1°F cushion; errors fail open. |
+| `BLOCK_ENTRY_WHEN_MORNING_FORECAST_DIPS_BELOW_BRACKET` | Boolean toggle | `no` | Sunrise-mode LOW morning forecast guard, no cushion; errors fail open. |
 
 NWS trading-day windows are `[01:00 local, next 01:00)` except Phoenix
 `[00:00 local, next 00:00)`. Forecast times are persisted in UTC; forecast-date
 keys identify the station-local trading-day start, not necessarily today's UTC
 calendar date. Host timezone is not the city timezone.
 
-### 6. Unprotected-position remediation (Bug A fix)
+### pricing & sizing
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `SL_UNPROTECTED_MAX_BLIND_CYCLES` | `30` | Consecutive missing-price cycles before CRITICAL escalation; elapsed time depends on actual loop cadence. |
-| `SL_FLATTEN_UNPROTECTED_ON_BLIND` | `false` | Opt-in protective panic flatten of app-owned quantity after blind escalation. |
-| `SL_UNPROTECTED_STARTUP_ALERT_SECONDS` | `30` | Startup wall-clock blind alert delay after reconciliation; `0` disables. |
-| `ENABLE_SETTLEMENT_RECONCILER` | `true` | Background outcome settlement backfill. |
-| `RECONCILER_INTERVAL_MINUTES` | `60` | Positive settlement reconciliation interval. |
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `INITIAL_CONTRACT_COUNT` | Positive integer | `1` | Initial contracts. Fractional strings truncate; below 1 clamps to 1. |
+| `MONITOR_START_PRICE` | Dollar string → integer cents | Required; example `0.80` | Monitoring threshold. |
+| `BUY_TRIGGER_PRICE_LOW` | Dollar string → integer cents | Required; example `0.85` | LOW entry trigger; legacy single `BUY_TRIGGER_PRICE` is not an env fallback. |
+| `BUY_TRIGGER_PRICE_HIGH` | Dollar string → integer cents | Required; example `0.85` | HIGH entry trigger. |
+| `BUY_TRIGGER_PRICE_LOW_WARM` | Dollar string → integer cents | `0` | Warm LOW override; zero uses standard LOW trigger. |
+| `SPREAD_MONITOR_PRICE` | Dollar string → integer cents | Required; example `0.90` | Hard buy ceiling, not maximum bid/ask spread. |
+| `ENTRY_CROSS_SPREAD_TO_CEILING` | Boolean | `true` | Bid at supplied `max_price`; false uses order price capped there. |
+| `FALLING_KNIFE_DECAY_MINUTES` | Nonnegative integer | `10` | Continuous minutes below ceiling to clear guard; `0` retains latch without decay. |
+| `SUNRISE_MAX_SPREAD` | Dollar string → integer cents | `0`; example `0.04` | Spread cap through local 09:00; explicitly set it. |
+| `MIDAM_MAX_SPREAD` | Dollar string → integer cents | `0`; example `0.05` | Spread cap 09:01–12:00; explicitly set it. |
+| `PM_MAX_SPREAD` | Dollar string → integer cents | `0`; example `0.07` | Spread cap from 12:01; explicitly set it. |
+| `SUNRISE_MAX_SPREAD_TIGHT` | Dollar string → integer cents | `0`; commented example `0.20` | Positive sunrise-only cap for selected cities; zero disables. |
+| `SUNRISE_MAX_SPREAD_TIGHT_CITIES` | CSV → set of strings | Empty; commented example `kxlowtlv` | Lowercase series prefixes, e.g. `kxlowtlv,kxlowtchi`; no city matches without a prefix. |
+| `HEDGE_MAX_FACTOR` | Positive integer | `3`; example `5` | Total recovery levels, including initial. Invalid falls back to 3; fractions truncate; below 1 clamps. |
+| `POSITION_CAP_FAIL_CLOSED` | Boolean | `false` | After three failed LIVE lookups, true blocks; false uses known quantity with quantity guards. |
+| `EVENT_MAX_CONTRACTS` | Integer | `0` | Positive aggregate event contract cap; zero/negative disables. |
+| `EVENT_MAX_COST_CENTS` | Integer cents | `0` | Positive aggregate event cost-basis cap; zero/negative disables. |
+| `EVENT_EXPOSURE_FAIL_CLOSED` | Boolean | `false` | True blocks enabled-cap entries on unverifiable exposure; measured breaches always block. |
+| `EVAL_PRICE_FLOOR` | Dollar string → integer cents | `0.05` | Ask at/below floor skips early; held quote streams remain available. |
+| `HEDGE_TRIGGER_PRICE` | Dollar string → integer cents | `0`; example `0.50` | Deprecated for primary strategy; legacy monitor still uses this for hedge buys and is not read-only. |
+| `HEDGE_BUY` | Dollar string → integer cents | `0`; example `0.60` | Deprecated compatibility value; primary strategy no longer uses the old hedge engine. |
+| `PARTIAL_FILL_CHASE` | Boolean toggle | `no` | Opt-in entry remainder chaser; never authorizes buying past initial count. |
+| `CHASE_INTERVAL_SECONDS` | Positive integer | `60` | Repricing/fill-poll cadence, seconds. |
+| `CHASE_MAX_MINUTES` | Positive integer | `30` | Time limit when not chasing until gate close. |
+| `CHASE_UNTIL_GATE_CLOSE` | Boolean toggle | `yes` | Work remainder until gate close/lifecycle end instead of ordinary minute limit. |
+| `CHASE_TAKE_AT_CEILING` | Boolean toggle | `yes` | Lift ask at/below ceiling; false uses maker bid+1 capped at ceiling. |
 
-### 7. Intraday checkpoint + HWM exit exclusion
+### stop-loss
 
-| Variable | Default / example | Meaning |
-|---|---|---|
-| `INTRADAY_EXIT_ENABLED` | `true` | Enable LOW checkpoint exits. |
-| `INTRADAY_EXIT_SCHEDULE` | `12:00:0.85,15:00:0.90,18:00:0.90` | CSV local `HH:MM:dollar-price`; malformed entries warn/skip, all malformed falls back. |
-| `INTRADAY_EXIT_ENTRY_GRACE_MINUTES` | `90` | Skip checkpoints within grace since entry; restored unknown entry time treated as past grace. |
-| `INTRADAY_EXIT_SPREAD` | `0` | Integer-cent exit spread limit; `0` disables. Wide spreads defer checkpoint exit. |
-| `INTRADAY_EXIT_EXCLUDE` | Empty | CSV literal prefixes excluding checkpoint **and** HWM only; typos may match nothing. |
-| `HWM_EXIT_ENABLED` | `false`; commented example true | Enable LOW deterioration exit after local noon. |
-| `HWM_ARM_PRICE` | `0.93` | Dollar ask level that arms HWM. |
-| `HWM_EXIT_PRICE` | `0.88`; commented example `0.84` | Dollar ask level at/below which armed HWM fires. |
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `MANAGE_EXTERNAL_POSITIONS` | Boolean toggle | `false` | True permits aggregate manual/external holdings to be managed; false app-owned only. |
+| `STOP_LOSS_PRICE_ASK` | Dollar string → integer cents | Required; example `0.25` | Ask threshold; equality triggers. |
+| `STOP_LOSS_PRICE_BID` | Ignored dollar string | Example `0.25`; no runtime default | Template-only compatibility input, not a supported bid trigger or AppConfig field. |
+| `ENABLE_FAST_SL_EXIT` | Optional Boolean → mode default | LIVE true / PAPER false; example true | Immediate asynchronous exit path; unset field resolves by mode. |
+| `HELD_POSITION_PRICE_REFRESH_SECONDS` | Integer | `10` | Held REST quote refresh interval, seconds. |
+| `HELD_POSITIONS_LOOP_INTERVAL_MS` | Integer | `100` | Held SL loop cadence, milliseconds; intended 50–250 ms. |
+| `MAX_NO_PRICE_CYCLES` | Integer | `10` | No-price cycles before ordinary protection warnings. |
+| `STOP_LOSS_MAX_UNFILLED_ATTEMPTS` | Integer | `3` | Unfilled SL attempt limit before escalation. |
+| `SL_EXECUTE_COOLDOWN_SECONDS` | Integer | `5` | Non-bypass exit cooldown; fast/watcher bypass paths unaffected. |
+| `SL_WORKER_INTERVAL_MS` | Integer | `100` | Watcher worker polling interval. |
+| `SL_EXIT_MODE` | String | `PANIC_FLATTEN` | Alternative `AGGRESSIVE_LIMIT` enables repricing ladder. |
+| `SL_EXIT_RETRY_INTERVAL_MS` | Integer | `120`; example `300` | Fast aggressive-exit retry cadence. |
+| `SL_EXIT_MAX_ATTEMPTS` | Integer | `3` | Fast aggressive-exit attempt limit. |
+| `SL_EXIT_AGGRESSIVE_OFFSET_TICKS` | Integer ticks/cents | `2` | Initial aggressive sell offset. |
+| `SL_EXIT_MAX_SLIPPAGE` | Dollar string → integer cents | `0.20` | Maximum repricing slippage. |
+| `SL_SPREAD_HOLD_MAX_SECONDS` | Integer | `120` | Legacy aggressive hold window; `0` fires without waiting. |
+| `SL_PANIC_SELL_PRICE` | Integer cents | `1` | Panic sell floor, not a promised fill price. |
+| `SL_PANIC_RETRY_MS` | Integer | `100`; example `250` | Panic resubmission interval. |
+| `SL_PANIC_MAX_RETRIES` | Integer | `5` | Panic retry limit. |
+| `SL_PANIC_MAX_QUOTE_AGE_MS` | Integer | `30000` | Ask age limit before panic revalidation; `0` disables freshness check. |
+| `ASK_SPREAD_PROTECTION` | Dollar string → integer cents | `0.05` | Outlier gap to next distinct ask; `0` disables. |
+| `SL_BACKSTOP_ENABLED` | Boolean | `false` | Opt-in resting disaster GTC sell, cancelled before reactive sell. |
+| `SL_BACKSTOP_OFFSET` | Dollar string → integer cents | `0.05` | Offset below SL ask threshold; resting price floored at 1¢. |
+| `SL_UNPROTECTED_MAX_BLIND_CYCLES` | Positive integer | `30` | Missing-price cycles before CRITICAL escalation; elapsed time depends on cadence. |
+| `SL_FLATTEN_UNPROTECTED_ON_BLIND` | Boolean toggle | `false` | Opt-in panic flatten of app-owned quantity after blind escalation. |
+| `SL_UNPROTECTED_STARTUP_ALERT_SECONDS` | Nonnegative integer | `30` | Wall-clock blind alert delay after reconciliation; `0` disables. |
+
+### intraday exits
+
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `INTRADAY_EXIT_ENABLED` | Boolean toggle | `true` | Enable LOW checkpoint exits. |
+| `INTRADAY_EXIT_SCHEDULE` | CSV string → time/cent pairs | `12:00:0.85,15:00:0.90,18:00:0.90` | Local `HH:MM:dollar-price`; malformed entries warn/skip, all malformed falls back. |
+| `INTRADAY_EXIT_ENTRY_GRACE_MINUTES` | Positive integer | `90` | Grace since entry; restored unknown time treated as past grace. |
+| `INTRADAY_EXIT_SPREAD` | Nonnegative integer cents | `0` | Exit spread limit; `0` disables. Wide spreads defer checkpoint exit. |
+| `INTRADAY_EXIT_EXCLUDE` | CSV → set of strings | Empty | Literal prefixes excluding checkpoint **and** HWM only; typos can match nothing. |
+| `HWM_EXIT_ENABLED` | Boolean toggle | `false`; commented example true | LOW deterioration exit after local noon. |
+| `HWM_ARM_PRICE` | Dollar string → integer cents | `0.93` | Ask level that arms HWM. |
+| `HWM_EXIT_PRICE` | Dollar string → integer cents | `0.88`; commented example `0.84` | Armed HWM fires at/below this ask level. |
+| `PROFIT_TAKE_SELL_ENABLED` | Boolean | `false` | Opt-in resting take-profit GTC sell. |
+| `PROFIT_TAKE_SELL_PRICE` | Dollar string → integer cents | `0.99` | Take-profit price; resting order cancelled before reactive sells. |
+
+### EOD closeout
+
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `LOW_TICKER_DAILY_CLOSEOUT_ENABLED` | Boolean toggle | `true` | Enable LOW PM close evaluation. |
+| `LOW_TICKER_CLOSEOUT_ON_LATE_START` | Boolean toggle | `true` | Evaluate past PM close on first startup loop; false skips late-start evaluation. |
+| `LOW_PM_CLOSE_TIME` | `HH:MM` string | `22:00` | Per-ticker **local** close evaluation time. |
+| `LOW_PM_CLOSE_AMOUNT` | Positive integer cents | `93` | Strict ask `<` threshold, except override prefixes. |
+| `PM_TICKERS_CLOSE` | CSV → set of strings | Empty | Ticker/series prefixes closing regardless of ask at PM time. |
+| `LOW_TICKER_CLOSEOUT_TIME_ET` | `HH:MM` string | `22:00` | Legacy compatibility setting; PM timing uses `LOW_PM_CLOSE_TIME`. |
+
+### plumbing
+
+| Variable | Type | Default / example | Meaning |
+|---|---|---|---|
+| `TRADING_MODE` | Enum string | `PAPER` | `PAPER` simulated or `LIVE` real-money execution; use uppercase. |
+| `DRY_RUN` | Boolean toggle | `false` | Suppress live submission; not a replacement for PAPER. |
+| `REST_BASE_URL` | URL string | `https://external-api.kalshi.com` | REST origin; clients append paths. |
+| `WS_URL` | URL string | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` | Authenticated WebSocket endpoint; LIVE rejects demo URLs. |
+| `NWS_USER_AGENT` | String | Empty; example contact placeholder | Required for weather requests; identify app and real operator contact. |
+| `MYSQL_URL` | URL string | Falls back to `MYSQL_DATABASE_URL` | Sync scheduler DB URL; aiomysql driver converted to pymysql. Use the same intended DB. |
+| `HIGH_LOW_UPDATE` | Integer | `60` | Forecast refresh interval, minutes. |
+| `INSTANCE_LOCK_ENABLED` | Boolean toggle | `true` | Single-instance guard; disabling risks duplicate execution. |
+| `INSTANCE_LOCK_FILE` | Path string | `/tmp/forecastology.lock` | Base lock path; runtime adds account hash. Use a shared accessible path. |
+| `FORECASTOLOGY_LOCKFILE` | Path string | `/tmp/forecastology.lock` | Legacy fallback when `INSTANCE_LOCK_FILE` unset; scanner checks legacy and configured enabled scoped lock. |
+| `INSTANCE_ID` | String | Empty | Stable lock identity; overrides `KALSHI_API_KEY_ID`, otherwise identity is `default`. Only hash logged. |
+| `KALSHI_API_KEY_ID` | String | Unset | Lock identity when `INSTANCE_ID` absent, not an authentication replacement; neither set means shared `default`. |
+| `LOG_FILE` | Path string | `logs/run.log` | Rotating log path, relative to working directory. |
+| `LOG_MAX_BYTES` | Positive integer | `104857600` | Rotation threshold, 100 MiB. |
+| `LOG_BACKUP_COUNT` | Positive integer | `10` | Rotated backup count. |
+| `LOG_TO_CONSOLE` | Boolean toggle | `true` | Console events, captured by systemd. |
+| `LOG_TO_FILE` | Boolean toggle | `true` | File events; avoid merging both sinks into the same file. |
+| `ENABLE_SETTLEMENT_RECONCILER` | Boolean toggle | `true` | Background outcome settlement backfill. |
+| `RECONCILER_INTERVAL_MINUTES` | Positive integer | `60` | Settlement reconciliation interval. |
 
 ## Install and configure
 
@@ -463,7 +477,7 @@ for operators/developers; documentation changes alone do not require a run.
 source .venv/bin/activate
 python -m pip install pytest pytest-asyncio greenlet
 python -m pytest tests/test_config.py tests/test_nws_gate.py tests/test_sunrise_gate.py -q
-python -m pytest tests -q
+python -m pytest -q
 ```
 
 `tests/conftest.py` routes NWS DB sessions to per-test in-memory SQLite and
@@ -471,6 +485,10 @@ overrides NWS MySQL URLs; `tests/test_db_isolation.py` checks that fixture
 behavior. Do not infer that arbitrary standalone scripts or unreviewed tests
 are safe against production credentials. Use dedicated development credentials
 and DBs; pytest dependencies are not all listed in `requirements.txt`.
+Live credentials are not required for the ordinary suite. The root
+`test_ws.py` smoke test skips when `kalshi_private_key.pem` is absent; when that
+file exists it attempts an authenticated exchange WebSocket connection.
+Keep production PEMs out of a development checkout used for full-suite runs.
 
 ## Troubleshooting: structured events
 
@@ -482,6 +500,13 @@ produce repeated lines. `entry.blocked_summary` summarizes blocked reasons
 `blocked_ticker_count`, `am_low_blocked_city_count`, and `cycle_completed`.
 It is not a fill count or deployment inventory; one ticker can have more than
 one recorded gate block, so `total_blocks` need not equal the unique ticker count.
+Reason keys are stable ledger gate IDs; each ticker/reason counts once per cycle
+even when individual log messages are deduplicated. Held informational skips
+are excluded. Empty, error, and cancelled cycles also emit a summary;
+`cycle_completed` distinguishes a completed sweep. Submission outcomes include
+`submission_quote`, `price_ceiling`, `sunrise_final`, `nws_temp_window_final`,
+`position_cap`, `position_lookup_error`, `event_exposure`, `no_fill_ioc`,
+`execution_rejected`, and `execution_error`.
 
 | Symptom / events | Check |
 |---|---|

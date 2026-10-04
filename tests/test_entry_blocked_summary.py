@@ -211,6 +211,122 @@ async def test_unfilled_or_exposure_blocked_entry_remains_retryable(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["no_fill", "rejected", "event_db_error", "event_cap", "position_cap"])
+async def test_recoverable_block_then_next_eligible_cycle_fills(monkeypatch, kind):
+    from app.models import Position as PositionModel
+    from core.event_exposure import event_exposure_allows_buy
+
+    strategy = make_strategy(
+        monkeypatch, event_max_contracts=2 if kind.startswith("event") else 0,
+        event_exposure_fail_closed=True,
+    )
+    monkeypatch.setattr("core.event_exposure._event_is_expired", lambda key: False)
+    bracket = bracket_for()
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 83, 85)
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"yes_ask": 85})
+    strategy.executor.buy_success = True
+    strategy._create_entry_outcome = AsyncMock()
+    strategy._register_stop_loss_watcher = AsyncMock()
+    if kind in {"no_fill", "rejected"}:
+        original_buy = strategy.executor.buy_yes
+        strategy.executor.buy_yes = AsyncMock(return_value=ExecutionResult(
+            False, bracket.market_ticker, "yes", 85, 2, 0, 0, 0,
+            status="NO_FILL" if kind == "no_fill" else "REJECTED",
+        ))
+    elif kind == "event_db_error":
+        broken_db = SimpleNamespace(get_session=AsyncMock(side_effect=RuntimeError("DB unavailable")))
+
+        async def strict_db_error(config, db, *args, **kwargs):
+            return await event_exposure_allows_buy(config, broken_db, *args, **kwargs)
+
+        monkeypatch.setattr(state_machine, "event_exposure_allows_buy", strict_db_error)
+    elif kind == "event_cap":
+        sibling = PositionModel(
+            market_ticker="KXHIGHUNKNOWN-26OCT04-B82.5", side="yes",
+            quantity=2, avg_entry_price=85,
+        )
+        strategy.db.store[PositionModel].append(sibling)
+    elif kind == "position_cap":
+        strategy.executor.positions[bracket.market_ticker] = {"count": 7}
+
+    await strategy._evaluate_watchlist()
+    assert bracket.phase == Phase.MONITORING
+    assert not strategy.active_positions
+    if kind in {"no_fill", "rejected"}:
+        strategy.executor.buy_yes = original_buy
+    elif kind == "event_db_error":
+        monkeypatch.setattr(state_machine, "event_exposure_allows_buy", event_exposure_allows_buy)
+    elif kind == "event_cap":
+        strategy.db.store[PositionModel].remove(sibling)
+    elif kind == "position_cap":
+        strategy.executor.positions.clear()
+
+    await strategy._evaluate_watchlist()
+    assert bracket.phase == Phase.HOLDING
+    assert bracket.position_quantity == 2
+    assert bracket.pending_entry is False
+    assert len(strategy.executor.orders) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_fill_retry_does_not_bypass_same_cycle_duplicate_guard(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"yes_ask": 85})
+    for suffix in ("B80.5", "B82.5"):
+        bracket = bracket_for(f"KXHIGHUNKNOWN-26OCT04-{suffix}")
+        strategy.brackets[bracket.market_ticker] = bracket
+        strategy.cache.update_quote(bracket.market_ticker, 83, 85)
+    strategy.executor.buy_yes = AsyncMock(return_value=ExecutionResult(
+        False, bracket.market_ticker, "yes", 85, 2, 0, 0, 0, status="NO_FILL",
+    ))
+    await strategy._evaluate_watchlist()
+    assert strategy.executor.buy_yes.await_count == 1
+    assert all(item.pending_entry for item in strategy.brackets.values())
+
+
+@pytest.mark.asyncio
+async def test_duplicate_sibling_submits_next_cycle_after_first_is_holding(monkeypatch):
+    strategy = make_strategy(monkeypatch, event_max_contracts=0, event_max_cost_cents=0)
+    strategy.executor.buy_success = True
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value={"yes_ask": 85})
+    strategy._create_entry_outcome = AsyncMock()
+    strategy._register_stop_loss_watcher = AsyncMock()
+    first = bracket_for()
+    second = bracket_for("KXHIGHUNKNOWN-26OCT04-B82.5")
+    for bracket in (first, second):
+        strategy.brackets[bracket.market_ticker] = bracket
+        strategy.cache.update_quote(bracket.market_ticker, 83, 85)
+
+    await strategy._evaluate_watchlist()
+    assert len(strategy.executor.orders) == 1
+    assert first.phase == Phase.HOLDING
+    assert second.phase == Phase.MONITORING
+    assert second.pending_entry is True
+
+    await strategy._evaluate_watchlist()
+    assert len(strategy.executor.orders) == 2
+    assert strategy.executor.orders[1][0].market_ticker == second.market_ticker
+    assert second.phase == Phase.HOLDING
+    assert second.pending_entry is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_recovery_count_cap_retains_crossed_without_retry_pending(monkeypatch):
+    strategy = make_strategy(monkeypatch)
+    bracket = bracket_for(crossed_buy=True, pending_entry=True)
+    strategy.brackets[bracket.market_ticker] = bracket
+    strategy.cache.update_quote(bracket.market_ticker, 83, 85)
+    strategy._get_stop_loss_count_for_market = AsyncMock(return_value=3)
+    strategy._execute_entry = AsyncMock()
+    await strategy._evaluate_watchlist()
+    assert bracket.crossed_buy is True
+    assert bracket.pending_entry is False
+    await strategy._evaluate_watchlist()
+    strategy._execute_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cached_price, expected_orders", [(86, 1), (95, 0), (None, 0)])
 async def test_missing_fresh_ask_only_allows_bounded_actual_cached_ask(monkeypatch, cached_price, expected_orders):
     strategy = make_strategy(monkeypatch)
@@ -279,7 +395,7 @@ async def test_position_lookup_failure_carries_known_quantity_without_false_bloc
 async def test_executor_blocks_are_in_cycle_summary(monkeypatch, status, notes, gate):
     strategy = make_strategy(monkeypatch)
     logged = capture_logs(monkeypatch)
-    bracket = bracket_for()
+    bracket = bracket_for(crossed_buy=True, falling_knife_guard=True, pending_knife_tick=True)
     strategy._fetch_market_data_via_rest = AsyncMock(return_value={"yes_ask": 85})
     strategy.executor.buy_yes = AsyncMock(return_value=ExecutionResult(
         False, bracket.market_ticker, "yes", 85, 2, 0, 0, 0, status=status, notes=notes,
@@ -287,6 +403,10 @@ async def test_executor_blocks_are_in_cycle_summary(monkeypatch, status, notes, 
     strategy._evaluate_watchlist_cycle = lambda: strategy._execute_entry(bracket)
     await strategy._evaluate_watchlist()
     assert summaries(logged)[0]["counts_by_reason"] == {gate: 1}
+    assert bracket.crossed_buy is True
+    assert bracket.pending_entry is True
+    assert bracket.falling_knife_guard is True
+    assert bracket.pending_knife_tick is True
 
 
 @pytest.mark.asyncio

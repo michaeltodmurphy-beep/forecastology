@@ -149,3 +149,118 @@ async def test_monitor_includes_legacy_partial_parent_quantities(monkeypatch):
     assert (order.quantity, order.known_position_qty) == (1, 5)
     assert not held.hedge_quantity
     assert legacy.hedge_quantity == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_cap,expected_orders", [(9, 1), (0, 2)])
+async def test_monitor_event_cap_includes_same_cycle_different_hedge_targets(
+    monkeypatch, event_cap, expected_orders,
+):
+    import core.event_exposure as exposure
+
+    monkeypatch.setattr(exposure, "_event_is_expired", lambda _: False)
+    executor = _HedgeExecutor([3, 3])
+    db, config, held = _setup_monitor(monkeypatch, executor)
+    held.quantity = 3
+    second = parent("KXLOWTLAX-26JUL30-B55", quantity=3)
+    db.store[Position].append(second)
+    config.event_max_contracts = event_cap
+    targets = iter([SIBLING, "KXLOWTLAX-26JUL30-B58"])
+
+    async def find(*_args):
+        return next(targets)
+
+    monkeypatch.setattr(monitor, "_find_hedge_bracket", find)
+    trigger_all_parents(monkeypatch)
+    await monitor.run_monitor_cycle(config, db)
+    # Six primary contracts plus the first hedge of three exhaust a cap of nine.
+    assert len(executor.orders) == expected_orders
+    assert held.hedge_quantity == 3
+    assert second.hedge_quantity == (3 if event_cap == 0 else 0)
+
+
+@pytest.mark.asyncio
+async def test_monitor_event_cost_includes_parent_only_hedges(monkeypatch):
+    import core.event_exposure as exposure
+
+    monkeypatch.setattr(exposure, "_event_is_expired", lambda _: False)
+    executor = _HedgeExecutor([3])
+    db, config, held = _setup_monitor(monkeypatch, executor)
+    held.quantity = 3
+    db.store[Position].append(parent(
+        "KXLOWTLAX-26JUL30-B55", quantity=2, hedged=2,
+        target="KXLOWTLAX-26JUL30-B58",
+    ))
+    # Primary cost 5 * 80 = 400; proposed 3 * 90 = 270 would fit alone.
+    # Parent-only hedge cost (unknown) reserves 2 * ceiling 90 = 180.
+    config.event_max_cost_cents = 700
+    config.spread_monitor_price = 90
+    await monitor.run_monitor_cycle(config, db)
+    assert not executor.orders
+    assert not held.hedge_quantity
+
+
+@pytest.mark.asyncio
+async def test_direct_monitor_buy_merges_known_target_without_overriding_db(monkeypatch):
+    import core.event_exposure as exposure
+
+    monkeypatch.setattr(exposure, "_event_is_expired", lambda _: False)
+    config = make_config(event_max_contracts=3)
+    executor = _HedgeExecutor([1])
+    db = InMemoryDB()
+    result = await monitor._buy_hedge(
+        SIBLING, 60, 1, config, executor=executor, db=db, existing_position_qty=3,
+    )
+    assert result is False
+    assert not executor.orders
+    db.store[Position].append(parent(SIBLING, quantity=3))
+    result = await monitor._buy_hedge(
+        SIBLING, 60, 1, config, executor=executor, db=db, existing_position_qty=0,
+    )
+    assert result is False
+    assert not executor.orders
+
+
+@pytest.mark.asyncio
+async def test_monitor_event_cost_preserves_standalone_actual_basis(monkeypatch):
+    import core.event_exposure as exposure
+
+    monkeypatch.setattr(exposure, "_event_is_expired", lambda _: False)
+    executor = _HedgeExecutor([3])
+    db, config, held = _setup_monitor(monkeypatch, executor)
+    held.quantity = 3
+    standalone = parent(SIBLING, quantity=2)
+    standalone.avg_entry_price = 30
+    db.store[Position].append(standalone)
+    config.spread_monitor_price = 90
+    # Actual existing cost 240 + 60; submission reservation 270 fits exactly.
+    config.event_max_cost_cents = 570
+    await monitor.run_monitor_cycle(config, db)
+    assert len(executor.orders) == 1
+    assert held.hedge_quantity == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cost_cap,expected_orders", [(930, 2), (929, 1)])
+async def test_monitor_event_cost_tracks_actual_same_cycle_fill_cost(
+    monkeypatch, cost_cap, expected_orders,
+):
+    import core.event_exposure as exposure
+
+    monkeypatch.setattr(exposure, "_event_is_expired", lambda _: False)
+    executor = _HedgeExecutor([3, 3], fill_price=60)
+    db, config, held = _setup_monitor(monkeypatch, executor)
+    held.quantity = 3
+    db.store[Position].append(parent("KXLOWTLAX-26JUL30-B55", quantity=3))
+    config.event_max_cost_cents = cost_cap
+    config.spread_monitor_price = 90
+    targets = iter([SIBLING, "KXLOWTLAX-26JUL30-B58"])
+
+    async def find(*_args):
+        return next(targets)
+
+    monkeypatch.setattr(monitor, "_find_hedge_bracket", find)
+    trigger_all_parents(monkeypatch)
+    await monitor.run_monitor_cycle(config, db)
+    # Six primary contracts at 80, first actual hedge at 60, next limit at 90.
+    assert len(executor.orders) == expected_orders
