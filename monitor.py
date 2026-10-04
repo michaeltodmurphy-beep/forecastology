@@ -196,6 +196,8 @@ async def _buy_hedge(
             private_key_path=config.kalshi_private_key_path,
             dry_run=config.dry_run,
             max_buy_qty=max_allowed_qty,
+            entry_cross_spread_to_ceiling=getattr(config, "entry_cross_spread_to_ceiling", True),
+            position_cap_fail_closed=getattr(config, "position_cap_fail_closed", False),
         )
     order = OrderRequest(
         market_ticker=ticker,
@@ -204,6 +206,7 @@ async def _buy_hedge(
         quantity=qty,
         client_order_id=ensure_app_client_order_id(),
         is_hedge=True,
+        known_position_qty=max(int(existing_position_qty or 0), 0),
     )
     try:
         result = await executor.buy_yes(order, max_price=max_price)
@@ -261,6 +264,23 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
     private_key = load_private_key(config.kalshi_private_key_path)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
+        standalone_qty = {}
+        parent_hedge_qty = {}
+        legacy_targets = {}
+        for pos in positions:
+            standalone_qty[pos.market_ticker] = max(int(pos.quantity or 0), 0)
+            qty = max(int(pos.hedge_quantity or 0), 0)
+            target = pos.hedge_market_ticker
+            if qty > 0 and not target:
+                # Older partial fills did not persist their hedge target.
+                target = await _find_hedge_bracket(_get_event_ticker(pos.market_ticker), config, client)
+                legacy_targets[pos.market_ticker] = target
+            if qty > 0 and target:
+                parent_hedge_qty[target] = parent_hedge_qty.get(target, 0) + qty
+        known_qty = {
+            ticker: max(standalone_qty.get(ticker, 0), parent_hedge_qty.get(ticker, 0))
+            for ticker in standalone_qty.keys() | parent_hedge_qty.keys()
+        }
         for pos in positions:
             ticker = pos.market_ticker
 
@@ -302,18 +322,17 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
 
             # Stop-loss execution is owned by the websocket-driven watcher in run.py.
             # Keep monitor focused on reconciliation and hedge fallback logic.
-            # A position is only "hedged" once hedge_market_ticker is set, which
-            # happens only after the FULL quantity has actually filled.  Partial
-            # fills accumulate in hedge_quantity and the remainder is retried.
+            # The target is retained on partial fills; only the actual quantity
+            # determines completion, and retries stay on that same target.
             already_hedged_qty = max(int(pos.hedge_quantity or 0), 0)
             needed_hedge_qty = max(int(pos.quantity or 0), 0) - already_hedged_qty
             if (current_price <= config.hedge_trigger_price and current_price > 0
-                    and not pos.hedge_market_ticker and needed_hedge_qty > 0):
+                    and needed_hedge_qty > 0):
                 event_ticker = _get_event_ticker(ticker)
 
-                hedge_ticker = await _find_hedge_bracket(
-                    event_ticker, config, client
-                )
+                hedge_ticker = pos.hedge_market_ticker or legacy_targets.get(ticker)
+                if not hedge_ticker:
+                    hedge_ticker = await _find_hedge_bracket(event_ticker, config, client)
 
                 if hedge_ticker is None:
                     logger.warning("monitor.hedge_no_bracket_found", ticker=ticker)
@@ -335,11 +354,7 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                 logger.info("monitor.hedge_attempt", ticker=ticker,
                            hedge_ticker=hedge_ticker, hedge_price=hedge_price)
 
-                existing_hedge_qty = 0
-                for existing_pos in positions:
-                    if existing_pos.market_ticker == hedge_ticker:
-                        existing_hedge_qty = max(int(existing_pos.quantity or 0), 0)
-                        break
+                existing_hedge_qty = known_qty.get(hedge_ticker, 0)
 
                 result = await _buy_hedge(
                     hedge_ticker,
@@ -368,9 +383,10 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                 fill_price = int(result.fill_price or 0) or hedge_price
                 fully_filled = filled_qty >= needed_hedge_qty
                 new_hedged_qty = already_hedged_qty + filled_qty
-                position_values = {"hedge_quantity": new_hedged_qty}
-                if fully_filled:
-                    position_values["hedge_market_ticker"] = hedge_ticker
+                position_values = {
+                    "hedge_quantity": new_hedged_qty,
+                    "hedge_market_ticker": hedge_ticker,
+                }
                 async with await db.get_session() as session:
                     session.add(ExecutedTrade(
                         market_ticker=hedge_ticker,
@@ -378,7 +394,7 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                         side="yes",
                         price=fill_price,
                         quantity=filled_qty,
-                        total_cost_cents=fill_price * filled_qty,
+                        total_cost_cents=result.total_cost_cents,
                         trade_mode=config.trading_mode,
                         status=TradeStatus.FILLED if fully_filled else TradeStatus.PARTIAL,
                         kalshi_order_id=result.order_id or None,
@@ -390,6 +406,9 @@ async def run_monitor_cycle(config: AppConfig, db: DatabaseManager):
                         .values(**position_values)
                     )
                     await session.commit()
+                known_qty[hedge_ticker] = existing_hedge_qty + filled_qty
+                pos.hedge_quantity = new_hedged_qty
+                pos.hedge_market_ticker = hedge_ticker
                 if fully_filled:
                     logger.info("monitor.hedge_executed", ticker=ticker,
                                 hedge_ticker=hedge_ticker, qty=new_hedged_qty)

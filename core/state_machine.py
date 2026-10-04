@@ -494,6 +494,7 @@ class TemperatureStrategy:
             terminal:  True when this verdict is final for the trading day.
             **payload: extra facts (numbers, reason strings) for the report.
         """
+        self._record_gate_result(ticker, gate, verdict, **payload)
         self._gate_dedupe.log(
             logger,
             "info",
@@ -508,6 +509,24 @@ class TemperatureStrategy:
             terminal=terminal,
             **payload,
         )
+
+    def _record_gate_result(self, ticker: str, gate: str, verdict: str, **payload) -> None:
+        """Count actual blocks before ledger log deduplication, once per reason/ticker."""
+        blocks = getattr(self, "_entry_cycle_blocks", None)
+        if blocks is None:
+            return
+        if payload.get("should_evaluate_entry") is False:
+            return
+        if payload.get("reason") == "already_holding_app_owned_qty":
+            return
+        reason = gate
+        if verdict == "SKIPPED" and payload.get("reason") in {
+            "no_price", "no_spread", "settled_one_sided_book", "unknown_family",
+        }:
+            reason = payload["reason"]
+        elif verdict != "BLOCKED":
+            return
+        blocks.setdefault(reason, set()).add(ticker)
 
     @staticmethod
     def _reset_falling_knife_state(bracket: MarketBracket) -> None:
@@ -2328,6 +2347,35 @@ class TemperatureStrategy:
         return results
 
     async def _evaluate_watchlist(self):
+        self._entry_cycle_blocks = {}
+        self._entry_cycle_ticker = None
+        completed = False
+        try:
+            await self._evaluate_watchlist_cycle()
+            completed = True
+        except Exception:
+            ticker = self._entry_cycle_ticker
+            if ticker and not any(ticker in items for items in self._entry_cycle_blocks.values()):
+                self._record_gate(ticker, "entry_error", "BLOCKED", reason="evaluation_error")
+            raise
+        finally:
+            blocks = self._entry_cycle_blocks
+            am_low_cities = {
+                DAILY_BRIEF_SERIES_CITY.get(ticker.split("-")[0].upper(), ticker.split("-")[0].upper())
+                for ticker in blocks.get("am_low_keyword", set())
+            }
+            logger.info(
+                "entry.blocked_summary",
+                counts_by_reason={reason: len(items) for reason, items in sorted(blocks.items())},
+                total_blocks=sum(len(items) for items in blocks.values()),
+                blocked_ticker_count=len(set().union(*blocks.values())) if blocks else 0,
+                am_low_blocked_city_count=len(am_low_cities),
+                cycle_completed=completed,
+            )
+            self._entry_cycle_blocks = None
+            self._entry_cycle_ticker = None
+
+    async def _evaluate_watchlist_cycle(self):
         """
         Simple entry check: every cycle, loop all brackets.
         Uses WebSocket ticker quote for prices (primary, instant).
@@ -2340,7 +2388,11 @@ class TemperatureStrategy:
         max_rest_per_cycle = 5
 
         for ticker, bracket in list(self.brackets.items()):
-            should_evaluate_entry = not bracket.crossed_buy and bracket.phase == Phase.MONITORING
+            self._entry_cycle_ticker = ticker
+            should_evaluate_entry = (
+                (not bracket.crossed_buy or bracket.pending_entry)
+                and bracket.phase == Phase.MONITORING
+            )
             if should_evaluate_entry and self.config.no_trade_tickers:
                 ticker_upper = ticker.upper()
                 if any(
@@ -2463,7 +2515,8 @@ class TemperatureStrategy:
                         ticker, "sunrise", "OPEN",
                         gate_type="once", parent="",
                     )
-            self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
+            if not bracket.pending_entry:
+                self._update_falling_knife_guard(bracket, ticker, price, buy_trigger, now_utc)
 
             # ------------------------------------------------------------------
             # AM-low daily-brief keyword gate (CONTINUOUS, TERMINAL).
@@ -3046,7 +3099,7 @@ class TemperatureStrategy:
                         action="already_holding_app_owned_qty",
                     )
                     self._record_gate(
-                        ticker, "hedge_cap", "BLOCKED",
+                        ticker, "hedge_cap", "SKIPPED",
                         gate_type="continuous",
                         reason="already_holding_app_owned_qty",
                         app_owned_qty=known_app_qty,
@@ -3202,6 +3255,10 @@ class TemperatureStrategy:
                     now_utc=datetime.datetime.now(datetime.timezone.utc),
                 )
                 if not _sunrise_decision.allowed:
+                    self._record_gate(
+                        bracket.market_ticker, "sunrise_final", "BLOCKED",
+                        reason="sunrise_gate_closed",
+                    )
                     bracket.phase = Phase.MONITORING
                     bracket.crossed_buy = False
                     return
@@ -3242,6 +3299,10 @@ class TemperatureStrategy:
                         market_date=_gate_market_date.isoformat() if _gate_market_date else None,
                     )
                 else:
+                    self._record_gate(
+                        bracket.market_ticker, "nws_temp_window_final", "BLOCKED",
+                        reason="gate_closed",
+                    )
                     logger.info(
                         "entry.blocked_nws_gate_final",
                         ticker=bracket.market_ticker,
@@ -3257,6 +3318,10 @@ class TemperatureStrategy:
                     bracket.crossed_buy = False
                     return
             except Exception as _gate_exc:  # noqa: BLE001
+                self._record_gate(
+                    bracket.market_ticker, "nws_temp_window_final", "BLOCKED",
+                    reason="gate_error",
+                )
                 logger.warning(
                     "entry.blocked_nws_gate_final",
                     ticker=bracket.market_ticker,
@@ -3275,17 +3340,51 @@ class TemperatureStrategy:
                 return
         # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-        if ob is None:
-            prices = await self._fetch_live_prices([bracket.market_ticker])
-            ob = prices.get(bracket.market_ticker)
-        price = get_buy_trigger_price(self.config, bracket.market_ticker)
-        if price is None:
+        if get_buy_trigger_price(self.config, bracket.market_ticker) is None:
+            self._record_gate(bracket.market_ticker, "price_trigger", "BLOCKED", reason="unknown_family")
             bracket.phase = Phase.MONITORING
             bracket.crossed_buy = False
             logger.info("entry.blocked_unknown_family", ticker=bracket.market_ticker)
             return
-        if ob and ob.yes_asks:
-            price = ob.yes_asks[0].price
+
+        # Always refresh at the submission boundary, even when a caller supplied
+        # a cached book. Last trade / trigger prices are not executable asks.
+        fresh_data = await self._fetch_market_data_via_rest(bracket.market_ticker)
+        fresh_ob = OrderBook()
+        if fresh_data:
+            for key, levels in (
+                ("yes_ask", fresh_ob.yes_asks),
+                ("yes_bid", fresh_ob.yes_bids),
+                ("no_bid", fresh_ob.no_bids),
+            ):
+                quote_price = fresh_data.get(key)
+                if quote_price is not None:
+                    levels.append(OrderBookLevel(price=quote_price, quantity=1, order_count=0))
+        fresh_ask = fresh_ob.best_ask
+        if fresh_ask is not None:
+            ob = fresh_ob
+        elif ob is None:
+            ob = self.cache.get_orderbook(bracket.market_ticker)
+            if ob is None or ob.best_ask is None:
+                quote = self.cache.get_quote(bracket.market_ticker)
+                if quote is not None:
+                    ob = OrderBook(yes_asks=[OrderBookLevel(price=quote[1], quantity=1, order_count=0)])
+        price = ob.best_ask if ob is not None else None
+        if price is None or not 0 < price < 100:
+            self._record_gate(
+                bracket.market_ticker, "submission_quote", "BLOCKED",
+                reason="missing_executable_ask",
+            )
+            bracket.phase = Phase.MONITORING
+            bracket.pending_entry = True
+            return
+        if fresh_ask is None:
+            # A bounded IOC using an actual cached ask can safely miss a fill;
+            # it cannot exceed the hard limit. Never label this quote fresh.
+            self._record_gate(
+                bracket.market_ticker, "submission_quote", "PASS",
+                reason="cached_ask_bounded_limit", cached_ask=price,
+            )
 
         # Ceiling re-check on the FRESH ask: the watchlist ceiling gate ran on
         # a cached quote; the market may have moved since.  Never submit a buy
@@ -3295,13 +3394,23 @@ class TemperatureStrategy:
             logger.warning(
                 "phase.b.entry_blocked_above_ceiling",
                 ticker=bracket.market_ticker,
-                fresh_ask=price,
+                ask=price,
+                quote_source="rest" if fresh_ask is not None else "cache",
                 max_price=_ceiling,
                 action="ceiling_recheck_blocked_submission",
             )
+            self._record_gate(
+                bracket.market_ticker, "price_ceiling", "BLOCKED",
+                reason="submission_ask_above_ceiling", ask=price, max_price=_ceiling,
+                quote_source="rest" if fresh_ask is not None else "cache",
+            )
             bracket.phase = Phase.MONITORING
-            bracket.crossed_buy = False
+            bracket.pending_entry = True
             return
+        self._record_gate(
+            bracket.market_ticker, "price_ceiling", "PASS",
+            reason="submission_ask_within_ceiling", ask=price, max_price=_ceiling,
+        )
 
         proposed_qty = quantity or self.config.initial_contract_count
 
@@ -3313,6 +3422,10 @@ class TemperatureStrategy:
             self.config.initial_contract_count, hedge_max, 0
         )
         if proposed_qty > max_allowed_qty:
+            self._record_gate(
+                bracket.market_ticker, "position_cap", "BLOCKED",
+                reason="proposed_quantity_above_cap",
+            )
             logger.critical(
                 "hedge.cap_blocked",
                 ticker=bracket.market_ticker,
@@ -3340,6 +3453,10 @@ class TemperatureStrategy:
             )
         total_position_qty = existing_position_qty + proposed_qty
         if total_position_qty > max_allowed_qty:
+            self._record_gate(
+                bracket.market_ticker, "position_cap", "BLOCKED",
+                reason="total_quantity_above_cap",
+            )
             logger.critical(
                 "hedge.cap_blocked",
                 ticker=bracket.market_ticker,
@@ -3367,7 +3484,9 @@ class TemperatureStrategy:
             source="state_machine_entry",
             target_existing_qty=existing_position_qty if _position_verified else None,
         ):
+            self._record_gate(bracket.market_ticker, "event_exposure", "BLOCKED")
             bracket.phase = Phase.MONITORING
+            bracket.pending_entry = True
             return
 
         import uuid
@@ -3376,11 +3495,33 @@ class TemperatureStrategy:
             side=OrderSide.BUY_YES,
             price=price,
             quantity=proposed_qty,
+            known_position_qty=existing_position_qty,
         )
 
         # Use spread_monitor_price as max price to ensure quick fill
         max_price = self.config.spread_monitor_price
-        result = await self.executor.buy_yes(order, max_price=max_price)
+        try:
+            result = await self.executor.buy_yes(order, max_price=max_price)
+        except Exception:
+            self._record_gate(bracket.market_ticker, "execution_error", "BLOCKED")
+            bracket.phase = Phase.MONITORING
+            bracket.pending_entry = True
+            raise
+        if not result.success:
+            notes = result.notes or ""
+            if result.status == "NO_FILL" or (
+                result.fill_quantity == 0 and "immediate_or_cancel" in notes
+            ):
+                gate = "no_fill_ioc"
+            elif "position_cap_unverifiable" in notes:
+                gate = "position_lookup_error"
+            elif "cap_blocked" in notes or "position_cap" in notes:
+                gate = "position_cap"
+            elif "above_ceiling" in notes:
+                gate = "price_ceiling"
+            else:
+                gate = "execution_rejected"
+            self._record_gate(bracket.market_ticker, gate, "BLOCKED", reason=result.status)
 
         # Log to database
         async with await self.db.get_session() as session:
@@ -3411,6 +3552,7 @@ class TemperatureStrategy:
                                 cents=backfilled_cents)
 
             bracket.phase = Phase.HOLDING
+            bracket.pending_entry = False
             new_position_qty = max(existing_position_qty + max(int(result.fill_quantity or 0), 0), 0)
             try:
                 positions = await self.executor.get_positions()
@@ -3525,6 +3667,7 @@ class TemperatureStrategy:
                     await self._maybe_start_chaser(bracket, remaining, target)
         else:
             bracket.phase = Phase.MONITORING
+            bracket.pending_entry = True
             logger.warning("phase.b.entry_failed", ticker=bracket.market_ticker,
                            notes=result.notes)
 
@@ -5712,21 +5855,33 @@ class TemperatureStrategy:
                 mkt = resp.json().get("market", {})
                 result = {}
 
-                ya = self._first_non_none(mkt.get("yes_ask_dollars"), mkt.get("yes_ask"))
-                ya_cents = self._to_cents(ya)
+                def price_cents(field):
+                    dollars = mkt.get(f"{field}_dollars")
+                    if dollars is not None and dollars != "":
+                        return self._to_cents(dollars)
+                    raw = mkt.get(field)
+                    if raw is None or raw == "":
+                        return None
+                    try:
+                        return round(float(raw))
+                    except (TypeError, ValueError):
+                        return None
+
+                ya_cents = price_cents("yes_ask")
                 if ya_cents is not None:
                     result["yes_ask"] = ya_cents
 
-                yb = self._first_non_none(mkt.get("yes_bid_dollars"), mkt.get("yes_bid"))
-                yb_cents = self._to_cents(yb)
+                yb_cents = price_cents("yes_bid")
                 if yb_cents is not None:
                     result["yes_bid"] = yb_cents
 
-                lp = self._first_non_none(
-                    mkt.get("last_price_dollars"),
-                    mkt.get("last_price"),
-                )
-                lp_cents = self._to_cents(lp)
+                nb_cents = price_cents("no_bid")
+                if nb_cents is not None:
+                    result["no_bid"] = nb_cents
+                    if "yes_ask" not in result:
+                        result["yes_ask"] = 100 - nb_cents
+
+                lp_cents = price_cents("last_price")
                 if lp_cents is not None:
                     result["price"] = lp_cents
                 elif "yes_ask" in result:

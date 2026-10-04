@@ -3,6 +3,21 @@ import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.types import OrderRequest, OrderSide
+import pytest
+
+
+@pytest.mark.parametrize("price", [80, 98])
+def test_buy_crosses_to_ceiling_without_exceeding_it(price):
+    order = OrderRequest("TICKER", OrderSide.BUY_YES, price, 6)
+    assert order.to_kalshi_payload(max_price=96)["price"] == "0.9600"
+
+
+@pytest.mark.parametrize(("price", "expected"), [(80, "0.8000"), (98, "0.9600")])
+def test_buy_crossing_can_be_disabled_but_ceiling_still_applies(price, expected):
+    order = OrderRequest("TICKER", OrderSide.BUY_YES, price, 6)
+    assert order.to_kalshi_payload(
+        max_price=96, cross_spread_to_ceiling=False,
+    )["price"] == expected
 
 
 class TestOrderRequest:

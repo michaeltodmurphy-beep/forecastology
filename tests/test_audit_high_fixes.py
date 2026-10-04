@@ -11,9 +11,12 @@ Tests for the five High-severity audit fixes:
 
 All tests exercise the production functions directly.
 """
+import datetime
 import os
 import sys
+from types import SimpleNamespace
 from typing import Optional
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -124,8 +127,8 @@ def _block_all_http(monkeypatch):
 
 def test_payload_max_price_is_a_true_cap():
     order = OrderRequest(TICKER, OrderSide.BUY_YES, price=85, quantity=1)
-    # Ceiling above requested price: submit the requested price, NOT the ceiling.
-    assert order.to_kalshi_payload(max_price=90)["price"] == "0.8500"
+    # Bid at the ceiling to cross the spread, without ever exceeding it.
+    assert order.to_kalshi_payload(max_price=90)["price"] == "0.9000"
     # Requested price above the ceiling: clamp to the ceiling.
     high = OrderRequest(TICKER, OrderSide.BUY_YES, price=95, quantity=1)
     assert high.to_kalshi_payload(max_price=90)["price"] == "0.9000"
@@ -153,7 +156,7 @@ async def test_live_executor_submits_limit_at_or_below_ceiling(monkeypatch):
     assert result.success is True
     assert len(client.posts) == 1
     url, payload = client.posts[0]
-    assert payload["price"] == "0.8500"
+    assert payload["price"] == "0.9000"
     assert url.endswith(REST_PORTFOLIO_ORDERS)
 
 
@@ -164,10 +167,11 @@ async def test_execute_entry_rechecks_fresh_ask_against_ceiling(monkeypatch):
     strategy = make_strategy(monkeypatch, executor=executor, spread_monitor_price=90)
     logged = capture_logs(monkeypatch)
 
-    async def fresh_prices(tickers):
-        return {TICKER: OrderBook(yes_asks=[OrderBookLevel(price=95, quantity=5, order_count=1)])}
+    async def fresh_prices(ticker):
+        assert ticker == TICKER
+        return {"yes_ask": 95}
 
-    monkeypatch.setattr(strategy, "_fetch_live_prices", fresh_prices)
+    monkeypatch.setattr(strategy, "_fetch_market_data_via_rest", fresh_prices)
     bracket = MarketBracket(TICKER, "KXLOWTLAX-26JUL30", "KXLOWTLAX", "b",
                             phase=Phase.ENTERING, crossed_buy=True)
 
@@ -175,9 +179,11 @@ async def test_execute_entry_rechecks_fresh_ask_against_ceiling(monkeypatch):
 
     assert executor.orders == [], "no order may be submitted above the ceiling"
     assert bracket.phase == Phase.MONITORING
-    assert bracket.crossed_buy is False
+    assert bracket.crossed_buy is True
+    assert bracket.pending_entry is True
     block = next(kw for ev, kw in logged if ev == "phase.b.entry_blocked_above_ceiling")
-    assert block["fresh_ask"] == 95 and block["max_price"] == 90
+    assert block["ask"] == 95 and block["max_price"] == 90
+    assert block["quote_source"] == "rest"
 
 
 @pytest.mark.asyncio
@@ -186,10 +192,11 @@ async def test_execute_entry_submits_when_fresh_ask_within_ceiling(monkeypatch):
     executor.buy_success = True
     strategy = make_strategy(monkeypatch, executor=executor, spread_monitor_price=90)
 
-    async def fresh_prices(tickers):
-        return {TICKER: OrderBook(yes_asks=[OrderBookLevel(price=88, quantity=5, order_count=1)])}
+    async def fresh_prices(ticker):
+        assert ticker == TICKER
+        return {"yes_ask": 88}
 
-    monkeypatch.setattr(strategy, "_fetch_live_prices", fresh_prices)
+    monkeypatch.setattr(strategy, "_fetch_market_data_via_rest", fresh_prices)
     bracket = MarketBracket(TICKER, "KXLOWTLAX-26JUL30", "KXLOWTLAX", "b", phase=Phase.ENTERING)
 
     await strategy._execute_entry(bracket)
@@ -197,7 +204,7 @@ async def test_execute_entry_submits_when_fresh_ask_within_ceiling(monkeypatch):
     assert len(executor.orders) == 1
     order, max_price = executor.orders[0]
     assert order.price == 88 and max_price == 90
-    assert order.to_kalshi_payload(max_price)["price"] == "0.8800"
+    assert order.to_kalshi_payload(max_price)["price"] == "0.9000"
 
 
 def _scanner_fake_db():
@@ -322,7 +329,7 @@ async def test_monitor_buy_hedge_live_uses_v2_events_orders_endpoint(monkeypatch
     assert len(live_client.posts) == 1
     url, payload = live_client.posts[0]
     assert url.endswith("/trade-api/v2/portfolio/events/orders")
-    assert payload["price"] == "0.6000"  # capped at requested price, never 0.90
+    assert payload["price"] == "0.9000"  # marketable, never above the ceiling
     assert payload["time_in_force"] == "immediate_or_cancel"
 
 
@@ -410,7 +417,7 @@ async def test_monitor_partial_hedge_fill_records_partial_and_retries_remainder(
     assert trades[0].status == TradeStatus.PARTIAL
     assert trades[0].quantity == 1
     assert trades[0].total_cost_cents == 60
-    assert held.hedge_market_ticker is None, "partial fill must NOT mark the position hedged"
+    assert held.hedge_market_ticker == SIBLING, "partial fill must retain its target"
     assert held.hedge_quantity == 1
 
     # Next cycle retries ONLY the remaining quantity.
@@ -459,7 +466,7 @@ async def test_monitor_records_fill_even_when_result_not_success(monkeypatch):
     assert len(trades) == 1 and trades[0].quantity == 2
     assert trades[0].status == TradeStatus.PARTIAL
     assert held.hedge_quantity == 2
-    assert held.hedge_market_ticker is None
+    assert held.hedge_market_ticker == SIBLING
 
 
 # ---------------------------------------------------------------------------
@@ -471,9 +478,37 @@ def test_event_key_and_default_caps():
     assert event_key(SIBLING) == event_key(TICKER)
     assert event_key(OTHER_EVENT) != event_key(TICKER)
     cfg = make_config(initial_contract_count=2, hedge_max_factor=3, spread_monitor_price=90)
-    assert resolve_event_caps(cfg) == (8, 720)
+    assert resolve_event_caps(cfg) == (None, None)
     cfg.event_max_contracts, cfg.event_max_cost_cents = 5, -1
     assert resolve_event_caps(cfg) == (5, None)
+
+
+@pytest.mark.parametrize("value", [0, None, -1])
+def test_event_caps_nonpositive_values_disable_caps(value):
+    assert resolve_event_caps(SimpleNamespace(
+        event_max_contracts=value, event_max_cost_cents=value,
+        initial_contract_count=6, hedge_max_factor=1, spread_monitor_price=90,
+    )) == (None, None)
+    assert resolve_event_caps(SimpleNamespace()) == (None, None)
+
+
+@pytest.mark.parametrize("contracts, cost, expected", [
+    (4, 0, (4, None)), (0, 200, (None, 200)), (4, 200, (4, 200)),
+])
+def test_event_caps_positive_values_are_independent(contracts, cost, expected):
+    assert resolve_event_caps(SimpleNamespace(
+        event_max_contracts=contracts, event_max_cost_cents=cost,
+    )) == expected
+
+
+@pytest.fixture
+def exposure_today(monkeypatch):
+    class _Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 30, 12, tzinfo=datetime.timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(event_exposure_mod, "datetime", SimpleNamespace(datetime=_Clock))
 
 
 def _pos(ticker, qty, price=80):
@@ -481,9 +516,9 @@ def _pos(ticker, qty, price=80):
 
 
 @pytest.mark.asyncio
-async def test_event_exposure_counts_sibling_brackets_from_db(monkeypatch):
+async def test_event_exposure_counts_sibling_brackets_from_db(monkeypatch, exposure_today):
     logged = _capture(monkeypatch, event_exposure_mod.logger)
-    cfg = make_config(initial_contract_count=2, hedge_max_factor=2)  # auto cap = 4
+    cfg = make_config(event_max_contracts=4)
     db = InMemoryDB([_pos(SIBLING, 3), _pos(OTHER_EVENT, 4)])
 
     assert await event_exposure_allows_buy(cfg, db, TICKER, 1, 85) is True
@@ -494,41 +529,251 @@ async def test_event_exposure_counts_sibling_brackets_from_db(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_event_exposure_cost_cap_and_inflight():
+async def test_event_exposure_cost_cap_and_inflight(exposure_today):
     cfg = make_config(initial_contract_count=2, hedge_max_factor=2)
     cfg.event_max_contracts = 100
     cfg.event_max_cost_cents = 200
     db = InMemoryDB([_pos(SIBLING, 1, price=80)])
-    assert await event_exposure_allows_buy(cfg, db, TICKER, 1, 85) is True   # 165
-    assert await event_exposure_allows_buy(cfg, db, TICKER, 2, 85) is False  # 250
+    assert await event_exposure_allows_buy(cfg, db, TICKER, 1, 85) is True   # 170
+    assert await event_exposure_allows_buy(cfg, db, TICKER, 2, 85) is False  # 260
     # In-flight (e.g. a working chaser) counts at its price.
     assert await event_exposure_allows_buy(
         cfg, db, TICKER, 1, 85, inflight={"KXLOWTLAX-26JUL30-B64.5": (1, 90)}
-    ) is False  # 80 + 90 + 85 = 255
+    ) is False  # 80 + 90 + 90 = 260
 
 
 @pytest.mark.asyncio
-async def test_event_exposure_fails_closed_on_db_error(monkeypatch):
+@pytest.mark.parametrize("crossing", [None, True, False])
+async def test_event_exposure_cost_reserves_effective_submission_limit(
+    monkeypatch, exposure_today, crossing,
+):
+    cfg = SimpleNamespace(event_max_cost_cents=500, spread_monitor_price=96)
+    if crossing is not None:
+        cfg.entry_cross_spread_to_ceiling = crossing
     logged = _capture(monkeypatch, event_exposure_mod.logger)
+    allows = await event_exposure_allows_buy(cfg, InMemoryDB(), TICKER, 6, 80)
+    assert allows is (crossing is False)
+    if crossing is not False:
+        block = next(kw for ev, kw in logged if ev == "entry.event_exposure_cap_blocked")
+        assert block["proposed_cost_cents"] == 576
+        assert block["total_cost_cents"] == 576
+        assert block["reason"] == "cost"
+
+
+@pytest.mark.asyncio
+async def test_event_exposure_cost_preserves_stored_cost_basis(exposure_today):
+    cfg = SimpleNamespace(event_max_cost_cents=576, spread_monitor_price=96)
+    db = InMemoryDB([_pos(SIBLING, 6, price=80)])
+    assert await event_exposure_allows_buy(cfg, db, TICKER, 1, 80)
+    assert db.store[PositionModel][0].avg_entry_price == 80
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crossing", [True, False])
+async def test_scanner_event_exposure_reserves_submission_limit(
+    monkeypatch, exposure_today, crossing,
+):
+    cfg = make_config(initial_contract_count=6, hedge_max_factor=1,
+                      spread_monitor_price=96, buy_trigger_price_low=80,
+                      event_max_cost_cents=500, entry_cross_spread_to_ceiling=crossing)
+    bought = []
+
+    async def fake_fetch(*_args):
+        return [TICKER], {TICKER: {"best_ask": 80, "best_bid": 79, "spread": 1}}
+
+    async def fake_buy(_config, ticker, ask, _client):
+        bought.append((ticker, ask))
+        return True
+
+    monkeypatch.setattr(scanner_module, "_fetch_markets_via_rest", fake_fetch)
+    monkeypatch.setattr(scanner_module, "buy_market", fake_buy)
+    await scanner_module.run_scan_cycle(cfg, _scanner_fake_db())
+    assert bought == ([] if crossing else [(TICKER, 80)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crossing", [True, False])
+async def test_monitor_event_exposure_reserves_submission_limit(exposure_today, crossing):
+    cfg = make_config(initial_contract_count=6, hedge_max_factor=1,
+                      spread_monitor_price=96, event_max_cost_cents=500,
+                      entry_cross_spread_to_ceiling=crossing)
+    executor = FakeExecutor()
+    executor.buy_success = True
+    result = await mon._buy_hedge(
+        TICKER, 80, 6, cfg, executor=executor, db=InMemoryDB(),
+    )
+    assert len(executor.orders) == (0 if crossing else 1)
+    if crossing:
+        assert result is False
+    else:
+        assert result.success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_closed", [None, False, True])
+@pytest.mark.parametrize("failure_stage", ["session", "execute"])
+async def test_event_exposure_db_error_policy(monkeypatch, exposure_today,
+                                            fail_closed, failure_stage):
+    logged = []
+    monkeypatch.setattr(event_exposure_mod.logger, "critical",
+                        lambda event, **kw: logged.append((event, kw)))
 
     class _BrokenDB:
         async def get_session(self):
+            if failure_stage == "session":
+                raise RuntimeError("db down")
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, *_args):
             raise RuntimeError("db down")
 
-    cfg = make_config()
-    assert await event_exposure_allows_buy(cfg, _BrokenDB(), TICKER, 1, 85) is False
-    assert any(ev == "entry.event_exposure_unverifiable" for ev, _ in logged)
+    cfg = SimpleNamespace(event_max_contracts=4)
+    if fail_closed is not None:
+        cfg.event_exposure_fail_closed = fail_closed
+    assert await event_exposure_allows_buy(cfg, _BrokenDB(), TICKER, 1, 85) is not bool(fail_closed)
+    assert logged == [("entry.event_exposure_unverifiable", {
+        "ticker": TICKER, "event_ticker": event_key(TICKER), "source": "",
+        "error": "db down",
+        "action": "event_exposure_cap_blocked" if fail_closed else "event_exposure_cap_bypassed",
+    })]
 
 
 @pytest.mark.asyncio
-async def test_state_machine_entry_blocked_by_event_cap_across_cycles(monkeypatch):
+async def test_event_exposure_disabled_does_not_query_db():
+    class _UnexpectedDB:
+        async def get_session(self):
+            pytest.fail("disabled caps must not query the DB")
+
+    assert await event_exposure_allows_buy(
+        SimpleNamespace(event_exposure_fail_closed=True), _UnexpectedDB(), TICKER, 6, 85
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("date_prefix, counted", [
+    ("26JUL29", False), ("26JUL30", True), ("26JUL31", True), ("UNKNOWN", True),
+    ("26JUL32", True), ("26JUL3", True),
+])
+async def test_event_exposure_excludes_only_expired_positive_positions(
+    exposure_today, date_prefix, counted,
+):
+    ticker = f"KXLOWTLAX-{date_prefix}-B60.5"
+    sibling = f"KXLOWTLAX-{date_prefix}-B62.5"
+    db = InMemoryDB([_pos(sibling, 4), _pos(ticker, 0)])
+    cfg = SimpleNamespace(event_max_contracts=4)
+    assert await event_exposure_allows_buy(cfg, db, ticker, 1, 85) is not counted
+    assert await event_exposure_allows_buy(
+        cfg, InMemoryDB(), ticker, 1, 85,
+        extra_holdings={sibling: (4, 80)}, inflight={ticker: (4, 80)},
+        target_existing_qty=4,
+    ) is False
+    assert await event_exposure_mod.load_event_holdings(db, ticker, 90) == (
+        {sibling: (4, 80)} if counted else {}
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_exposure_zeroed_settled_positions_do_not_count(exposure_today):
+    cfg = SimpleNamespace(event_max_contracts=4)
+    db = InMemoryDB([_pos(SIBLING, 0)])
+    assert await event_exposure_allows_buy(cfg, db, TICKER, 4, 85)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("series, counted", [
+    ("KXLOWTLAX", True), ("KXLOWTSEA", True), ("KXLOWTPHX", True),
+    ("KXLOWTATL", False), ("UNKNOWN", False),
+])
+async def test_event_exposure_city_local_date_at_eastern_rollover(
+    monkeypatch, series, counted,
+):
+    class _Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # July 31 Eastern, but July 30 21:30 Pacific and Phoenix.
+            return cls(2026, 7, 31, 4, 30, tzinfo=datetime.timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(event_exposure_mod, "datetime", SimpleNamespace(datetime=_Clock))
+    ticker = f"{series}-26JUL30-B60.5"
+    sibling = f"{series}-26JUL30-B62.5"
+    cfg = SimpleNamespace(event_max_contracts=4)
+    db = InMemoryDB([_pos(sibling, 4)])
+    assert await event_exposure_allows_buy(cfg, db, ticker, 1, 85) is not counted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ticker", ["KXLOWTLAX-26JUL29-B60.5", "GENERIC-26JUL29-B60.5"])
+@pytest.mark.parametrize("caps", [
+    {"event_max_contracts": 4}, {"event_max_cost_cents": 400},
+])
+async def test_event_exposure_expired_holdings_never_bypass_proposed_caps(
+    exposure_today, ticker, caps,
+):
+    assert not await event_exposure_allows_buy(
+        SimpleNamespace(**caps), InMemoryDB([_pos(ticker, 10)]), ticker, 5, 85
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("known_source", ["target", "memory", "inflight"])
+@pytest.mark.parametrize("caps", [
+    {"event_max_contracts": 4}, {"event_max_cost_cents": 400},
+])
+async def test_event_exposure_expired_db_rows_do_not_hide_known_live_risk(
+    exposure_today, known_source, caps,
+):
+    ticker = "KXLOWTLAX-26JUL29-B60.5"
+    sibling = "KXLOWTLAX-26JUL29-B62.5"
+    cfg = SimpleNamespace(spread_monitor_price=90, **caps)
+    db = InMemoryDB([_pos(sibling, 100)])
+    assert await event_exposure_allows_buy(cfg, db, ticker, 1, 80)
+    known = {
+        "target": {"target_existing_qty": 4},
+        "memory": {"extra_holdings": {sibling: (4, 80)}},
+        "inflight": {"inflight": {sibling: (4, 80)}},
+    }[known_source]
+    assert not await event_exposure_allows_buy(cfg, db, ticker, 1, 80, **known)
+
+
+@pytest.mark.asyncio
+async def test_state_machine_two_same_event_six_contract_entries_with_caps_unset(
+    monkeypatch, exposure_today,
+):
+    executor = FakeExecutor()
+    executor.buy_success = True
+    db = InMemoryDB()
+    strategy = make_strategy(monkeypatch, executor=executor, db=db,
+                             initial_contract_count=6, hedge_max_factor=1)
+    monkeypatch.setattr(strategy, "_fetch_market_data_via_rest",
+                        AsyncMock(return_value={"yes_ask": 85}))
+    ob = OrderBook(yes_asks=[OrderBookLevel(price=85, quantity=20, order_count=1)])
+    for ticker in (TICKER, SIBLING):
+        strategy._entry_step_seen = set()
+        bracket = MarketBracket(ticker, event_key(ticker), "KXLOWTLAX", "b",
+                                phase=Phase.ENTERING)
+        await strategy._execute_entry(bracket, ob=ob)
+        assert bracket.phase == Phase.HOLDING
+        assert bracket.position_quantity == 6
+    assert [order.quantity for order, _ in executor.orders] == [6, 6]
+    assert sum(pos.quantity for pos in db.store[PositionModel]) == 12
+
+
+@pytest.mark.asyncio
+async def test_state_machine_entry_blocked_by_event_cap_across_cycles(monkeypatch, exposure_today):
     """A sibling bracket held from an earlier cycle (DB) blocks a new entry,
     even though the per-cycle duplicate-entry set is reset every sweep."""
     executor = FakeExecutor()
     executor.buy_success = True
     db = InMemoryDB([_pos(SIBLING, 4)])
     strategy = make_strategy(monkeypatch, executor=executor, db=db,
-                             initial_contract_count=2, hedge_max_factor=2)  # cap 4
+                             initial_contract_count=2, hedge_max_factor=2,
+                             event_max_contracts=4)
     ob = OrderBook(yes_asks=[OrderBookLevel(price=85, quantity=10, order_count=1)])
 
     for _cycle in range(2):
@@ -548,11 +793,12 @@ async def test_state_machine_entry_blocked_by_event_cap_across_cycles(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_state_machine_entry_counts_in_memory_positions(monkeypatch):
+async def test_state_machine_entry_counts_in_memory_positions(monkeypatch, exposure_today):
     executor = FakeExecutor()
     executor.buy_success = True
     strategy = make_strategy(monkeypatch, executor=executor,
-                             initial_contract_count=2, hedge_max_factor=2)  # cap 4
+                             initial_contract_count=2, hedge_max_factor=2,
+                             event_max_contracts=4)
     held = MarketBracket(SIBLING, "KXLOWTLAX-26JUL30", "KXLOWTLAX", "h",
                          phase=Phase.HOLDING, position_quantity=3, avg_entry=80)
     strategy.active_positions[SIBLING] = held
@@ -566,7 +812,7 @@ async def test_state_machine_entry_counts_in_memory_positions(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 5. Position cap fails closed
+# 5. Strict position cap is opt-in
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -575,6 +821,7 @@ async def test_live_position_cap_fails_closed_on_lookup_error(monkeypatch):
     client = _RecordingClient(post_payload=_filled_payload(1, 85),
                               get_exc=RuntimeError("positions API down"))
     ex = _make_live_executor(monkeypatch, client, max_buy_qty=8)
+    ex.position_cap_fail_closed = True
 
     result = await ex.buy_yes(OrderRequest(TICKER, OrderSide.BUY_YES, 85, 1), max_price=90)
 
@@ -589,6 +836,7 @@ async def test_live_position_cap_fails_closed_on_lookup_error(monkeypatch):
 async def test_live_position_cap_fails_closed_on_malformed_count(monkeypatch):
     client = _RecordingClient(post_payload=_filled_payload(1, 85))
     ex = _make_live_executor(monkeypatch, client, max_buy_qty=8)
+    ex.position_cap_fail_closed = True
 
     async def bad_positions():
         return {TICKER: {"count": "not-a-number"}}

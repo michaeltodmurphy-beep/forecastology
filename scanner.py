@@ -25,7 +25,7 @@ import asyncio
 import fcntl
 import os
 import structlog
-from typing import Optional
+from typing import Optional, Union
 
 import httpx
 
@@ -38,6 +38,7 @@ from core.state_machine import hedge_policy, get_buy_trigger_price, get_max_spre
 from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
 from data.ticker_cache import TickerCache
 from execution.factory import create_executor
+from execution.base import ExecutionResult
 from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
@@ -45,26 +46,29 @@ logger = structlog.get_logger(__name__)
 DAEMON_LOCKFILE = os.getenv("FORECASTOLOGY_LOCKFILE", "/tmp/forecastology.lock")
 
 
-def _daemon_is_running() -> bool:
+def _daemon_is_running(config: Optional[AppConfig] = None) -> bool:
     """Return True if the run.py daemon currently holds the process lockfile.
 
     Uses a non-blocking exclusive flock attempt.  If the lock is already held
     by another process the acquisition fails, meaning run.py is active.
     """
-    try:
-        handle = open(DAEMON_LOCKFILE, "r")
-    except FileNotFoundError:
-        return False
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Successfully acquired → no daemon running; release immediately.
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
-        return False
-    except OSError:
-        # Lock is held by another process → daemon is running.
-        handle.close()
-        return True
+    paths = [DAEMON_LOCKFILE]
+    if config is not None:
+        from app.runtime_safety import account_lock_file
+        from run import _account_id_hash
+        paths.append(account_lock_file(config.instance_lock_file, _account_id_hash(config)))
+    for path in paths:
+        try:
+            handle = open(path, "r")
+        except FileNotFoundError:
+            continue
+        with handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                return True
+    return False
 
 
 async def _fetch_markets_via_rest(
@@ -125,7 +129,7 @@ async def buy_market(
     ticker: str,
     price_cents: int,
     client: httpx.AsyncClient,
-) -> bool:
+) -> Union[ExecutionResult, bool]:
     """Place a buy order for *ticker* through the shared capped executor.
 
     Routes through ``create_executor`` / ``LiveTradeExecutor.buy_yes`` (or
@@ -138,7 +142,7 @@ async def buy_market(
     executor: if the proposed order would exceed ``max_allowed_qty``, the
     order is rejected and ``hedge.cap_blocked`` is logged at CRITICAL.
 
-    Returns True if the order was filled, False otherwise.
+    Returns the execution result when contracts filled, False otherwise.
     """
     _, _, max_allowed_qty = hedge_policy(
         config.initial_contract_count, config.hedge_max_factor, 0
@@ -164,6 +168,8 @@ async def buy_market(
         private_key_path=config.kalshi_private_key_path,
         dry_run=config.dry_run,
         max_buy_qty=max_allowed_qty,
+        entry_cross_spread_to_ceiling=getattr(config, "entry_cross_spread_to_ceiling", True),
+        position_cap_fail_closed=getattr(config, "position_cap_fail_closed", False),
     )
 
     max_price = config.spread_monitor_price
@@ -197,12 +203,13 @@ async def buy_market(
     logger.info("scanner.buy_attempt", ticker=ticker, price=price_cents,
                 max_price=max_price, qty=proposed_qty)
 
+    order.known_position_qty = existing_position_qty
     try:
         result = await executor.buy_yes(order, max_price=max_price)
-        if result.success:
+        if result.success or result.fill_quantity > 0:
             logger.info("scanner.buy_filled", ticker=ticker,
                         price=result.fill_price, qty=result.fill_quantity)
-            return True
+            return result
         else:
             logger.warning("scanner.buy_rejected", ticker=ticker,
                            status=result.status, notes=result.notes)
@@ -281,9 +288,9 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
                 ):
                     continue
 
-                success = await buy_market(config, ticker, ask, client)
+                result = await buy_market(config, ticker, ask, client)
 
-                if success:
+                if isinstance(result, ExecutionResult) and result.fill_quantity > 0:
                     buy_attempts += 1
                     # Log to DB as a position
                     async with await db.get_session() as session:
@@ -298,9 +305,9 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
                             event_ticker=event_ticker,
                             series_ticker=series_ticker,
                             side="yes",
-                            quantity=config.initial_contract_count,
-                            avg_entry_price=ask,
-                            last_price=ask,
+                            quantity=result.fill_quantity,
+                            avg_entry_price=result.fill_price,
+                            last_price=result.fill_price,
                         )
                         session.add(pos)
 
@@ -309,11 +316,15 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
                             market_ticker=ticker,
                             action=TradeAction.BUY,
                             side="yes",
-                            price=ask,
-                            quantity=config.initial_contract_count,
-                            total_cost_cents=ask * config.initial_contract_count,
+                            price=result.fill_price,
+                            quantity=result.fill_quantity,
+                            total_cost_cents=result.total_cost_cents,
                             trade_mode=config.trading_mode,
-                            status=TradeStatus.FILLED,
+                            status=(TradeStatus.FILLED
+                                    if result.fill_quantity >= config.initial_contract_count
+                                    else TradeStatus.PARTIAL),
+                            kalshi_order_id=result.order_id or None,
+                            notes=result.notes,
                         )
                         session.add(trade)
                         await session.commit()
@@ -342,6 +353,9 @@ def main():
         return
 
     config = AppConfig.from_env()
+    if _daemon_is_running(config):
+        logger.info("scanner.daemon_active_skip", reason="account_scoped_lock")
+        return
 
     logger.info("scanner.start", mode=config.trading_mode)
     if config.trading_mode == "LIVE":

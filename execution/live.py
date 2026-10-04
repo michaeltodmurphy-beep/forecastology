@@ -1,5 +1,7 @@
 # execution/live.py
 import json
+import asyncio
+import math
 import uuid
 import httpx
 import structlog
@@ -108,11 +110,13 @@ class LiveTradeExecutor(BaseExecutor):
     NEVER connects to demo/sandbox URLs.
     """
 
-    def __init__(self, base_url: str, api_key: str, private_key_path: str, dry_run: bool = False, max_buy_qty: Optional[int] = None):
+    def __init__(self, base_url: str, api_key: str, private_key_path: str, dry_run: bool = False, max_buy_qty: Optional[int] = None, entry_cross_spread_to_ceiling: bool = True, position_cap_fail_closed: bool = False):
         self.base_url = base_url
         self.api_key = api_key
         self.dry_run = dry_run
         self.max_buy_qty = max_buy_qty
+        self.entry_cross_spread_to_ceiling = entry_cross_spread_to_ceiling
+        self.position_cap_fail_closed = position_cap_fail_closed
         self._private_key = load_private_key(private_key_path)
         self._client = httpx.AsyncClient(timeout=30.0)
 
@@ -120,24 +124,22 @@ class LiveTradeExecutor(BaseExecutor):
         return build_auth_headers(self._private_key, self.api_key, method, path)
 
     async def _current_position_qty(self, ticker: str) -> Optional[int]:
-        """Return the live position quantity for *ticker*, or ``None`` when it
-        cannot be verified (lookup error / malformed count).
-
-        Callers enforcing a position cap MUST treat ``None`` as "unknown" and
-        fail closed (block the buy) rather than assuming a flat position.
-        """
-        try:
-            positions = await self.get_positions()
-        except Exception as e:
-            logger.warning("live.position_cap_lookup_failed", ticker=ticker, error=str(e))
-            return None
-        raw = (positions.get(ticker) or {}).get("count", 0)
-        try:
-            return max(int(float(raw or 0)), 0)
-        except (TypeError, ValueError):
-            logger.warning("live.position_cap_lookup_failed", ticker=ticker,
-                           error=f"unparseable position count: {raw!r}")
-            return None
+        """Retry transient REST/malformed-count failures before reporting unknown."""
+        for attempt in range(3):
+            try:
+                positions = await self.get_positions()
+                position = positions.get(ticker) or {}
+                raw = position.get("position_fp", position.get("count", 0))
+                count = float(raw)
+                if not math.isfinite(count) or not count.is_integer() or count < 0:
+                    raise ValueError(f"unparseable position count: {raw!r}")
+                return int(count)
+            except Exception as e:
+                logger.warning("live.position_cap_lookup_failed", ticker=ticker,
+                               attempt=attempt + 1, error=str(e))
+                if attempt < 2:
+                    await asyncio.sleep(0.1 * (attempt + 1))
+        return None
 
     async def buy_yes(self, order: OrderRequest, max_price: Optional[int] = None) -> ExecutionResult:
         if self.max_buy_qty is not None and order.quantity > self.max_buy_qty:
@@ -208,26 +210,29 @@ class LiveTradeExecutor(BaseExecutor):
         if self.max_buy_qty is not None:
             existing_position_qty = await self._current_position_qty(order.market_ticker)
             if existing_position_qty is None:
-                # Fail closed: exposure cannot be verified, so refuse the buy.
                 logger.critical(
                     "live.position_cap_unverifiable",
                     ticker=order.market_ticker,
                     proposed_qty=order.quantity,
                     max_allowed_qty=self.max_buy_qty,
-                    action="position_cap_unverifiable_blocked_submission",
+                    known_position_qty=order.known_position_qty,
+                    action=("position_cap_unverifiable_blocked_submission"
+                            if self.position_cap_fail_closed else "position_cap_fallback"),
                 )
-                return ExecutionResult(
-                    success=False,
-                    market_ticker=order.market_ticker,
-                    side="yes",
-                    price=order.price,
-                    quantity=order.quantity,
-                    fill_price=0,
-                    fill_quantity=0,
-                    total_cost_cents=0,
-                    status="REJECTED",
-                    notes="position_cap_unverifiable: position lookup failed",
-                )
+                if self.position_cap_fail_closed:
+                    return ExecutionResult(
+                        success=False,
+                        market_ticker=order.market_ticker,
+                        side="yes",
+                        price=order.price,
+                        quantity=order.quantity,
+                        fill_price=0,
+                        fill_quantity=0,
+                        total_cost_cents=0,
+                        status="REJECTED",
+                        notes="position_cap_unverifiable: position lookup failed",
+                    )
+                existing_position_qty = max(int(order.known_position_qty or 0), 0)
             total_position_qty = existing_position_qty + max(int(order.quantity or 0), 0)
             if total_position_qty > self.max_buy_qty:
                 logger.critical(
@@ -259,6 +264,7 @@ class LiveTradeExecutor(BaseExecutor):
         payload = order.to_kalshi_payload(
             max_price,
             time_in_force="immediate_or_cancel",
+            cross_spread_to_ceiling=self.entry_cross_spread_to_ceiling,
         )
         if max_price is not None and round(float(payload["price"]) * 100) > max_price:
             logger.critical(
@@ -508,6 +514,8 @@ class LiveTradeExecutor(BaseExecutor):
         url = f"{self.base_url}{path}"
         headers = self._headers("GET", path)
         resp = await self._client.get(url, headers=headers)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"positions HTTP {resp.status_code}")
         data = resp.json()
 
         positions = {}

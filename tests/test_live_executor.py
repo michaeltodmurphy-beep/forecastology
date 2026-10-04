@@ -2,6 +2,7 @@ import os
 import sys
 
 import pytest
+from unittest.mock import AsyncMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -111,6 +112,105 @@ async def test_buy_yes_partial_fill_uses_actual_fill_fields(monkeypatch):
     assert result.fill_quantity == 1
     assert result.fill_price == 82
     assert result.total_cost_cents == 82
+
+
+@pytest.mark.asyncio
+async def test_position_lookup_retries_then_fails_open_by_default(monkeypatch):
+    executor = _make_executor(
+        monkeypatch, [FakeResponse(201, {"fill": {"count": 6, "price": 82}})],
+    )
+    executor.max_buy_qty = 6
+    executor.get_positions = AsyncMock(side_effect=RuntimeError("REST unavailable"))
+    monkeypatch.setattr(live.asyncio, "sleep", AsyncMock())
+
+    result = await executor.buy_yes(
+        OrderRequest("TICKER", OrderSide.BUY_YES, 80, 6), max_price=96,
+    )
+
+    assert result.success
+    assert executor.get_positions.await_count == 3
+    assert executor._client.post_payloads[0]["price"] == "0.9600"
+
+
+@pytest.mark.asyncio
+async def test_position_lookup_transient_failure_recovers(monkeypatch):
+    executor = _make_executor(
+        monkeypatch, [FakeResponse(201, {"fill": {"count": 1, "price": 82}})],
+    )
+    executor.max_buy_qty = 6
+    executor.get_positions = AsyncMock(side_effect=[RuntimeError("timeout"), {}])
+    monkeypatch.setattr(live.asyncio, "sleep", AsyncMock())
+    result = await executor.buy_yes(OrderRequest("TICKER", OrderSide.BUY_YES, 80, 1), 96)
+    assert result.success
+    assert executor.get_positions.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_position_cap_retries_non_success_http_responses(monkeypatch):
+    executor = _make_executor(
+        monkeypatch, [FakeResponse(201, {"fill": {"count": 1, "price": 82}})],
+        get_responses=[FakeResponse(503, {}) for _ in range(3)],
+    )
+    executor.max_buy_qty = 6
+    monkeypatch.setattr(live.asyncio, "sleep", AsyncMock())
+    result = await executor.buy_yes(OrderRequest("TICKER", OrderSide.BUY_YES, 80, 1), 96)
+    assert result.success
+    assert len(executor._client.get_urls) == 3
+
+
+@pytest.mark.asyncio
+async def test_position_cap_does_not_accept_normalized_malformed_count(monkeypatch):
+    executor = _make_executor(monkeypatch)
+    executor.get_positions = AsyncMock(return_value={
+        "TICKER": {"position_fp": "invalid", "count": 0},
+    })
+    monkeypatch.setattr(live.asyncio, "sleep", AsyncMock())
+    assert await executor._current_position_qty("TICKER") is None
+    assert executor.get_positions.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strict", [False, True])
+async def test_unknown_position_still_enforces_known_quantity_or_strict_flag(monkeypatch, strict):
+    executor = _make_executor(monkeypatch)
+    executor.max_buy_qty = 6
+    executor.position_cap_fail_closed = strict
+    executor.get_positions = AsyncMock(side_effect=RuntimeError("timeout"))
+    monkeypatch.setattr(live.asyncio, "sleep", AsyncMock())
+    order = OrderRequest("TICKER", OrderSide.BUY_YES, 80, 6, known_position_qty=1)
+    result = await executor.buy_yes(order, 96)
+    assert result.status == "REJECTED"
+    assert executor._client.post_payloads == []
+    assert ("position_cap_unverifiable" if strict else "position_cap_blocked") in result.notes
+
+
+@pytest.mark.asyncio
+async def test_live_buy_can_disable_crossing(monkeypatch):
+    executor = _make_executor(
+        monkeypatch, [FakeResponse(201, {"fill": {"count": 1, "price": 80}})],
+    )
+    executor.entry_cross_spread_to_ceiling = False
+    await executor.buy_yes(OrderRequest("TICKER", OrderSide.BUY_YES, 80, 1), 96)
+    assert executor._client.post_payloads[0]["price"] == "0.8000"
+
+
+@pytest.mark.asyncio
+async def test_factory_propagates_entry_reliability_switches(monkeypatch):
+    from data.ticker_cache import TickerCache
+    from execution.factory import create_executor
+
+    monkeypatch.setattr(live, "load_private_key", lambda _path: object())
+    executor = create_executor(
+        "LIVE", TickerCache(), "https://example.test", "test-key", "unused.pem",
+        max_buy_qty=6,
+        entry_cross_spread_to_ceiling=False,
+        position_cap_fail_closed=True,
+    )
+    try:
+        assert executor.entry_cross_spread_to_ceiling is False
+        assert executor.position_cap_fail_closed is True
+    finally:
+        await executor.close()
 
 
 @pytest.mark.asyncio

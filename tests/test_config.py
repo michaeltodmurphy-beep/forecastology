@@ -21,6 +21,24 @@ os.environ['DRY_RUN'] = 'true'
 
 class TestAppConfig:
 
+    def test_entry_reliability_defaults_and_switches(self, monkeypatch):
+        from app.config import AppConfig
+        flags = {
+            "ENTRY_CROSS_SPREAD_TO_CEILING": ("entry_cross_spread_to_ceiling", True),
+            "POSITION_CAP_FAIL_CLOSED": ("position_cap_fail_closed", False),
+            "EVENT_EXPOSURE_FAIL_CLOSED": ("event_exposure_fail_closed", False),
+        }
+        for name in flags:
+            monkeypatch.delenv(name, raising=False)
+        cfg = AppConfig.from_env()
+        for attr, default in flags.values():
+            assert getattr(cfg, attr) is default
+        for name, (_, default) in flags.items():
+            monkeypatch.setenv(name, "no" if default else "yes")
+        cfg = AppConfig.from_env()
+        for attr, default in flags.values():
+            assert getattr(cfg, attr) is not default
+
     def test_from_env_loads_correctly(self):
         import pytest
         pytest.importorskip("pydantic_settings")

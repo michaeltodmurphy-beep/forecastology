@@ -10,12 +10,14 @@ caller-supplied in-memory / in-flight quantities) and refuses a buy that would
 push the event over the configured cap.  Being DB-backed, the check persists
 across cycles and processes.
 """
+import datetime
 from typing import Optional
 
 import structlog
 from sqlalchemy import select
 
 from app.models import Position as PositionModel
+from core.local_time_gate import SERIES_TIMEZONE, ZoneInfo
 
 logger = structlog.get_logger(__name__)
 
@@ -34,37 +36,40 @@ def event_key(market_ticker: str) -> Optional[str]:
 
 def resolve_event_caps(config) -> tuple[Optional[int], Optional[int]]:
     """Return ``(max_contracts, max_cost_cents)``; ``None`` means disabled."""
-    initial = max(int(getattr(config, "initial_contract_count", 1) or 1), 1)
-    factor = max(int(getattr(config, "hedge_max_factor", 1) or 1), 1)
-    auto_contracts = initial * (2 ** (factor - 1))
-    ceiling = max(int(getattr(config, "spread_monitor_price", 100) or 100), 1)
-
     raw_contracts = int(getattr(config, "event_max_contracts", 0) or 0)
-    if raw_contracts < 0:
-        max_contracts: Optional[int] = None
-    elif raw_contracts == 0:
-        max_contracts = auto_contracts
-    else:
-        max_contracts = raw_contracts
-
     raw_cost = int(getattr(config, "event_max_cost_cents", 0) or 0)
-    if raw_cost < 0:
-        max_cost: Optional[int] = None
-    elif raw_cost == 0:
-        max_cost = auto_contracts * ceiling
-    else:
-        max_cost = raw_cost
-    return max_contracts, max_cost
+    return (
+        raw_contracts if raw_contracts > 0 else None,
+        raw_cost if raw_cost > 0 else None,
+    )
+
+
+def _event_is_expired(key: str) -> bool:
+    # Position has no settlement/expiry fields; closed rows are deleted or zeroed.
+    # Compare in the event city's timezone so an Eastern rollover cannot drop
+    # still-active West-coast holdings. Unknown series use Eastern time.
+    try:
+        series, date_prefix = key.split("-")
+        if len(date_prefix) != 7:
+            return False
+        market_date = datetime.datetime.strptime("20" + date_prefix, "%Y%b%d").date()
+        timezone = SERIES_TIMEZONE.get(series, "America/New_York")
+        today = datetime.datetime.now(ZoneInfo(timezone)).date()
+    except (ValueError, IndexError):
+        return False
+    return market_date < today
 
 
 async def load_event_holdings(db, market_ticker: str, default_price_cents: int) -> Holdings:
     """Return DB-recorded open positions (qty > 0) sharing *market_ticker*'s event.
 
-    Raises on DB errors so callers can fail closed.
+    Stale DB rows are excluded; today's positions remain active. Caller-known
+    holdings and live orders are not filtered by this calendar-date heuristic.
+    Raises on DB errors so callers can apply their configured failure policy.
     """
     key = event_key(market_ticker)
     holdings: Holdings = {}
-    if key is None:
+    if key is None or _event_is_expired(key):
         return holdings
     async with await db.get_session() as session:
         result = await session.execute(
@@ -108,7 +113,10 @@ async def event_exposure_allows_buy(
 ) -> bool:
     """Return True if buying *proposed_qty* @ *proposed_price_cents* keeps the
     event within its aggregate cap.  Logs a structured event and returns False
-    when the cap would be exceeded or exposure cannot be verified.
+    when the cap would be exceeded. Unverifiable exposure blocks only when
+    ``event_exposure_fail_closed`` is enabled.
+    Proposed cost reserves the submission ceiling when spread crossing is
+    enabled (the default), while held positions retain their actual cost basis.
 
     ``extra_holdings`` are other known positions (e.g. in-memory state) merged
     with the DB per ticker (max qty wins).  ``inflight`` are unfilled/working
@@ -126,19 +134,23 @@ async def event_exposure_allows_buy(
     ceiling = max(int(getattr(config, "spread_monitor_price", 100) or 100), 1)
     try:
         holdings = await load_event_holdings(db, market_ticker, ceiling)
-    except Exception as e:  # noqa: BLE001 - fail closed on any lookup error
+    except Exception as e:  # noqa: BLE001 - apply policy to any lookup error
+        fail_closed = getattr(config, "event_exposure_fail_closed", False)
         logger.critical(
             "entry.event_exposure_unverifiable",
             ticker=market_ticker,
             event_ticker=key,
             source=source,
             error=str(e),
-            action="event_exposure_cap_blocked",
+            action="event_exposure_cap_blocked" if fail_closed else "event_exposure_cap_bypassed",
         )
-        return False
+        return not fail_closed
     holdings = _merge(
         holdings,
-        {t: v for t, v in (extra_holdings or {}).items() if event_key(t) == key},
+        {
+            t: v for t, v in (extra_holdings or {}).items()
+            if event_key(t) == key
+        },
     )
     if target_existing_qty is not None:
         target = (market_ticker or "").upper()
@@ -158,7 +170,11 @@ async def event_exposure_allows_buy(
         existing_cost += qty * (int(price or 0) or ceiling)
 
     add_qty = max(int(proposed_qty or 0), 0)
-    add_cost = add_qty * max(int(proposed_price_cents or 0), 0)
+    proposed_limit = (
+        ceiling if getattr(config, "entry_cross_spread_to_ceiling", True)
+        else min(max(int(proposed_price_cents or 0), 0), ceiling)
+    )
+    add_cost = add_qty * proposed_limit
     total_qty = existing_qty + add_qty
     total_cost = existing_cost + add_cost
     over_contracts = max_contracts is not None and total_qty > max_contracts
