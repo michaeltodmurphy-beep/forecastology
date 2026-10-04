@@ -16,6 +16,26 @@ import scanner as scanner_module
 from scanner import _daemon_is_running
 
 
+def test_scanner_detects_real_account_scoped_daemon_lock(tmp_path, monkeypatch):
+    from app.runtime_safety import acquire_instance_lock, InstanceLock
+    from run import _account_id_hash
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        instance_id="scanner-test", instance_lock_file=str(tmp_path / "daemon.lock"),
+    )
+    monkeypatch.setattr(scanner_module, "DAEMON_LOCKFILE", str(tmp_path / "legacy.lock"))
+    lock = acquire_instance_lock(
+        base_lock_file=config.instance_lock_file, account_id_hash=_account_id_hash(config),
+    )
+    assert isinstance(lock, InstanceLock)
+    try:
+        assert _daemon_is_running(config)
+    finally:
+        lock.release()
+    assert not _daemon_is_running(config)
+
+
 # ---------------------------------------------------------------------------
 # _daemon_is_running() tests
 # ---------------------------------------------------------------------------
@@ -290,7 +310,7 @@ async def test_scanner_buy_uses_executor_buy_yes(monkeypatch):
     )
 
     result = await scanner_module.buy_market(config, "KXLOWTLAX-26JUL30-B65.5", 80, None)
-    assert result is True
+    assert isinstance(result, ExecutionResult) and result.success
     assert len(buy_yes_calls) == 1, "buy_yes must be called exactly once"
     order, max_price = buy_yes_calls[0]
     assert order.market_ticker == "KXLOWTLAX-26JUL30-B65.5"
@@ -343,7 +363,7 @@ async def test_scanner_buy_logs_cap_blocked_not_buy_yes_when_qty_at_cap(monkeypa
     )
 
     result = await scanner_module.buy_market(config, "KXLOWTLAX-26JUL30-B65.5", 80, None)
-    assert result is True
+    assert isinstance(result, ExecutionResult) and result.success
     assert len(buy_yes_calls) == 1
 
 

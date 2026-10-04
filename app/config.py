@@ -396,6 +396,8 @@ class AppConfig(BaseSettings):
     # Parsed by from_env() from BUY_TRIGGER_PRICE_LOW_WARM (dollars -> cents).
     buy_trigger_price_low_warm: int = 0
     spread_monitor_price: int
+    entry_cross_spread_to_ceiling: bool = True
+    position_cap_fail_closed: bool = False
     falling_knife_decay_minutes: int = 10
     # ── Time-of-day entry spread thresholds (city-local) ────────────────────
     # Three separate MAX_SPREAD-style thresholds, each active during its own
@@ -435,11 +437,10 @@ class AppConfig(BaseSettings):
     # event, persisted across watchlist cycles (DB positions + in-flight).
     #   EVENT_MAX_CONTRACTS:  max total contracts per event.
     #   EVENT_MAX_COST_CENTS: max total cost basis (cents) per event.
-    # 0 (default) = auto: contracts = INITIAL_CONTRACT_COUNT *
-    # 2**(HEDGE_MAX_FACTOR-1) (one full per-ticker ladder), cost = that
-    # contract count * SPREAD_MONITOR_PRICE.  A negative value disables that cap.
+    # Non-positive (default 0) disables each cap; positive limits are opt-in.
     event_max_contracts: int = 0
     event_max_cost_cents: int = 0
+    event_exposure_fail_closed: bool = False
     eval_price_floor: int = 5
     # DEPRECATED / UNUSED by trading logic. Kept only so existing .env files that
     # still define HEDGE_TRIGGER_PRICE / HEDGE_BUY continue to load, and so .env

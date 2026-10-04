@@ -119,6 +119,51 @@ class _Cfg:
 # Period filter
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize(
+    ("text", "keywords", "expected"),
+    [
+        ("THUNDERSTORMS likely.", {"thunderstorm"}, {"thunderstorm"}),
+        ("A thunderstorm is possible.", {"thunderstorm"}, {"thunderstorm"}),
+        ("Thunderstorms likely.", KEYWORDS, {"thunderstorm", "thunderstorms"}),
+        ("Terrain remains dry; rainbows possible.", {"rain"}, set()),
+        ("Thunderstormish conditions.", {"thunderstorm"}, set()),
+        ("Heavy RAIN likely.", {"rain"}, {"rain"}),
+        ("No thunderstorms expected.", KEYWORDS, set()),
+        ("WITHOUT THUNDERSTORMS.", KEYWORDS, set()),
+        ("Thunderstorms not expected.", KEYWORDS, set()),
+        ("Thunderstorms are not expected.", KEYWORDS, set()),
+        ("Thunderstorms ending.", KEYWORDS, set()),
+        ("Thunderstorms are ending this morning.", KEYWORDS, set()),
+        ("No rain, but thunderstorms likely.", KEYWORDS, {"thunderstorm", "thunderstorms"}),
+        ("No thunderstorms early; thunderstorms later.", KEYWORDS, {"thunderstorm", "thunderstorms"}),
+        ("Thunderstorms ending; rain likely.", KEYWORDS, {"rain"}),
+        ("Thunderstorms not expected. Thunderstorms possible later.", KEYWORDS, {"thunderstorm", "thunderstorms"}),
+        ("No thunderstorms early, but rain likely.", KEYWORDS, {"rain"}),
+        ("Thunderstorms not ruled out.", {"thunderstorm"}, {"thunderstorm"}),
+        ("", KEYWORDS, set()),
+        ("Thunderstorms likely.", set(), set()),
+    ],
+)
+def test_matches_any_keyword_word_boundaries_and_local_negations(text, keywords, expected):
+    assert matches_any_keyword(text, keywords) == expected
+
+
+def test_catchup_at_13_local_includes_today_before_deadline_not_tonight():
+    periods = [
+        _period(SDF_TZ, 6, "Thunderstorms likely today."),
+        _period(SDF_TZ, 12, "Rain this afternoon."),
+        _period(SDF_TZ, 18, "Rain tonight."),
+        _period(SDF_TZ, 6, "Rain tomorrow.", date=LOCAL_DATE + datetime.timedelta(days=1)),
+    ]
+    text = _fetch_daily_brief_text(
+        _FakeClient(periods), 38.25, -85.76, tz_name="America/Kentucky/Louisville",
+        now_utc=_local(SDF_TZ, 13).astimezone(datetime.timezone.utc),
+        deadline_hour=12,
+    )
+    assert text == "Thunderstorms likely today."
+    assert matches_any_keyword(text, {"thunderstorm", "rain"}) == {"thunderstorm"}
+
+
 def test_tonight_period_is_excluded_sdf():
     client = _FakeClient(SDF_PERIODS)
     text = _fetch_daily_brief_text(
@@ -171,6 +216,18 @@ def test_deadline_hour_from_env(monkeypatch):
 # ---------------------------------------------------------------------------
 # get_block: read-only, never fetches
 # ---------------------------------------------------------------------------
+
+def test_get_block_without_series_city_fails_open(monkeypatch):
+    monkeypatch.setattr(daily_brief, "SERIES_CITY", {})
+    gate = DailyBriefGate(_Cfg(), nws_client=_ExplodingClient())
+
+    def unexpected_read(*args):
+        raise AssertionError("Unmapped series must not query the snapshot DB")
+
+    monkeypatch.setattr(gate, "_stored_row", unexpected_read)
+    assert gate.get_block("KXLOWTSDF") == (False, set())
+    assert gate._cache == {}
+
 
 def test_get_block_without_row_fails_open_and_never_fetches(session):
     gate = DailyBriefGate(_Cfg(), nws_client=_ExplodingClient())

@@ -108,12 +108,14 @@ class OrderRequest:
     quantity: int
     client_order_id: Optional[str] = None
     is_hedge: bool = False
+    known_position_qty: Optional[int] = None
 
     def to_kalshi_payload(
         self,
         max_price: Optional[int] = None,
         time_in_force: Optional[str] = None,
         reduce_only: bool = False,
+        cross_spread_to_ceiling: bool = True,
     ) -> dict:
         # New V2 /portfolio/events/orders format
         # side: "bid" for buying YES, "ask" for selling YES
@@ -121,13 +123,13 @@ class OrderRequest:
         kalshi_side = "bid" if self.side == OrderSide.BUY_YES else "ask"
         self.client_order_id = ensure_app_client_order_id(self.client_order_id)
         
-        # For buys: max_price is a hard CEILING — the limit price submitted is
-        # min(requested_price, max_price), so a bid is never placed above it.
-        # (Callers/executors reject requested prices above the ceiling upstream.)
+        # Marketable buys bid up to the ceiling, not at a potentially stale ask.
+        # Disabling spread crossing uses the requested price, still hard-clamped.
+        # The exchange executes at available prices, never above this limit.
         # For sells: use the actual price
         limit_price = self.price
         if kalshi_side == "bid" and max_price is not None:
-            limit_price = min(self.price, max_price)
+            limit_price = max_price if cross_spread_to_ceiling else min(self.price, max_price)
         price_str = f"{limit_price / 100:.4f}"
         
         return {

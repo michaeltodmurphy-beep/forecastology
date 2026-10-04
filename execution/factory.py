@@ -14,6 +14,8 @@ def create_executor(
     private_key_path: str,
     dry_run: bool = False,
     max_buy_qty: Optional[int] = None,
+    entry_cross_spread_to_ceiling: bool = True,
+    position_cap_fail_closed: bool = False,
 ) -> BaseExecutor:
     """Factory that returns the appropriate executor based on trading mode."""
     if trading_mode.upper() == "PAPER":
@@ -25,6 +27,11 @@ def create_executor(
             max_buy_qty=max_buy_qty,
         )
     elif trading_mode.upper() == "LIVE":
-        return LiveTradeExecutor(rest_base_url, api_key, private_key_path, dry_run=dry_run, max_buy_qty=max_buy_qty)
+        return LiveTradeExecutor(
+            rest_base_url, api_key, private_key_path,
+            dry_run=dry_run, max_buy_qty=max_buy_qty,
+            entry_cross_spread_to_ceiling=entry_cross_spread_to_ceiling,
+            position_cap_fail_closed=position_cap_fail_closed,
+        )
     else:
         raise ValueError(f"Unknown trading mode: {trading_mode}")

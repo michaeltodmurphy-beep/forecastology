@@ -9,7 +9,8 @@ when the forecast text contains any configured ``AM_LOW_FORECAST`` keyword.
 Key behaviours
 --------------
 * Cities are resolved by **lat/lon** (city-centre coordinates), not ICAO codes.
-* Matching is **case-insensitive** substring match; **ANY** match gates the series.
+* Matching is **case-insensitive**, word-boundary based, and ignores clear
+  negations; **ANY** remaining match gates the series.
 * The decision is taken **once per city-local date** by the scheduler snapshot
   (:func:`snapshot_city`) at ``AM_LOW_SNAPSHOT_LOCAL_HOUR`` local and stored in the
   ``daily_forecast_block`` table.  It is **write-once**: nothing re-fetches or
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 import time
 from typing import Optional, Tuple
 
@@ -115,8 +117,9 @@ def _snapshot_hour(config: AppConfig) -> int:
 def matches_any_keyword(forecast_text: str, keywords: set[str]) -> set[str]:
     """Return the subset of *keywords* found in *forecast_text*.
 
-    Case-insensitive substring match.  **ANY** single match is sufficient to gate
-    (the caller blocks when the returned set is non-empty).
+    Match whole words, including plural ``thunderstorms`` for ``thunderstorm``.
+    Ignore only adjacent, clear negations, independently for each occurrence so
+    a positive mention elsewhere in the forecast still gates the series.
 
     Args:
         forecast_text: The NWS daily brief text (may be empty).
@@ -128,7 +131,24 @@ def matches_any_keyword(forecast_text: str, keywords: set[str]) -> set[str]:
     if not keywords or not forecast_text:
         return set()
     lower = forecast_text.lower()
-    return {k for k in keywords if k in lower}
+    matched = set()
+    for keyword in keywords:
+        keyword = keyword.lower()
+        if not keyword:
+            continue
+        pattern = re.escape(keyword)
+        if keyword == "thunderstorm":
+            pattern += "s?"
+        for match in re.finditer(r"\b" + pattern + r"\b", lower):
+            before = lower[:match.start()]
+            after = lower[match.end():]
+            if re.search(r"\b(?:no|without)\s+$", before):
+                continue
+            if re.match(r"\s+(?:(?:is|are)\s+)?(?:not\s+expected|ending)\b", after):
+                continue
+            matched.add(keyword)
+            break
+    return matched
 
 
 def _fetch_daily_brief_text(
@@ -470,4 +490,3 @@ def _series_tz_name(series: str) -> Optional[str]:
         return SERIES_TIMEZONE.get(series)
     except Exception:  # noqa: BLE001
         return None
-
