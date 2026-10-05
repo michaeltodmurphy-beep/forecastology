@@ -841,7 +841,10 @@ class TemperatureStrategy:
         floor_price = max(1, reference_price - max_slippage)
         ladder_step = max(offset, 1)
         price = reference_price - offset - ((max(attempt, 1) - 1) * ladder_step)
-        return max(1, min(99, max(price, floor_price)))
+        # Defense-in-depth: the ladder price can never exceed its own
+        # reference (a marketable exit is priced at-or-below the book reference).
+        ref_capped = min(price, reference_price)
+        return max(1, min(99, max(ref_capped, floor_price)))
 
     def _set_sl_cycle_state(self, ticker: str, state: StopLossCycleState) -> None:
         cycle = self._sl_cycles.get(ticker)
@@ -956,7 +959,22 @@ class TemperatureStrategy:
                 )
                 current = bracket
             self._set_sl_cycle_state(ticker, "SUBMITTING")
-            reference_price = current.last_price if current.last_price is not None else trigger_price
+            # Price the exit ladder from the LIVE ORDER BOOK, not from a
+            # stale last-trade print.  Using last_price here allowed a
+            # decoupled reference (e.g. 92) to price a marketable SELL far
+            # above the real bid, printing at an absurd price.  Prefer the
+            # best bid; fall back to the trigger; never use last_price.
+            _lp_bid = None
+            try:
+                _lp_quote = self.cache.get_quote(ticker)
+                if _lp_quote is not None:
+                    _lp_bid = _lp_quote[0]
+            except Exception:
+                _lp_bid = None
+            if _lp_bid is not None and _lp_bid > 0:
+                reference_price = _lp_bid
+            else:
+                reference_price = trigger_price
             price = self._compute_fast_sl_exit_price(reference_price, attempt)
             market_gone = await self._execute_stop_loss(
                 current,
@@ -5521,6 +5539,32 @@ class TemperatureStrategy:
             await self._cancel_chaser_for_ticker(bracket.market_ticker, reason="stop_loss")
 
         price = override_price if override_price is not None else 1
+        # ------------------------------------------------------------------
+        # HARD CEILING GUARD (capital-preservation invariant).
+        #
+        # A reactive stop-loss / panic sell is a *marketable* SELL_YES
+        # (immediate_or_cancel, reduce_only).  Its limit price MUST NOT exceed
+        # the stop-loss trigger, otherwise a decoupled price source (e.g. a
+        # stale last-trade print feeding the aggressive ladder) can transmit a
+        # sell far ABOVE the real bid and print at an absurd price.
+        #
+        # There is no legitimate reason a reactive SL sells above the trigger.
+        # If override_price exceeds the configured stop threshold, clamp it to
+        # the threshold and scream.  Guarantees a stop-loss can never fill
+        # above STOP_LOSS_PRICE_ASK.
+        # ------------------------------------------------------------------
+        sl_ceiling = int(self.config.stop_loss_price)
+        if price > sl_ceiling:
+            logger.critical(
+                "sl.exit_price_clamped_above_stop",
+                ticker=bracket.market_ticker,
+                requested_price=price,
+                clamped_price=sl_ceiling,
+                stop_loss_price=sl_ceiling,
+                override_price=override_price,
+                action="clamped_sl_sell_to_stop_threshold",
+            )
+            price = sl_ceiling
         managed_qty, app_owned_qty, external_qty = self._managed_exit_quantity(
             bracket.market_ticker,
             bracket.position_quantity,
