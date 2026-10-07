@@ -3920,27 +3920,51 @@ class TemperatureStrategy:
             logger.warning("chase.outcome_update_error", ticker=ticker, error=str(e))
 
     def _get_best_bid_from_cache(self, ticker: str) -> Optional[int]:
-        """Return the current best YES bid price in cents, or None."""
+        """Return the current best YES bid price in cents, or None.
+
+        Routed through the spoof guard (ASK_SPREAD_PROTECTION): a lone outlier
+        YES-bid far above the book must not be used as the executable bid.
+        """
+        try:
+            guarded = self.cache.get_effective_bid(
+                ticker, int(getattr(self.config, "ask_spread_protection", 0) or 0)
+            )
+        except Exception:
+            guarded = None
+        if guarded is not None and guarded > 0:
+            return guarded
+        ob = self.cache.get_orderbook(ticker)
+        if ob is not None and ob.yes_bids:
+            return ob.yes_bids[0].price
         quote = self.cache.get_quote(ticker)
         if quote is not None:
             yes_bid, _ = quote
             if yes_bid is not None and yes_bid > 0:
                 return yes_bid
-        ob = self.cache.get_orderbook(ticker)
-        if ob is not None and ob.yes_bids:
-            return ob.yes_bids[0].price
         return None
 
     def _get_best_ask_from_cache(self, ticker: str) -> Optional[int]:
-        """Return the current best YES ask price in cents, or None."""
+        """Return the current best YES ask price in cents, or None.
+
+        Routed through the spoof guard (ASK_SPREAD_PROTECTION): a lone outlier
+        ask far below the book must not be used as the executable ask.
+        """
+        try:
+            guarded = self.cache.get_effective_ask(
+                ticker, int(getattr(self.config, "ask_spread_protection", 0) or 0)
+            )
+        except Exception:
+            guarded = None
+        if guarded is not None and guarded > 0:
+            return guarded
+        ob = self.cache.get_orderbook(ticker)
+        if ob is not None and ob.yes_asks:
+            return ob.yes_asks[0].price
         quote = self.cache.get_quote(ticker)
         if quote is not None:
             _, yes_ask = quote
             if yes_ask is not None and yes_ask > 0:
                 return yes_ask
-        ob = self.cache.get_orderbook(ticker)
-        if ob is not None and ob.yes_asks:
-            return ob.yes_asks[0].price
         return None
 
     async def _partial_fill_chase_loop(
@@ -4896,6 +4920,33 @@ class TemperatureStrategy:
                 )
             if quote is not None and quote_is_fresh:
                 yes_bid, yes_ask = quote
+                # Spoof guard (ASK_SPREAD_PROTECTION): the ticker channel is a
+                # raw top-of-book quote with no corroborating level, so a lone
+                # shake-out ask (e.g. 52c in a 92c book) can trip the SL here.
+                # Replace the ask with the corroborated orderbook ask when the
+                # book corroborates a higher level.  Fail-open.
+                try:
+                    _confirmed_ask = self.cache.get_confirmed_ask(
+                        ticker, int(getattr(self.config, "ask_spread_protection", 0) or 0)
+                    )
+                    if (
+                        _confirmed_ask is not None
+                        and yes_ask is not None
+                        and _confirmed_ask > yes_ask
+                    ):
+                        logger.warning(
+                            "sl.spoof_guard_ignored_loop",
+                            ticker=ticker,
+                            top_ask=yes_ask,
+                            confirmed_ask=_confirmed_ask,
+                            gap_cents=_confirmed_ask - yes_ask,
+                            threshold_cents=int(
+                                getattr(self.config, "ask_spread_protection", 0) or 0
+                            ),
+                        )
+                        yes_ask = _confirmed_ask
+                except Exception:
+                    pass
                 if yes_bid > 0:
                     current_price = yes_bid
                     price_source = "websocket"
@@ -6522,7 +6573,32 @@ class TemperatureStrategy:
         # Cancel resting backstop before submitting sell (prevent overselling)
         await self._cancel_sl_backstop(ticker, reason=f"{log_prefix}_exit")
 
+        # Spoof guard (ASK_SPREAD_PROTECTION): a lone outlier YES-bid far above
+        # the book must not price this marketable exit.  Use the corroborated
+        # bid from the orderbook when available; fall back to the passed bid.
         bid_price = yes_bid if yes_bid and yes_bid > 0 else None
+        try:
+            _confirmed_bid = self.cache.get_confirmed_bid(
+                ticker, int(getattr(self.config, "ask_spread_protection", 0) or 0)
+            )
+            if (
+                _confirmed_bid is not None
+                and bid_price is not None
+                and _confirmed_bid < bid_price
+            ):
+                logger.warning(
+                    f"{log_prefix}.exit_spoof_guard_ignored",
+                    ticker=ticker,
+                    top_bid=bid_price,
+                    confirmed_bid=_confirmed_bid,
+                    gap_cents=bid_price - _confirmed_bid,
+                    threshold_cents=int(
+                        getattr(self.config, "ask_spread_protection", 0) or 0
+                    ),
+                )
+                bid_price = _confirmed_bid
+        except Exception:
+            pass
         limit_succeeded = False
 
         if bid_price is not None:

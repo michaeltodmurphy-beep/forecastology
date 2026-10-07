@@ -157,5 +157,82 @@ class TickerCache:
             return next_ask
         return top_ask
 
+    def get_confirmed_bid(self, ticker: str, max_gap_cents: int = 0) -> Optional[int]:
+        """Return the effective YES bid, ignoring a lone outlier YES-bid (spoof).
+
+        Mirror of get_confirmed_ask for the BUY side.  yes_bids is stored sorted
+        descending (best/highest YES bid first), so a lone thin YES-bid placed far
+        ABOVE the rest of the book shows up as the top level and yields an
+        artificially HIGH best bid -- which would let a marketable SELL
+        (intraday/HWM/panic exit) fill at an absurd price, or trip a bid trigger.
+
+        If a next-distinct YES-bid level exists and the gap between the best YES
+        bid and the next-best exceeds max_gap_cents, the top bid is treated as an
+        outlier and the next-best (corroborated) bid is returned instead.  A
+        genuine full-book melt-up (small gap) still returns the true best bid.
+
+        max_gap_cents <= 0 disables the guard (returns the raw top bid).
+        Returns None when there is no usable YES-bid level.
+        """
+        ob = self.orderbooks.get(ticker)
+        if ob is None:
+            return None
+        bids: list[int] = []
+        seen: set[int] = set()
+        for level in ob.yes_bids:  # sorted desc by price -> highest first
+            if level.quantity <= 0:
+                continue
+            if level.price in seen:
+                continue
+            seen.add(level.price)
+            bids.append(level.price)
+        if not bids:
+            return None
+        top_bid = bids[0]
+        if max_gap_cents <= 0 or len(bids) < 2:
+            return top_bid
+        next_bid = bids[1]
+        if (top_bid - next_bid) > max_gap_cents:
+            # Outlier/spoof: the top bid is not corroborated by the book.
+            return next_bid
+        return top_bid
+
+    def get_effective_ask(self, ticker: str, max_gap_cents: int = 0) -> Optional[int]:
+        """Single source of truth for the YES ask used in TRADE DECISIONS.
+
+        Prefers the spoof-guarded orderbook ask (get_confirmed_ask); when no
+        orderbook is available it falls back to the raw ticker-channel quote.
+
+        This exists so every decision path (Phase-C stop-loss loop, the SL
+        watcher feed, etc.) consumes the SAME guarded ask, instead of one path
+        using the raw top-of-book ticker quote (which cannot be corroborated and
+        therefore lets a lone shake-out ask through).
+        """
+        confirmed = self.get_confirmed_ask(ticker, max_gap_cents)
+        if confirmed is not None:
+            return confirmed
+        quote = self.quotes.get(ticker)
+        if quote is not None:
+            _, yes_ask = quote
+            if yes_ask is not None and yes_ask > 0:
+                return yes_ask
+        return None
+
+    def get_effective_bid(self, ticker: str, max_gap_cents: int = 0) -> Optional[int]:
+        """Single source of truth for the YES bid used in TRADE DECISIONS.
+
+        Prefers the spoof-guarded orderbook bid (get_confirmed_bid); when no
+        orderbook is available it falls back to the raw ticker-channel quote.
+        """
+        confirmed = self.get_confirmed_bid(ticker, max_gap_cents)
+        if confirmed is not None:
+            return confirmed
+        quote = self.quotes.get(ticker)
+        if quote is not None:
+            yes_bid, _ = quote
+            if yes_bid is not None and yes_bid > 0:
+                return yes_bid
+        return None
+
     def get_orderbook(self, ticker: str) -> Optional[OrderBook]:
         return self.orderbooks.get(ticker)
