@@ -240,6 +240,37 @@ def _parse_non_negative_int(raw: str | None, name: str, default: int) -> int:
     return parsed
 
 
+def _parse_positive_float(raw: str | None, name: str, default: float) -> float:
+    """Parse a strictly-positive float from an env-var string.
+
+    Missing / empty → returns *default*.  Non-numeric or <= 0 → logs a warning
+    and returns *default* (fail safe).
+    """
+    if not raw or not raw.strip():
+        return default
+    try:
+        parsed = float(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "config.positive_float_invalid",
+            name=name,
+            raw=raw,
+            fallback=default,
+            message=f"Unrecognized value for {name}='{raw}'; defaulting to {default}",
+        )
+        return default
+    if parsed <= 0:
+        logger.warning(
+            "config.positive_float_below_minimum",
+            name=name,
+            raw=raw,
+            fallback=default,
+            message=f"Value for {name} must be > 0; defaulting to {default}",
+        )
+        return default
+    return parsed
+
+
 def _parse_entry_gate_mode(raw: str | None) -> str:
     if not raw or not raw.strip():
         return "NWS_WINDOW"
@@ -596,6 +627,22 @@ class AppConfig(BaseSettings):
     # until explicitly enabled.  Parsed by from_env().
     block_entry_when_bracket_unreached: bool = False
     held_position_price_refresh_seconds: int = 10
+    # Hard ceiling (seconds) for an individual held-position REST price
+    # fallback call (/markets/{ticker}) used by Phase C when the WS quote is
+    # stale.  This MUST stay well below the held-position loop budget
+    # (held_positions_loop_timeout_seconds) so a single slow REST call can
+    # never exhaust the loop timeout and cancel the stop-loss pass for every
+    # held position.  Configurable via
+    # HELD_POSITION_REST_FETCH_TIMEOUT_SECONDS.  Default 1.5 s.
+    held_position_rest_fetch_timeout_seconds: float = 1.5
+    # Hard ceiling (seconds) for a single _evaluate_held_positions() pass.
+    # This bounds the WHOLE Phase-C evaluation (positions fetch + per-ticker
+    # price resolution + stop-loss dispatch).  It must remain comfortably
+    # larger than the slowest legitimate pass so that a transiently slow REST
+    # call does not silently cancel the safety-critical stop-loss sweep for
+    # every held position.  Configurable via
+    # HELD_POSITIONS_LOOP_TIMEOUT_SECONDS.  Default 15 s.
+    held_positions_loop_timeout_seconds: float = 15.0
     # Interval (ms) for the dedicated held-position SL evaluation loop that runs
     # independently of entry scanning.  Range: 50–250 ms.  Configurable via
     # HELD_POSITIONS_LOOP_INTERVAL_MS env var.  Default is 100 ms; lower
@@ -1222,6 +1269,16 @@ class AppConfig(BaseSettings):
             "SL_UNPROTECTED_STARTUP_ALERT_SECONDS",
             default=30,
         )
+        held_position_rest_fetch_timeout_seconds = _parse_positive_float(
+            os.getenv("HELD_POSITION_REST_FETCH_TIMEOUT_SECONDS"),
+            "HELD_POSITION_REST_FETCH_TIMEOUT_SECONDS",
+            default=1.5,
+        )
+        held_positions_loop_timeout_seconds = _parse_positive_float(
+            os.getenv("HELD_POSITIONS_LOOP_TIMEOUT_SECONDS"),
+            "HELD_POSITIONS_LOOP_TIMEOUT_SECONDS",
+            default=15.0,
+        )
         enable_settlement_reconciler = _parse_trade_toggle(
             os.getenv("ENABLE_SETTLEMENT_RECONCILER"),
             "ENABLE_SETTLEMENT_RECONCILER",
@@ -1367,14 +1424,16 @@ class AppConfig(BaseSettings):
             instance_lock_enabled=instance_lock_enabled,
             instance_lock_file=instance_lock_file,
             instance_id=instance_id,
-                        log_file=log_file,
             log_max_bytes=log_max_bytes,
+            log_file=log_file,
             log_backup_count=log_backup_count,
             log_to_console=log_to_console,
             log_to_file=log_to_file,
-                        sl_unprotected_max_blind_cycles=sl_unprotected_max_blind_cycles,
+            sl_unprotected_max_blind_cycles=sl_unprotected_max_blind_cycles,
             sl_flatten_unprotected_on_blind=sl_flatten_unprotected_on_blind,
             sl_unprotected_startup_alert_seconds=sl_unprotected_startup_alert_seconds,
+            held_position_rest_fetch_timeout_seconds=held_position_rest_fetch_timeout_seconds,
+            held_positions_loop_timeout_seconds=held_positions_loop_timeout_seconds,
             enable_settlement_reconciler=enable_settlement_reconciler,
             reconciler_interval_minutes=reconciler_interval_minutes,
             intraday_exit_enabled=intraday_exit_enabled,

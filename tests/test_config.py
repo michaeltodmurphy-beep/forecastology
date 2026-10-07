@@ -832,3 +832,29 @@ class TestSunriseEntryGateConfig:
         from app.config import AppConfig
         cfg = AppConfig.from_env()
         assert cfg.sunrise_source == "astral"
+
+    def test_held_position_rest_fetch_timeout_default_and_override(self, monkeypatch):
+        from app.config import AppConfig
+        monkeypatch.delenv("HELD_POSITION_REST_FETCH_TIMEOUT_SECONDS", raising=False)
+        cfg = AppConfig.from_env()
+        assert cfg.held_position_rest_fetch_timeout_seconds == 1.5
+        monkeypatch.setenv("HELD_POSITION_REST_FETCH_TIMEOUT_SECONDS", "2.75")
+        cfg = AppConfig.from_env()
+        assert cfg.held_position_rest_fetch_timeout_seconds == 2.75
+
+    def test_held_positions_loop_timeout_default_and_override(self, monkeypatch):
+        from app.config import AppConfig
+        monkeypatch.delenv("HELD_POSITIONS_LOOP_TIMEOUT_SECONDS", raising=False)
+        cfg = AppConfig.from_env()
+        assert cfg.held_positions_loop_timeout_seconds == 15.0
+        monkeypatch.setenv("HELD_POSITIONS_LOOP_TIMEOUT_SECONDS", "20")
+        cfg = AppConfig.from_env()
+        assert cfg.held_positions_loop_timeout_seconds == 20.0
+
+    def test_invalid_held_position_timeouts_fall_back_to_defaults(self, monkeypatch):
+        from app.config import AppConfig
+        monkeypatch.setenv("HELD_POSITION_REST_FETCH_TIMEOUT_SECONDS", "not-a-number")
+        monkeypatch.setenv("HELD_POSITIONS_LOOP_TIMEOUT_SECONDS", "0")
+        cfg = AppConfig.from_env()
+        assert cfg.held_position_rest_fetch_timeout_seconds == 1.5
+        assert cfg.held_positions_loop_timeout_seconds == 15.0

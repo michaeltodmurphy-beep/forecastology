@@ -6829,6 +6829,150 @@ async def test_held_positions_loop_independent_of_blocked_watchlist(monkeypatch)
 
     assert len(held_calls) >= 1, "held-position loop must fire even when watchlist is blocked"
 
+@pytest.mark.asyncio
+async def test_held_positions_loop_timeout_logs_critical_and_keeps_running(monkeypatch):
+    """A slow _evaluate_held_positions must log CRITICAL (loop_timeout) and the
+    loop must keep cycling rather than dying.  Regression guard for the
+    held_positions.loop_timeout starvation that cancelled the SL sweep."""
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(
+        monkeypatch,
+        held_positions_loop_interval_ms=0,
+        held_positions_loop_timeout_seconds=0.01,
+    )
+    strategy._reconciliation_complete = True
+    strategy._running = True
+
+    calls = []
+
+    async def slow_held():
+        calls.append(1)
+        await asyncio.sleep(1.0)
+
+    strategy._evaluate_held_positions = slow_held
+
+    task = asyncio.create_task(strategy._held_positions_loop())
+    await asyncio.sleep(0.1)
+    strategy._running = False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert any(event == "held_positions.loop_timeout" for event, _ in logged), (
+        "a sweep exceeding its budget must log held_positions.loop_timeout"
+    )
+    # The loop must have cycled more than once (i.e. did not die on the timeout).
+    assert len(calls) >= 2, "held-position loop must keep cycling after a timeout"
+
+
+@pytest.mark.asyncio
+async def test_held_positions_loop_starved_escalates_after_three_timeouts(monkeypatch):
+    """Three consecutive sweep timeouts must additionally emit loop_starved."""
+    logged = capture_logs(monkeypatch)
+    strategy = make_strategy(
+        monkeypatch,
+        held_positions_loop_interval_ms=0,
+        held_positions_loop_timeout_seconds=0.01,
+    )
+    strategy._reconciliation_complete = True
+    strategy._running = True
+
+    async def slow_held():
+        await asyncio.sleep(1.0)
+
+    strategy._evaluate_held_positions = slow_held
+
+    task = asyncio.create_task(strategy._held_positions_loop())
+    await asyncio.sleep(0.4)
+    strategy._running = False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    starved = [kwargs for event, kwargs in logged if event == "held_positions.loop_starved"]
+    assert starved, "sustained timeouts must escalate to held_positions.loop_starved"
+    assert starved[0]["consecutive_timeouts"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_held_positions_loop_timeout_streak_resets_on_success(monkeypatch):
+    """A successful sweep must reset the consecutive-timeout streak."""
+    strategy = make_strategy(
+        monkeypatch,
+        held_positions_loop_interval_ms=0,
+        held_positions_loop_timeout_seconds=0.01,
+    )
+    strategy._reconciliation_complete = True
+    strategy._running = True
+
+    mode = {"i": 0}
+
+    async def flaky_held():
+        mode["i"] += 1
+        if mode["i"] <= 2:
+            await asyncio.sleep(1.0)  # timeout
+        # else: return immediately (success)
+
+    strategy._evaluate_held_positions = flaky_held
+
+    task = asyncio.create_task(strategy._held_positions_loop())
+    await asyncio.sleep(0.4)
+    strategy._running = False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert getattr(strategy, "_held_positions_timeout_streak", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_evaluate_held_positions_rest_fetch_timeout_is_isolated(monkeypatch):
+    """A REST fallback fetch that exceeds its timeout must NOT cancel the sweep:
+    the ticker falls through blind and _evaluate_held_positions returns
+    normally.  Regression guard for the sweep-wide starvation."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTLV-26AUG08-B54.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 1, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch,
+        executor=executor,
+        held_position_rest_fetch_timeout_seconds=0.01,
+    )
+    strategy._execute_stop_loss = AsyncMock()
+    bracket = MarketBracket(
+        market_ticker=ticker,
+        event_ticker="EVT1",
+        series_ticker="KXLOWTLV",
+        bracket_label="held",
+        phase=Phase.HOLDING,
+        position_quantity=1,
+        avg_entry=80,
+    )
+    strategy.brackets[ticker] = bracket
+    strategy.active_positions[ticker] = bracket
+    # No fresh WS quote → the REST fallback path is taken.
+    bracket._last_rest_price_fetch = 0
+
+    async def slow_rest(_ticker):
+        await asyncio.sleep(1.0)
+        return {"yes_bid": 10, "yes_ask": 12}
+
+    strategy._fetch_market_data_via_rest = slow_rest
+
+    # Must complete well under the (slow) REST call duration.
+    await asyncio.wait_for(strategy._evaluate_held_positions(), timeout=0.5)
+
+    assert any(event == "phase.c.rest_fetch_timeout" for event, _ in logged), (
+        "an over-budget REST fallback must log phase.c.rest_fetch_timeout"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Change 2: Orderbook channels feed the StopLossWatcher

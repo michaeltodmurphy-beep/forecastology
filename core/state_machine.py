@@ -2330,12 +2330,48 @@ class TemperatureStrategy:
                 await asyncio.sleep(interval_s)
                 continue
             try:
-                await asyncio.wait_for(self._evaluate_held_positions(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "held_positions.loop_timeout",
-                    msg="_evaluate_held_positions timed out and was skipped",
+                # Budget for a whole Phase-C pass.  This bounds the entire
+                # sweep (positions fetch + per-ticker price resolution + SL
+                # dispatch).  It is intentionally generous relative to the
+                # per-call REST timeout so that a single slow fallback fetch
+                # can never cancel the safety-critical stop-loss sweep for
+                # every held position.  A pass that exceeds this budget is a
+                # genuine runaway, so log it at CRITICAL with the duration.
+                loop_timeout = float(
+                    getattr(self.config, "held_positions_loop_timeout_seconds", 15.0) or 15.0
                 )
+                _sweep_started = asyncio.get_event_loop().time()
+                try:
+                    await asyncio.wait_for(
+                        self._evaluate_held_positions(), timeout=loop_timeout
+                    )
+                except asyncio.TimeoutError:
+                    _elapsed = asyncio.get_event_loop().time() - _sweep_started
+                    logger.critical(
+                        "held_positions.loop_timeout",
+                        msg=(
+                            "_evaluate_held_positions exceeded its loop budget and "
+                            "was cancelled; the stop-loss sweep was skipped this cycle"
+                        ),
+                        timeout_s=round(loop_timeout, 2),
+                        elapsed_s=round(_elapsed, 2),
+                    )
+                    self._held_positions_timeout_streak = (
+                        getattr(self, "_held_positions_timeout_streak", 0) + 1
+                    )
+                    if self._held_positions_timeout_streak >= 3:
+                        logger.critical(
+                            "held_positions.loop_starved",
+                            consecutive_timeouts=self._held_positions_timeout_streak,
+                            msg=(
+                                "Stop-loss sweep cancelled "
+                                f"{self._held_positions_timeout_streak} cycles in a "
+                                "row; held positions are unprotected. Check REST "
+                                "latency or raise HELD_POSITIONS_LOOP_TIMEOUT_SECONDS."
+                            ),
+                        )
+                else:
+                    self._held_positions_timeout_streak = 0
             except Exception as e:
                 logger.error("held_positions.loop_error", error=str(e), exc_info=True)
             await asyncio.sleep(interval_s)
@@ -4959,7 +4995,43 @@ class TemperatureStrategy:
                 last_fetch = getattr(bracket, "_last_rest_price_fetch", 0)
                 if now_fetch - last_fetch >= self.config.held_position_price_refresh_seconds:
                     bracket._last_rest_price_fetch = now_fetch
-                    rest_data = await self._fetch_market_data_via_rest(ticker)
+                    # Isolate the fallback fetch from the sweep: it is given
+                    # its own (short) timeout and ANY failure — including a
+                    # timeout that slips past the client-level ceiling — is
+                    # swallowed so this ticker simply falls through with no
+                    # REST price.  The sweep then continues to the SL decision
+                    # for every OTHER held position instead of being
+                    # cancelled wholesale.  This is the fix for the
+                    # held_positions.loop_timeout starvation.
+                    _rest_timeout = float(
+                        getattr(self.config, "held_position_rest_fetch_timeout_seconds", 1.5) or 1.5
+                    )
+                    # Small epsilon above the per-call client ceiling: this
+                    # outer guard only fires if the fetch somehow overruns its
+                    # own configured timeout (e.g. DNS/TLS stall before the
+                    # request-level timeout applies).  Kept tight so it can
+                    # never itself become the reason the sweep runs long.
+                    _rest_guard = _rest_timeout + 0.25
+                    try:
+                        rest_data = await asyncio.wait_for(
+                            self._fetch_market_data_via_rest(ticker),
+                            timeout=_rest_guard,
+                        )
+                    except asyncio.TimeoutError:
+                        rest_data = None
+                        logger.warning(
+                            "phase.c.rest_fetch_timeout",
+                            ticker=ticker,
+                            timeout_s=round(_rest_guard, 2),
+                            reason="rest_fallback_exceeded_budget_position_evaluated_blind",
+                        )
+                    except Exception as _rest_err:
+                        rest_data = None
+                        logger.warning(
+                            "phase.c.rest_fetch_error",
+                            ticker=ticker,
+                            error=str(_rest_err),
+                        )
                     if rest_data:
                         yes_ask = rest_data.get("yes_ask")
                         rest_yes_bid = rest_data.get("yes_bid")
@@ -5944,12 +6016,22 @@ class TemperatureStrategy:
         from app.signing import build_auth_headers
         markets_path = f"/trade-api/v2/markets/{ticker}"
         markets_url = f"{self.config.rest_base_url}{markets_path}"
+        # Hard per-call ceiling.  This path is invoked from the safety-critical
+        # Phase-C stop-loss sweep, so a single slow /markets call MUST NOT be
+        # able to consume (and thereby cancel) the whole loop budget.  The
+        # ceiling is deliberately far below held_positions_loop_timeout_seconds
+        # so the worst case across several held tickers still fits inside it.
+        fetch_timeout = float(
+            getattr(self.config, "held_position_rest_fetch_timeout_seconds", 1.5) or 1.5
+        )
         try:
             rest_headers = build_auth_headers(self._private_key, self.config.kalshi_api_key, "GET", markets_path)
             client = self._http_client
             if client is None or client.is_closed:
-                client = httpx.AsyncClient(timeout=5.0)
-            resp = await client.get(markets_url, headers=rest_headers)
+                client = httpx.AsyncClient(timeout=fetch_timeout)
+            resp = await client.get(
+                markets_url, headers=rest_headers, timeout=fetch_timeout
+            )
             if resp.status_code == 200:
                 mkt = resp.json().get("market", {})
                 result = {}
