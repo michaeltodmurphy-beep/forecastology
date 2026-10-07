@@ -42,7 +42,7 @@ except ImportError:
 
 logger = structlog.get_logger(__name__)
 SERIES_DATE_RE = re.compile(r"^(.+?)-(\d{2}[A-Z]{3}\d{2})-(?:T\d+|B\d+\.?\d*)$")
-StopLossCycleState = Literal["TRIGGERED", "SUBMITTING", "RETRYING", "TERMINAL"]
+StopLossCycleState = Literal["TRIGGERED", "SUBMITTING", "RETRYING", "TERMINAL", "UNFILLABLE"]
 _ET_ZONE = ZoneInfo("America/New_York")
 
 
@@ -851,6 +851,23 @@ class TemperatureStrategy:
         if cycle is not None:
             cycle.state = state
 
+    def _sl_unfillable_revived(self, ticker: str) -> bool:
+        """Return True if a bottomed-out bracket now shows a live bid again.
+
+        A bracket is latched UNFILLABLE when its book has no bid to sell into.
+        The only way an exit can resume is for a buyer to reappear, i.e. the
+        cached YES bid rises above the configured no-bid ceiling.  If there is
+        no fresh cached quote we conservatively stay latched.
+        """
+        no_bid_max_bid_cents = int(
+            getattr(self.config, "sl_panic_no_bid_max_bid_cents", 1)
+        )
+        quote = self.cache.get_quote(ticker)
+        if quote is None:
+            return False
+        best_bid = quote[0]
+        return best_bid is not None and best_bid > no_bid_max_bid_cents
+
     async def _dispatch_stop_loss_exit(
         self,
         bracket: MarketBracket,
@@ -862,6 +879,32 @@ class TemperatureStrategy:
         action_key = f"{ticker}:STOP_LOSS"
         current_cycle = self._sl_cycles.get(ticker)
         existing_task = self._sl_exit_tasks.get(ticker)
+
+        # Bottomed-out latch: once a bracket has been declared UNFILLABLE (no
+        # bid to sell into, ask parked at the floor), do NOT re-arm a panic
+        # exit on every fresh trigger -- that would just re-detect the dead
+        # book and spin at the dispatch level.  Only resume if the book shows a
+        # live bid again (a buyer appeared), which is the one condition under
+        # which an exit could actually fill.
+        if getattr(bracket, "_sl_unfillable", False):
+            revived = self._sl_unfillable_revived(ticker)
+            if not revived:
+                logger.info(
+                    "sl.exit_unfillable_suppressed",
+                    ticker=ticker,
+                    action_key=action_key,
+                    trigger_source=trigger_source,
+                    reason="no_bid_latched",
+                )
+                return
+            bracket._sl_unfillable = False
+            logger.warning(
+                "sl.exit_unfillable_revived",
+                ticker=ticker,
+                action_key=action_key,
+                reason="live_bid_returned",
+            )
+
         if existing_task is not None and not existing_task.done():
             logger.info(
                 "sl.trigger_suppressed_in_flight",
@@ -1067,6 +1110,20 @@ class TemperatureStrategy:
         retry_sleep_s = max(int(self.config.sl_panic_retry_ms or 0), 0) / 1000.0
         stop_loss_ask_cents = int(self.config.stop_loss_price)
         max_quote_age_ms = int(self.config.sl_panic_max_quote_age_ms or 30000)
+        # Bottomed-out guard (see sl_panic_abandon_when_no_bid).  A dead book is
+        # a YES bid <= no_bid_max AND an ask already parked at/below the panic
+        # floor.  There is structurally no buyer, so a marketable sell cannot
+        # fill no matter how often we resubmit.
+        abandon_when_no_bid = bool(
+            getattr(self.config, "sl_panic_abandon_when_no_bid", True)
+        )
+        no_bid_confirm_checks = max(
+            int(getattr(self.config, "sl_panic_no_bid_confirm_checks", 3) or 1), 1
+        )
+        no_bid_max_bid_cents = int(
+            getattr(self.config, "sl_panic_no_bid_max_bid_cents", 1)
+        )
+        _consecutive_no_bid = 0
 
         logger.warning(
             "sl.panic_triggered",
@@ -1202,6 +1259,65 @@ class TemperatureStrategy:
                         )
                         await self._rollback_stop_loss_count_if_counted(current)
                         return
+
+                    # ----------------------------------------------------------
+                    # Bottomed-out guard.  Trigger is still met (ask <= stop),
+                    # so the position SHOULD exit -- but if there is no bid to
+                    # sell into (best_bid <= no_bid_max_bid_cents), the book is
+                    # dead: a marketable sell at the panic floor cannot fill no
+                    # matter how many times we resubmit.  Once this reading has
+                    # persisted for no_bid_confirm_checks consecutive attempts
+                    # (guards against a transient empty book), latch the bracket
+                    # to a terminal UNFILLABLE state and stop spinning.  A
+                    # single CRITICAL alert tells the operator a real loss is
+                    # stranded with no buyer.
+                    # ----------------------------------------------------------
+                    if abandon_when_no_bid:
+                        bid_dead = (
+                            best_bid_rv is not None
+                            and best_bid_rv <= no_bid_max_bid_cents
+                            and best_ask_rv is not None
+                            and best_ask_rv <= panic_price
+                        )
+                        if bid_dead:
+                            _consecutive_no_bid += 1
+                        else:
+                            _consecutive_no_bid = 0
+
+                        if _consecutive_no_bid >= no_bid_confirm_checks:
+                            self._set_sl_cycle_state(ticker, "UNFILLABLE")
+                            # Latch the bracket so _dispatch_stop_loss_exit does
+                            # not re-arm a futile panic exit on every fresh WS
+                            # trigger.  Cleared only when a live bid returns.
+                            bracket._sl_unfillable = True
+                            logger.critical(
+                                "sl.exit_unfillable",
+                                ticker=ticker,
+                                action_key=action_key,
+                                reason="no_bid_book_bottomed_out",
+                                best_bid_yes=best_bid_rv,
+                                best_ask_yes=best_ask_rv,
+                                stop_loss_price_ask=stop_loss_ask_cents,
+                                panic_price=panic_price,
+                                qty=current.position_quantity,
+                                consecutive_no_bid=_consecutive_no_bid,
+                                attempt=attempt,
+                                elapsed_ms=now_ms_rv - trigger_ts_ms,
+                                units="cents",
+                                msg=(
+                                    "Held position has no bid to sell into and "
+                                    "the ask is at the panic floor; it has "
+                                    "bottomed out. Stopping panic retries. "
+                                    f"{current.position_quantity} contract(s) are "
+                                    "likely a total loss and remain stranded "
+                                    "until the book revives."
+                                ),
+                            )
+                            # Do not roll back the stop-loss count: this is NOT
+                            # a bounce-back abort.  The position is unprotected
+                            # and we want the operator-facing unprotected-state
+                            # tracking to see it.  Leave ownership intact.
+                            return
             # ------------------------------------------------------------------
 
             if attempt == 1:

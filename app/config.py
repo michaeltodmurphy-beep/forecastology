@@ -679,6 +679,23 @@ class AppConfig(BaseSettings):
     # for PANIC_FLATTEN pre-submit revalidation. Set to 0 to disable the check.
     sl_panic_max_quote_age_ms: int = 30000
     # ── Low-ticker PM close ──────────────────────────────────────────────────
+    # Bottomed-out guard for PANIC_FLATTEN.  When the market has no bid to sell
+    # into (best YES bid <= SL_PANIC_NO_BID_MAX_BID_CENTS) AND the ask is already
+    # parked at the panic floor, there is structurally no buyer for the position.
+    # Spinning a marketable sell at ~10 Hz against a dead book can never fill,
+    # wastes rate limit, and hides the real state.  When enabled, the panic loop
+    # latches to a terminal UNFILLABLE state (single CRITICAL alert) instead of
+    # spinning.  Default enabled (fail-safe toward stopping the futile loop).
+    sl_panic_abandon_when_no_bid: bool = True
+    # A "no bid" reading must persist for this many consecutive revalidation
+    # checks before the bracket is declared bottomed-out.  Guards against a
+    # transient empty/thin book (WS gaps) prematurely abandoning a position
+    # that could still exit.  Default 3.
+    sl_panic_no_bid_confirm_checks: int = 3
+    # A YES bid at or below this many cents counts as "no bid" for the
+    # bottomed-out guard (0 = no bid at all; 1 = a 1-cent bid, effectively dead).
+    # Default 1.
+    sl_panic_no_bid_max_bid_cents: int = 1
     # Automatically evaluates all open KXLOW* positions at each ticker's own
     # local LOW_PM_CLOSE_TIME every day. KXHIGH* positions are not touched.
     #

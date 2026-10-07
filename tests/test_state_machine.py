@@ -5805,6 +5805,230 @@ async def test_panic_flatten_retries_on_transient_exception(monkeypatch):
     failed_logs = [kw for event, kw in logged if event == "sl.exit_retry_exhausted"]
     assert any(kw.get("reason") == "max_retries_exhausted" for kw in failed_logs)
 
+@pytest.mark.asyncio
+async def test_panic_flatten_bottomed_out_stops_retrying_when_no_bid(monkeypatch):
+    """When the book has no bid (bid<=1) and the ask is at the panic floor, the
+    position has bottomed out: the panic loop must stop resubmitting and emit a
+    single CRITICAL sl.exit_unfillable instead of spinning.
+
+    Regression guard for the live incident where a 10-lot with no buyer was
+    re-sold ~22x in ~2.6s, all failing, hammering the API for a fill that
+    structurally cannot happen."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSATX-26OCT07-B63.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 10, "average_fill_cost_cents": 80}}
+    calls = [0]
+
+    async def sell_yes(order):
+        calls[0] += 1
+        # Never fills: no buyer.
+        return ExecutionResult(
+            success=False,
+            market_ticker=order.market_ticker,
+            side="yes",
+            price=order.price,
+            quantity=order.quantity,
+            fill_price=0,
+            fill_quantity=0,
+            total_cost_cents=0,
+            notes="no_bid_unfilled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    strategy = make_strategy(
+        monkeypatch, executor=executor, db=db,
+        sl_exit_mode="PANIC_FLATTEN",
+        sl_panic_sell_price=1,
+        sl_panic_retry_ms=0,
+        sl_panic_max_retries=50,          # plenty of headroom to spin if not guarded
+        sl_panic_no_bid_confirm_checks=3,  # latch after 3 consecutive dead readings
+        sl_panic_abandon_when_no_bid=True,
+        enable_fast_sl_exit=True,
+        stop_loss_price=62,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTSATX",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=10, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Dead book: bid=0, ask=1 (at the panic floor).
+    strategy.cache.update_quote(ticker, 0, 1)
+
+    await strategy._run_panic_flatten_exit(
+        bracket, trigger_price=1, trigger_source="test", trigger_ts_ms=strategy._now_ms(),
+    )
+
+    # Must latch and stop well before the 50-attempt ceiling.
+    assert getattr(bracket, "_sl_unfillable", False) is True
+    assert calls[0] <= 4, f"should stop after the confirm window, made {calls[0]} sells"
+
+    unfillable = [kw for event, kw in logged if event == "sl.exit_unfillable"]
+    assert len(unfillable) >= 1, "must emit sl.exit_unfillable"
+    assert unfillable[0]["reason"] == "no_bid_book_bottomed_out"
+    assert unfillable[0]["best_bid_yes"] == 0
+    assert unfillable[0]["qty"] == 10
+    # The terminal max-retry warning must NOT fire (we stopped early).
+    assert not any(event == "sl.exit_retry_exhausted" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_live_bid_does_not_latch_unfillable(monkeypatch):
+    """A live bid (bid > no_bid ceiling) must NOT trigger the bottomed-out latch,
+    even if the sell keeps failing; the normal retry loop runs to exhaustion."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTBOS-26JUN23-B88.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 2, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        return ExecutionResult(
+            success=False, market_ticker=order.market_ticker, side="yes",
+            price=order.price, quantity=order.quantity, fill_price=0,
+            fill_quantity=0, total_cost_cents=0, notes="unfilled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    strategy = _make_panic_strategy(
+        monkeypatch, executor=executor, db=db,
+        stop_loss_price=50,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTBOS",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=2, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Live bid: bid=45 -> not "no bid".
+    strategy.cache.update_quote(ticker, 45, 48)
+
+    await strategy._run_panic_flatten_exit(
+        bracket, trigger_price=48, trigger_source="test", trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert getattr(bracket, "_sl_unfillable", False) is False
+    assert not any(event == "sl.exit_unfillable" for event, _ in logged)
+    # Renders as the ordinary exhaustion path.
+    assert any(event == "sl.exit_retry_exhausted" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_panic_flatten_transient_zero_bid_does_not_prematurely_latch(monkeypatch):
+    """A single transient zero-bid reading must not latch if the book revives
+    before the confirm window elapses."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTLAX-26OCT07-B68.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 3, "average_fill_cost_cents": 80}}
+
+    async def sell_yes(order):
+        return ExecutionResult(
+            success=False, market_ticker=order.market_ticker, side="yes",
+            price=order.price, quantity=order.quantity, fill_price=0,
+            fill_quantity=0, total_cost_cents=0, notes="unfilled",
+        )
+
+    executor.sell_yes = sell_yes
+    db = InMemoryDB()
+    strategy = _make_panic_strategy(
+        monkeypatch, executor=executor, db=db,
+        stop_loss_price=50,
+        sl_panic_no_bid_confirm_checks=3,
+    )
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTLAX",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=3, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._reconciliation_complete = True
+    # Dead on the first reading, then the book revives to a live bid.
+    strategy.cache.update_quote(ticker, 0, 1)
+
+    orig_execute = strategy._execute_stop_loss
+
+    async def flip_quote_once(*args, **kwargs):
+        # After the first submit attempt, restore a live bid so the streak resets.
+        strategy.cache.update_quote(ticker, 40, 48)
+        return await orig_execute(*args, **kwargs)
+
+    strategy._execute_stop_loss = flip_quote_once
+
+    await strategy._run_panic_flatten_exit(
+        bracket, trigger_price=1, trigger_source="test", trigger_ts_ms=strategy._now_ms(),
+    )
+
+    assert getattr(bracket, "_sl_unfillable", False) is False
+    assert not any(event == "sl.exit_unfillable" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_suppresses_rearm_while_unfillable(monkeypatch):
+    """Once a bracket is latched UNFILLABLE with no live bid, _dispatch_stop_loss_exit
+    must not re-arm a futile panic exit on every fresh trigger."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSATX-26OCT07-B99.5"
+    strategy = _make_panic_strategy(monkeypatch, stop_loss_price=62)
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTSATX",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=10, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    bracket._sl_unfillable = True
+    # Book still dead: no bid.
+    strategy.cache.update_quote(ticker, 0, 1)
+
+    spawned = []
+
+    async def fake_panic(**kwargs):
+        spawned.append(1)
+
+    strategy._run_panic_flatten_exit = fake_panic
+
+    await strategy._dispatch_stop_loss_exit(bracket, trigger_price=1, trigger_source="watcher")
+
+    assert not spawned, "no exit task may be spawned while latched with no bid"
+    assert not any(event == "sl.trigger_detected" for event, _ in logged)
+    assert any(event == "sl.exit_unfillable_suppressed" for event, _ in logged)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rearms_when_bid_returns_after_unfillable(monkeypatch):
+    """When a live bid returns, a latched-UNFILLABLE bracket must be allowed to
+    try again (and the latch cleared)."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTSATX-26OCT07-B77.5"
+    strategy = _make_panic_strategy(monkeypatch, stop_loss_price=62)
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTSATX",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=10, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    bracket._sl_unfillable = True
+    # Book revived: real bid.
+    strategy.cache.update_quote(ticker, 30, 40)
+
+    created = []
+
+    async def fake_panic(**kwargs):
+        created.append(1)
+
+    strategy._run_panic_flatten_exit = fake_panic
+
+    await asyncio.sleep(0)  # let the dispatched task run
+    await strategy._dispatch_stop_loss_exit(bracket, trigger_price=40, trigger_source="watcher")
+    await asyncio.sleep(0)  # allow the spawned task to execute
+
+    assert bracket._sl_unfillable is False
+    assert any(event == "sl.exit_unfillable_revived" for event, _ in logged)
+    assert created, "a fresh exit task must be dispatched once the book revives"
 
 @pytest.mark.asyncio
 async def test_panic_flatten_phase_c_no_trigger_when_ask_above_stop(monkeypatch):
