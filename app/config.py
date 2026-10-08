@@ -286,6 +286,42 @@ def _parse_entry_gate_mode(raw: str | None) -> str:
     return "NWS_WINDOW"
 
 
+def _parse_sunrise_offset_time(raw: str | None) -> str:
+    """Parse SUNRISE_OFFSET_TIME as a city-local ``HH:MM`` target time.
+
+    When set (e.g. ``"08:00"``), each KXLOW city's sunrise gate opens at that
+    LOCAL CLOCK TIME instead of ``sunrise + SUNRISE_STRATEGY_TIME``: the gate
+    recomputes the gap (target - sunrise) every day per city, so the window
+    always opens at/near the configured time with no seasonal drift.
+
+    An empty/unset value returns ``""`` (feature OFF -> unchanged behavior).
+    Accepts ``HH`` or ``HH:MM`` (seconds dropped).  Malformed or out-of-range
+    input logs a warning and returns ``""`` (fail safe -> feature OFF).
+    """
+    if not raw or not raw.strip():
+        return ""
+    stripped = raw.strip()
+    parts = stripped.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 and parts[1].strip() else 0
+    except (ValueError, TypeError, IndexError):
+        logger.warning(
+            "config.sunrise_offset_time_invalid",
+            raw=raw,
+            message=f"Unrecognized value for SUNRISE_OFFSET_TIME='{raw}'; ignoring (feature off)",
+        )
+        return ""
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        logger.warning(
+            "config.sunrise_offset_time_out_of_range",
+            raw=raw,
+            message=f"SUNRISE_OFFSET_TIME='{raw}' must be a valid HH:MM time; ignoring (feature off)",
+        )
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _parse_sunrise_source(raw: str | None) -> str:
     if not raw or not raw.strip():
         return "astral"
@@ -531,6 +567,14 @@ class AppConfig(BaseSettings):
     # SUNRISE_OBS_MAX_AGE_OVERRIDES: per-station stale threshold overrides as
     #   STATION:MINUTES entries, comma-separated (e.g. KNYC:25,KSEA:20)
     entry_gate_mode: Literal["NWS_WINDOW", "SUNRISE"] = "NWS_WINDOW"
+    # SUNRISE_OFFSET_TIME (optional, "" = off): a city-local clock target
+    # ("HH:MM", e.g. "08:00").  When set, the SUNRISE gate opens at that local
+    # time instead of "sunrise + SUNRISE_STRATEGY_TIME": every cycle/day the gate
+    # recomputes gap = target - sunrise (in the city's own tz) and uses it as the
+    # effective strategy minutes.  SUNRISE_STRATEGY_TIME is IGNORED while this is
+    # set; SUNRISE_ENTRY_WINDOW_MINUTES, the AM-low deadline, the temperature-rise
+    # baseline, and the spread bands are unchanged.  Empty/malformed = feature off.
+    sunrise_offset_time: str = ""
     sunrise_strategy_time: int = 30
     sunrise_entry_window_minutes: int = 120
     sunrise_require_temp_rising: bool = True
@@ -1026,6 +1070,17 @@ class AppConfig(BaseSettings):
         default_entry_start_local = os.getenv("DEFAULT_ENTRY_START_LOCAL", "01:00")
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
         entry_gate_mode = _parse_entry_gate_mode(os.getenv("ENTRY_GATE_MODE"))
+        sunrise_offset_time = _parse_sunrise_offset_time(os.getenv("SUNRISE_OFFSET_TIME"))
+        if sunrise_offset_time:
+            logger.info(
+                "config.sunrise_offset_time_configured",
+                sunrise_offset_time=sunrise_offset_time,
+                message=(
+                    "SUNRISE_OFFSET_TIME set: KXLOW sunrise gate will open at this "
+                    "city-local clock time (recomputed from sunrise daily); "
+                    "SUNRISE_STRATEGY_TIME is ignored"
+                ),
+            )
         sunrise_strategy_time = _parse_non_negative_int(
             os.getenv("SUNRISE_STRATEGY_TIME"),
             "SUNRISE_STRATEGY_TIME",
@@ -1399,6 +1454,7 @@ class AppConfig(BaseSettings):
             default_entry_start_local=default_entry_start_local,
             phoenix_entry_start_local=phoenix_entry_start_local,
             entry_gate_mode=entry_gate_mode,
+            sunrise_offset_time=sunrise_offset_time,
             sunrise_strategy_time=sunrise_strategy_time,
             sunrise_entry_window_minutes=sunrise_entry_window_minutes,
             sunrise_require_temp_rising=sunrise_require_temp_rising,

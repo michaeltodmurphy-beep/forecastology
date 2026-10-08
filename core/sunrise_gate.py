@@ -295,6 +295,61 @@ class SunriseEntryGate:
         """
         return _bracket_line_int(bracket_temp_f + self._calibrated_offset_f(station_id))
 
+    def _effective_strategy_minutes(
+        self,
+        sunrise_local: datetime.datetime,
+        local_date: datetime.date,
+        tz: ZoneInfo,
+    ) -> int:
+        """Minutes after *sunrise_local* at which the gate opens.
+
+        Default: ``SUNRISE_STRATEGY_TIME`` (unchanged behavior).
+
+        When ``SUNRISE_OFFSET_TIME`` is set (a city-local "HH:MM" target), the
+        gate instead opens at that LOCAL CLOCK TIME: this recomputes the gap
+        ``target - sunrise`` for the given city/date every time (so there is no
+        seasonal drift and no per-day config editing).  The gap is clamped at
+        0 so a pathological target earlier than sunrise can never open the gate
+        before sunrise.
+
+        Malformed/unparseable ``SUNRISE_OFFSET_TIME`` falls back to the plain
+        ``SUNRISE_STRATEGY_TIME`` behavior (defensive; the parser already
+        validates, so this is belt-and-suspenders).
+        """
+        raw = getattr(self.config, "sunrise_offset_time", "") or ""
+        raw = raw.strip()
+        if not raw:
+            return int(self.config.sunrise_strategy_time)
+        parts = raw.split(":")
+        try:
+            target_hour = int(parts[0])
+            target_minute = int(parts[1]) if len(parts) > 1 and parts[1].strip() else 0
+        except (ValueError, TypeError, IndexError):
+            return int(self.config.sunrise_strategy_time)
+        if not (0 <= target_hour <= 23 and 0 <= target_minute <= 59):
+            return int(self.config.sunrise_strategy_time)
+
+        target_local = datetime.datetime.combine(
+            local_date, datetime.time(target_hour, target_minute), tzinfo=tz
+        )
+        gap_minutes = int(
+            (target_local - sunrise_local).total_seconds() // 60
+        )
+        if gap_minutes < 0:
+            # target is before sunrise (should not happen in practice); never
+            # open before sunrise.
+            gap_minutes = 0
+        if gap_minutes != int(self.config.sunrise_strategy_time):
+            logger.info(
+                "sunrise.offset_time_applied",
+                sunrise_local=sunrise_local.isoformat(),
+                target_local=target_local.isoformat(),
+                effective_strategy_minutes=gap_minutes,
+                configured_strategy_minutes=int(self.config.sunrise_strategy_time),
+                local_date=local_date.isoformat(),
+            )
+        return gap_minutes
+
     def _fetch_station_obs(
         self,
         station_id: str,
@@ -363,7 +418,12 @@ class SunriseEntryGate:
 
         station_id, lat, lon = coords
         sunrise_local, _source = self._get_sunrise_local(series, tz, local_date, lat, lon)
-        gate_open = sunrise_local + datetime.timedelta(minutes=int(self.config.sunrise_strategy_time))
+        # Gate anchor: sunrise + (SUNRISE_STRATEGY_TIME or the SUNRISE_OFFSET_TIME
+        # gap).  With SUNRISE_OFFSET_TIME set the effective minutes are recomputed
+        # per city/day so the window opens at the configured city-local time.
+        gate_open = sunrise_local + datetime.timedelta(
+            minutes=self._effective_strategy_minutes(sunrise_local, local_date, tz)
+        )
         gate_close = gate_open + datetime.timedelta(
             minutes=int(self.config.sunrise_entry_window_minutes)
         )
@@ -450,9 +510,11 @@ class SunriseEntryGate:
     ) -> Optional[tuple[datetime.datetime, datetime.datetime]]:
         """Return ``(gate_open_local, gate_close_local)`` for *ticker*'s city.
 
-        ``gate_open_local = sunrise_local + SUNRISE_STRATEGY_TIME`` minutes and
+        ``gate_open_local = sunrise_local + effective strategy minutes`` and
         ``gate_close_local = gate_open_local + SUNRISE_ENTRY_WINDOW_MINUTES``
-        minutes (both tz-aware, in the ticker's own city-local timezone).
+        minutes (both tz-aware, in the ticker's own city-local timezone).  The
+        effective strategy minutes are ``SUNRISE_STRATEGY_TIME`` normally, or the
+        recomputed ``SUNRISE_OFFSET_TIME - sunrise`` gap when that offset is set.
 
         Used by the time-of-day entry spread resolver so the spread bands share
         the exact same sunrise anchor as the entry gate itself.  Returns ``None``
@@ -475,8 +537,10 @@ class SunriseEntryGate:
 
         station_id, lat, lon = coords
         sunrise_local, _source = self._get_sunrise_local(series, tz, local_date, lat, lon)
+        # Same anchor as evaluate(): honor SUNRISE_OFFSET_TIME so the spread
+        # bands use the exact gate-open/gate-close the entry gate itself uses.
         gate_open = sunrise_local + datetime.timedelta(
-            minutes=int(self.config.sunrise_strategy_time)
+            minutes=self._effective_strategy_minutes(sunrise_local, local_date, tz)
         )
         gate_close = gate_open + datetime.timedelta(
             minutes=int(self.config.sunrise_entry_window_minutes)
