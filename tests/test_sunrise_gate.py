@@ -1952,19 +1952,24 @@ def test_entry_obs_calibration_logs_configured_once(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# SUNRISE_OFFSET_TIME: open the gate at a fixed city-local clock time
+# SUNRISE_OFFSET_TIME + SUNRISE_OFFSET_TIMEZONES
+#   08:00 is interpreted in the EST reference frame (same absolute instant for
+#   every in-scope city); SUNRISE_OFFSET_TIMEZONES selects which cities apply it.
 # ---------------------------------------------------------------------------
 
 def test_sunrise_offset_time_defaults_empty():
     cfg = _make_config()
     assert cfg.sunrise_offset_time == ""
+    assert cfg.sunrise_offset_timezones == set()
 
 
 def test_sunrise_offset_time_from_env(monkeypatch):
     _set_required_env(monkeypatch)
     monkeypatch.setenv("SUNRISE_OFFSET_TIME", "8:5")
+    monkeypatch.setenv("SUNRISE_OFFSET_TIMEZONES", "EST")
     cfg = AppConfig.from_env()
     assert cfg.sunrise_offset_time == "08:05"
+    assert cfg.sunrise_offset_timezones == {"America/New_York"}
 
 
 def test_sunrise_offset_time_invalid_env_is_off(monkeypatch):
@@ -1976,59 +1981,124 @@ def test_sunrise_offset_time_invalid_env_is_off(monkeypatch):
     assert any(e.get("event") == "config.sunrise_offset_time_invalid" for e in logs)
 
 
+def test_sunrise_offset_timezones_parse_from_env(monkeypatch):
+    """Tokens are case-insensitive and map to IANA zones."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SUNRISE_OFFSET_TIMEZONES", "est, cst ,PHX")
+    cfg = AppConfig.from_env()
+    assert cfg.sunrise_offset_timezones == {
+        "America/New_York",
+        "America/Chicago",
+        "America/Phoenix",
+    }
+
+
+def test_sunrise_offset_timezones_unknown_token_warns_and_ignored(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SUNRISE_OFFSET_TIMEZONES", "EST,BOGUS")
+    with capture_logs() as logs:
+        cfg = AppConfig.from_env()
+    assert cfg.sunrise_offset_timezones == {"America/New_York"}
+    assert any(e.get("event") == "config.sunrise_offset_timezones_invalid" for e in logs)
+
+
+def test_sunrise_offset_timezones_empty_is_off(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SUNRISE_OFFSET_TIMEZONES", "")
+    cfg = AppConfig.from_env()
+    assert cfg.sunrise_offset_timezones == set()
+
+
+def _now_utc_0800et():
+    # 08:00 EDT on 2026-10-08 == 12:00 UTC (DST still in effect).
+    return datetime.datetime(2026, 10, 8, 12, 0, tzinfo=datetime.timezone.utc)
+
+
 def test_effective_strategy_minutes_empty_uses_strategy_time():
-    gate = SunriseEntryGate(_make_config(sunrise_strategy_time=30, sunrise_offset_time=""))
+    gate = SunriseEntryGate(
+        _make_config(sunrise_strategy_time=30, sunrise_offset_time="",
+                     sunrise_offset_timezones={"America/New_York"})
+    )
     tz = ZoneInfo("America/New_York")
     sunrise = datetime.datetime(2026, 10, 8, 6, 49, tzinfo=tz)
-    assert gate._effective_strategy_minutes(sunrise, sunrise.date(), tz) == 30
+    assert gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/New_York") == 30
 
 
-def test_effective_strategy_minutes_offset_reaches_target_clock_time():
-    """Boston 06:49 sunrise + SUNRISE_OFFSET_TIME=08:00 opens at exactly 08:00."""
-    gate = SunriseEntryGate(_make_config(sunrise_strategy_time=1, sunrise_offset_time="08:00"))
+def test_effective_strategy_minutes_offset_inert_without_timezones():
+    """Offset set but no timezones -> feature off (legacy strategy time)."""
+    gate = SunriseEntryGate(
+        _make_config(sunrise_strategy_time=30, sunrise_offset_time="08:00",
+                     sunrise_offset_timezones=set())
+    )
     tz = ZoneInfo("America/New_York")
     sunrise = datetime.datetime(2026, 10, 8, 6, 49, tzinfo=tz)
-    minutes = gate._effective_strategy_minutes(sunrise, sunrise.date(), tz)
-    assert minutes == 71
-    assert sunrise + datetime.timedelta(minutes=minutes) == datetime.datetime(
-        2026, 10, 8, 8, 0, tzinfo=tz
+    assert gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/New_York") == 30
+
+
+def test_effective_strategy_minutes_et_city_reaches_0800_et():
+    """Boston 06:49 EDT sunrise + offset -> opens at exactly 08:00 ET."""
+    gate = SunriseEntryGate(
+        _make_config(sunrise_strategy_time=1, sunrise_offset_time="08:00",
+                     sunrise_offset_timezones={"America/New_York"})
     )
-
-
-def test_effective_strategy_minutes_offset_recomputed_per_day():
-    """Different sunrise per day -> different gap, same 08:00 open."""
-    gate = SunriseEntryGate(_make_config(sunrise_offset_time="08:00"))
     tz = ZoneInfo("America/New_York")
-    early = datetime.datetime(2026, 6, 21, 5, 5, tzinfo=tz)
-    late = datetime.datetime(2026, 12, 21, 7, 15, tzinfo=tz)
-    m_early = gate._effective_strategy_minutes(early, early.date(), tz)
-    m_late = gate._effective_strategy_minutes(late, late.date(), tz)
-    assert early + datetime.timedelta(minutes=m_early) == datetime.datetime(
-        2026, 6, 21, 8, 0, tzinfo=tz
+    sunrise = datetime.datetime(2026, 10, 8, 6, 49, tzinfo=tz)
+    minutes = gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/New_York")
+    opened = sunrise + datetime.timedelta(minutes=minutes)
+    assert opened == datetime.datetime(2026, 10, 8, 8, 0, tzinfo=tz)
+
+
+def test_effective_strategy_minutes_out_of_scope_uses_strategy_time():
+    """A CT city with only EST in the allowlist keeps legacy behavior."""
+    gate = SunriseEntryGate(
+        _make_config(sunrise_strategy_time=30, sunrise_offset_time="08:00",
+                     sunrise_offset_timezones={"America/New_York"})
     )
-    assert late + datetime.timedelta(minutes=m_late) == datetime.datetime(
-        2026, 12, 21, 8, 0, tzinfo=tz
+    tz = ZoneInfo("America/Chicago")
+    sunrise = datetime.datetime(2026, 10, 8, 6, 0, tzinfo=tz)
+    assert gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/Chicago") == 30
+
+
+def test_effective_strategy_minutes_ct_in_scope_opens_same_instant_as_0800_et():
+    """CST added -> Chicago opens at 08:00 ET == 07:00 CT (same instant)."""
+    gate = SunriseEntryGate(
+        _make_config(sunrise_strategy_time=1, sunrise_offset_time="08:00",
+                     sunrise_offset_timezones={"America/New_York", "America/Chicago"})
     )
+    tz = ZoneInfo("America/Chicago")
+    sunrise = datetime.datetime(2026, 10, 8, 5, 30, tzinfo=tz)  # 05:30 CDT
+    minutes = gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/Chicago")
+    opened = sunrise + datetime.timedelta(minutes=minutes)
+    assert opened.astimezone(datetime.timezone.utc) == datetime.datetime(
+        2026, 10, 8, 12, 0, tzinfo=datetime.timezone.utc
+    )  # 08:00 ET
 
 
 def test_effective_strategy_minutes_offset_before_sunrise_clamps_to_zero():
-    gate = SunriseEntryGate(_make_config(sunrise_offset_time="06:00"))
+    gate = SunriseEntryGate(
+        _make_config(sunrise_offset_time="06:00",
+                     sunrise_offset_timezones={"America/New_York"})
+    )
     tz = ZoneInfo("America/New_York")
     sunrise = datetime.datetime(2026, 10, 8, 6, 49, tzinfo=tz)
-    assert gate._effective_strategy_minutes(sunrise, sunrise.date(), tz) == 0
+    assert gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/New_York") == 0
 
 
 def test_effective_strategy_minutes_offset_malformed_falls_back():
-    gate = SunriseEntryGate(_make_config(sunrise_strategy_time=30, sunrise_offset_time="bad"))
+    gate = SunriseEntryGate(
+        _make_config(sunrise_strategy_time=30, sunrise_offset_time="bad",
+                     sunrise_offset_timezones={"America/New_York"})
+    )
     tz = ZoneInfo("America/New_York")
     sunrise = datetime.datetime(2026, 10, 8, 6, 49, tzinfo=tz)
-    assert gate._effective_strategy_minutes(sunrise, sunrise.date(), tz) == 30
+    assert gate._effective_strategy_minutes(sunrise, _now_utc_0800et(), "America/New_York") == 30
 
 
 def test_gate_open_honors_sunrise_offset_time(monkeypatch):
-    """evaluate() opens at the offset clock time, not sunrise+strategy."""
+    """evaluate() opens at the 08:00 ET instant for an in-scope ET city."""
     cfg = _make_config(
         sunrise_offset_time="08:00",
+        sunrise_offset_timezones={"America/New_York"},
         sunrise_strategy_time=1,
         sunrise_entry_window_minutes=120,
         sunrise_require_am_low=False,
@@ -2036,37 +2106,62 @@ def test_gate_open_honors_sunrise_offset_time(monkeypatch):
         sunrise_require_temp_rising=False,
     )
     gate = SunriseEntryGate(cfg, nws_client=_FakeNWSClient())
-    tz = ZoneInfo("America/Chicago")
-    fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)  # 06:00 local
+    tz = ZoneInfo("America/New_York")
+    fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)  # 06:00 EDT
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *_a, **_k: (fixed_sunrise, "astral"))
 
-    before_open = datetime.datetime(2026, 8, 9, 12, 50, tzinfo=datetime.timezone.utc)  # 07:50 local
-    at_open = datetime.datetime(2026, 8, 9, 13, 0, tzinfo=datetime.timezone.utc)  # 08:00 local
-    after_close = datetime.datetime(2026, 8, 9, 15, 1, tzinfo=datetime.timezone.utc)  # 10:01 local
+    before_open = datetime.datetime(2026, 8, 9, 11, 59, tzinfo=datetime.timezone.utc)  # 07:59 EDT
+    at_open = datetime.datetime(2026, 8, 9, 12, 0, tzinfo=datetime.timezone.utc)  # 08:00 EDT
+    after_close = datetime.datetime(2026, 8, 9, 14, 1, tzinfo=datetime.timezone.utc)  # 10:01 EDT
 
-    assert gate.evaluate("KXLOWTCHI-26AUG09-B67.5", now_utc=before_open).allowed is False
-    assert gate.evaluate("KXLOWTCHI-26AUG09-B67.5", now_utc=at_open).allowed is True
-    assert gate.evaluate("KXLOWTCHI-26AUG09-B67.5", now_utc=after_close).allowed is False
+    assert gate.evaluate("KXLOWTBOS-26AUG09-B67.5", now_utc=before_open).allowed is False
+    assert gate.evaluate("KXLOWTBOS-26AUG09-B67.5", now_utc=at_open).allowed is True
+    assert gate.evaluate("KXLOWTBOS-26AUG09-B67.5", now_utc=after_close).allowed is False
+
+
+def test_gate_out_of_scope_city_ignores_offset(monkeypatch):
+    """A CT city with only EST allowed keeps sunrise+strategy timing."""
+    cfg = _make_config(
+        sunrise_offset_time="08:00",
+        sunrise_offset_timezones={"America/New_York"},
+        sunrise_strategy_time=30,
+        sunrise_entry_window_minutes=120,
+        sunrise_require_am_low=False,
+        sunrise_temp_rise_required=0.0,
+        sunrise_require_temp_rising=False,
+    )
+    gate = SunriseEntryGate(cfg, nws_client=_FakeNWSClient())
+    tz = ZoneInfo("America/Chicago")
+    fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)  # 06:00 CDT
+    monkeypatch.setattr(gate, "_get_sunrise_local", lambda *_a, **_k: (fixed_sunrise, "astral"))
+
+    # 08:00 ET == 07:00 CDT.  Gate should NOT open at 07:00 CDT (offset ignored);
+    # it opens at 06:30 CDT (sunrise 06:00 + 30).
+    opens = datetime.datetime(2026, 8, 9, 11, 30, tzinfo=datetime.timezone.utc)  # 06:30 CDT
+    blocked = datetime.datetime(2026, 8, 9, 11, 15, tzinfo=datetime.timezone.utc)  # 06:15 CDT
+
+    assert gate.evaluate("KXLOWTCHI-26AUG09-B67.5", now_utc=blocked).allowed is False
+    assert gate.evaluate("KXLOWTCHI-26AUG09-B67.5", now_utc=opens).allowed is True
 
 
 def test_sunrise_window_bounds_honors_sunrise_offset_time(monkeypatch):
-    """Spread bands use the same offset anchor as the entry gate."""
+    """Spread bands use the same 08:00 ET anchor as the entry gate."""
     cfg = _make_config(
         sunrise_offset_time="08:00",
+        sunrise_offset_timezones={"America/New_York"},
         sunrise_strategy_time=1,
         sunrise_entry_window_minutes=120,
     )
     gate = SunriseEntryGate(cfg)
-    tz = ZoneInfo("America/Chicago")
+    tz = ZoneInfo("America/New_York")
     fixed_sunrise = datetime.datetime(2026, 8, 9, 6, 0, tzinfo=tz)
     monkeypatch.setattr(gate, "_get_sunrise_local", lambda *_a, **_k: (fixed_sunrise, "astral"))
 
     bounds = gate.sunrise_window_bounds(
-        "KXLOWTCHI-26AUG09-B67.5",
-        now_utc=datetime.datetime(2026, 8, 9, 12, 0, tzinfo=datetime.timezone.utc),
+        "KXLOWTBOS-26AUG09-B67.5",
+        now_utc=datetime.datetime(2026, 8, 9, 12, 30, tzinfo=datetime.timezone.utc),
     )
     assert bounds is not None
     gate_open, gate_close = bounds
     assert gate_open == datetime.datetime(2026, 8, 9, 8, 0, tzinfo=tz)
     assert gate_close == datetime.datetime(2026, 8, 9, 10, 0, tzinfo=tz)
-

@@ -295,31 +295,43 @@ class SunriseEntryGate:
         """
         return _bracket_line_int(bracket_temp_f + self._calibrated_offset_f(station_id))
 
+    # The SUNRISE_OFFSET_TIME target is always interpreted in the EST
+    # (America/New_York) reference frame: in-scope cities all open at the SAME
+    # absolute instant (e.g. 08:00 ET == 07:00 CT == 06:00 MST == 05:00 PT).
+    _OFFSET_REFERENCE_TZ = "America/New_York"
+
     def _effective_strategy_minutes(
         self,
         sunrise_local: datetime.datetime,
-        local_date: datetime.date,
-        tz: ZoneInfo,
+        now_utc: datetime.datetime,
+        city_tz_name: str,
     ) -> int:
         """Minutes after *sunrise_local* at which the gate opens.
 
         Default: ``SUNRISE_STRATEGY_TIME`` (unchanged behavior).
 
-        When ``SUNRISE_OFFSET_TIME`` is set (a city-local "HH:MM" target), the
-        gate instead opens at that LOCAL CLOCK TIME: this recomputes the gap
-        ``target - sunrise`` for the given city/date every time (so there is no
-        seasonal drift and no per-day config editing).  The gap is clamped at
-        0 so a pathological target earlier than sunrise can never open the gate
-        before sunrise.
+        When BOTH ``SUNRISE_OFFSET_TIME`` (an "HH:MM" clock time) and
+        ``SUNRISE_OFFSET_TIMEZONES`` (an allowlist of IANA zones) are set, AND
+        this city's zone is in the allowlist, the gate opens at the configured
+        time in the EST (America/New_York) reference frame -- i.e. the same
+        absolute instant for every in-scope city, matching the NWS ~08:00 ET
+        morning METAR release.  ``SUNRISE_STRATEGY_TIME`` is ignored for those
+        cities.
 
-        Malformed/unparseable ``SUNRISE_OFFSET_TIME`` falls back to the plain
-        ``SUNRISE_STRATEGY_TIME`` behavior (defensive; the parser already
-        validates, so this is belt-and-suspenders).
+        Out-of-scope cities, an empty allowlist, an empty/invalid offset, or an
+        unknown city zone all fall back to plain ``SUNRISE_STRATEGY_TIME``.
+
+        The gap is clamped at 0 so a pathological target earlier than sunrise
+        can never open the gate before sunrise.
         """
-        raw = getattr(self.config, "sunrise_offset_time", "") or ""
-        raw = raw.strip()
-        if not raw:
+        raw = (getattr(self.config, "sunrise_offset_time", "") or "").strip()
+        zones = getattr(self.config, "sunrise_offset_timezones", None) or set()
+        if not raw or not zones:
             return int(self.config.sunrise_strategy_time)
+        if city_tz_name not in zones:
+            # City's timezone is not in the allowlist -> keep legacy behavior.
+            return int(self.config.sunrise_strategy_time)
+
         parts = raw.split(":")
         try:
             target_hour = int(parts[0])
@@ -329,12 +341,14 @@ class SunriseEntryGate:
         if not (0 <= target_hour <= 23 and 0 <= target_minute <= 59):
             return int(self.config.sunrise_strategy_time)
 
-        target_local = datetime.datetime.combine(
-            local_date, datetime.time(target_hour, target_minute), tzinfo=tz
+        # Build the target in the EST reference frame, on the ET calendar date
+        # derived from "now" (robust when the city's local date differs).
+        ref_tz = ZoneInfo(self._OFFSET_REFERENCE_TZ)
+        ref_date = now_utc.astimezone(ref_tz).date()
+        target_ref = datetime.datetime.combine(
+            ref_date, datetime.time(target_hour, target_minute), tzinfo=ref_tz
         )
-        gap_minutes = int(
-            (target_local - sunrise_local).total_seconds() // 60
-        )
+        gap_minutes = int((target_ref - sunrise_local).total_seconds() // 60)
         if gap_minutes < 0:
             # target is before sunrise (should not happen in practice); never
             # open before sunrise.
@@ -343,10 +357,11 @@ class SunriseEntryGate:
             logger.info(
                 "sunrise.offset_time_applied",
                 sunrise_local=sunrise_local.isoformat(),
-                target_local=target_local.isoformat(),
+                target_reference_utc=target_ref.astimezone(datetime.timezone.utc).isoformat(),
+                reference_tz=self._OFFSET_REFERENCE_TZ,
+                city_tz=city_tz_name,
                 effective_strategy_minutes=gap_minutes,
                 configured_strategy_minutes=int(self.config.sunrise_strategy_time),
-                local_date=local_date.isoformat(),
             )
         return gap_minutes
 
@@ -418,11 +433,11 @@ class SunriseEntryGate:
 
         station_id, lat, lon = coords
         sunrise_local, _source = self._get_sunrise_local(series, tz, local_date, lat, lon)
-        # Gate anchor: sunrise + (SUNRISE_STRATEGY_TIME or the SUNRISE_OFFSET_TIME
-        # gap).  With SUNRISE_OFFSET_TIME set the effective minutes are recomputed
-        # per city/day so the window opens at the configured city-local time.
+        # Gate anchor: sunrise + effective strategy minutes.  When SUNRISE_OFFSET_TIME
+        # is set and this city's zone is allowlisted, the minutes are recomputed so
+        # the window opens at that time in the EST reference frame.
         gate_open = sunrise_local + datetime.timedelta(
-            minutes=self._effective_strategy_minutes(sunrise_local, local_date, tz)
+            minutes=self._effective_strategy_minutes(sunrise_local, now_utc, tz_name)
         )
         gate_close = gate_open + datetime.timedelta(
             minutes=int(self.config.sunrise_entry_window_minutes)
@@ -513,8 +528,10 @@ class SunriseEntryGate:
         ``gate_open_local = sunrise_local + effective strategy minutes`` and
         ``gate_close_local = gate_open_local + SUNRISE_ENTRY_WINDOW_MINUTES``
         minutes (both tz-aware, in the ticker's own city-local timezone).  The
-        effective strategy minutes are ``SUNRISE_STRATEGY_TIME`` normally, or the
-        recomputed ``SUNRISE_OFFSET_TIME - sunrise`` gap when that offset is set.
+        effective strategy minutes are ``SUNRISE_STRATEGY_TIME`` normally.  When
+        ``SUNRISE_OFFSET_TIME`` is set AND this city's zone is listed in
+        ``SUNRISE_OFFSET_TIMEZONES``, they are the gap from sunrise to that time
+        in the EST reference frame (same absolute instant for every in-scope city).
 
         Used by the time-of-day entry spread resolver so the spread bands share
         the exact same sunrise anchor as the entry gate itself.  Returns ``None``
@@ -540,7 +557,7 @@ class SunriseEntryGate:
         # Same anchor as evaluate(): honor SUNRISE_OFFSET_TIME so the spread
         # bands use the exact gate-open/gate-close the entry gate itself uses.
         gate_open = sunrise_local + datetime.timedelta(
-            minutes=self._effective_strategy_minutes(sunrise_local, local_date, tz)
+            minutes=self._effective_strategy_minutes(sunrise_local, now_utc, tz_name)
         )
         gate_close = gate_open + datetime.timedelta(
             minutes=int(self.config.sunrise_entry_window_minutes)

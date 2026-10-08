@@ -322,6 +322,57 @@ def _parse_sunrise_offset_time(raw: str | None) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+# SUNRISE_OFFSET_TIMEZONES tokens -> IANA zone.  The offset time is always
+# interpreted in the EST (America/New_York) reference frame; this allowlist
+# merely selects WHICH cities' sunrise gate uses it.
+SUNRISE_OFFSET_TIMEZONE_ALIASES: dict[str, str] = {
+    "EST": "America/New_York",
+    "CST": "America/Chicago",
+    "MST": "America/Denver",
+    "PHX": "America/Phoenix",
+    "PST": "America/Los_Angeles",
+}
+
+
+def _parse_sunrise_offset_timezones(raw) -> set[str]:
+    """Parse SUNRISE_OFFSET_TIMEZONES into a set of IANA zone names.
+
+    Accepts ``EST``/``CST``/``MST``/``PHX``/``PST`` (case-insensitive),
+    comma-separated.  Unknown tokens log a warning and are ignored
+    (fail-safe).  Empty/unset -> empty set (feature OFF).
+    """
+    if not raw:
+        return set()
+    if isinstance(raw, (set, list, tuple)):
+        tokens = [str(t) for t in raw]
+    else:
+        tokens = str(raw).split(",")
+    valid_zones = set(SUNRISE_OFFSET_TIMEZONE_ALIASES.values())
+    zones: set[str] = set()
+    for token in tokens:
+        stripped = str(token).strip()
+        if not stripped:
+            continue
+        # Accept the alias tokens (EST/CST/...) case-insensitively, and also
+        # accept already-resolved IANA zones so this parser is idempotent (the
+        # field validator re-runs on values from_env() already parsed).
+        zone = SUNRISE_OFFSET_TIMEZONE_ALIASES.get(stripped.upper())
+        if zone is None and stripped in valid_zones:
+            zone = stripped
+        if zone is None:
+            logger.warning(
+                "config.sunrise_offset_timezones_invalid",
+                token=token,
+                valid=sorted(SUNRISE_OFFSET_TIMEZONE_ALIASES.keys()),
+                message=(
+                    f"Unrecognized SUNRISE_OFFSET_TIMEZONES token '{token}'; ignoring it"
+                ),
+            )
+            continue
+        zones.add(zone)
+    return zones
+
+
 def _parse_sunrise_source(raw: str | None) -> str:
     if not raw or not raw.strip():
         return "astral"
@@ -575,6 +626,12 @@ class AppConfig(BaseSettings):
     # set; SUNRISE_ENTRY_WINDOW_MINUTES, the AM-low deadline, the temperature-rise
     # baseline, and the spread bands are unchanged.  Empty/malformed = feature off.
     sunrise_offset_time: str = ""
+    # SUNRISE_OFFSET_TIMEZONES (required for the offset to take effect): an
+    # allowlist of zones whose cities apply SUNRISE_OFFSET_TIME.  Tokens are
+    # EST/CST/MST/PHX/PST -> IANA zones; the offset time is always interpreted in
+    # the EST (America/New_York) frame, so in-scope cities all open at the same
+    # absolute instant (e.g. 08:00 ET = 07:00 CT).  Empty -> offset is inert.
+    sunrise_offset_timezones: Annotated[set[str], NoDecode] = set()
     sunrise_strategy_time: int = 30
     sunrise_entry_window_minutes: int = 120
     sunrise_require_temp_rising: bool = True
@@ -996,6 +1053,17 @@ class AppConfig(BaseSettings):
             return {str(t).strip().lower() for t in v if str(t).strip()}
         return {t.strip().lower() for t in str(v).split(',') if t.strip()}
 
+    @field_validator('sunrise_offset_timezones', mode='before')
+    @classmethod
+    def parse_sunrise_offset_timezones_field(cls, v):
+        """Normalize SUNRISE_OFFSET_TIMEZONES into {IANA zone, ...}.
+
+        Accepts the raw env string, or an already-parsed set/list.  Tokens are
+        case-insensitive (EST/CST/MST/PHX/PST); unknown tokens warn + are
+        ignored.  Empty -> empty set (feature OFF).
+        """
+        return _parse_sunrise_offset_timezones(v)
+
     @model_validator(mode='before')
     @classmethod
     def map_legacy_stop_loss_field(cls, values):
@@ -1071,14 +1139,26 @@ class AppConfig(BaseSettings):
         phoenix_entry_start_local = os.getenv("PHOENIX_ENTRY_START_LOCAL", "00:00")
         entry_gate_mode = _parse_entry_gate_mode(os.getenv("ENTRY_GATE_MODE"))
         sunrise_offset_time = _parse_sunrise_offset_time(os.getenv("SUNRISE_OFFSET_TIME"))
-        if sunrise_offset_time:
+        sunrise_offset_timezones_raw = os.getenv("SUNRISE_OFFSET_TIMEZONES", "")
+        sunrise_offset_timezones = _parse_sunrise_offset_timezones(sunrise_offset_timezones_raw)
+        if sunrise_offset_time and not sunrise_offset_timezones:
+            logger.warning(
+                "config.sunrise_offset_time_inert",
+                sunrise_offset_time=sunrise_offset_time,
+                message=(
+                    "SUNRISE_OFFSET_TIME is set but SUNRISE_OFFSET_TIMEZONES is empty; "
+                    "the offset is inert (no city in scope)"
+                ),
+            )
+        elif sunrise_offset_time and sunrise_offset_timezones:
             logger.info(
                 "config.sunrise_offset_time_configured",
                 sunrise_offset_time=sunrise_offset_time,
+                sunrise_offset_timezones=sorted(sunrise_offset_timezones),
                 message=(
-                    "SUNRISE_OFFSET_TIME set: KXLOW sunrise gate will open at this "
-                    "city-local clock time (recomputed from sunrise daily); "
-                    "SUNRISE_STRATEGY_TIME is ignored"
+                    "SUNRISE_OFFSET_TIME set for the listed timezones: those cities' "
+                    "sunrise gate opens at the 08:00 ET reference instant "
+                    "(SUNRISE_STRATEGY_TIME ignored for them)"
                 ),
             )
         sunrise_strategy_time = _parse_non_negative_int(
@@ -1455,6 +1535,7 @@ class AppConfig(BaseSettings):
             phoenix_entry_start_local=phoenix_entry_start_local,
             entry_gate_mode=entry_gate_mode,
             sunrise_offset_time=sunrise_offset_time,
+            sunrise_offset_timezones=sunrise_offset_timezones,
             sunrise_strategy_time=sunrise_strategy_time,
             sunrise_entry_window_minutes=sunrise_entry_window_minutes,
             sunrise_require_temp_rising=sunrise_require_temp_rising,

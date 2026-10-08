@@ -269,6 +269,8 @@ fall back on invalid input; required settings can prevent startup.
 | `GATE_HIGH_BEFORE` | Integer | `60` | HIGH NWS window minutes before forecast high. |
 | `GATE_HIGH_AFTER` | Integer | `30` | HIGH NWS window minutes after forecast high. |
 | `ENTRY_GATE_MODE` | Enum string | `NWS_WINDOW` | `NWS_WINDOW` or `SUNRISE` (LOW only); invalid mode warns/falls back. |
+| `SUNRISE_OFFSET_TIME` | `HH:MM` string or empty | Empty (off) | Optional clock time (e.g. `08:00`) interpreted in the **EST reference frame** (`America/New_York`). When set AND `SUNRISE_OFFSET_TIMEZONES` lists this city's zone, the SUNRISE gate opens at that instant (the same absolute instant for every in-scope city) instead of `sunrise + SUNRISE_STRATEGY_TIME`. `SUNRISE_STRATEGY_TIME` is ignored for in-scope cities; `SUNRISE_ENTRY_WINDOW_MINUTES`, AM-low deadline, temp-rise latch, and spread bands are unchanged. Empty/malformed = feature off. |
+| `SUNRISE_OFFSET_TIMEZONES` | CSV of `EST`,`CST`,`MST`,`PHX`,`PST` | Empty (off) | Allowlist of timezones whose cities apply `SUNRISE_OFFSET_TIME`. Case-insensitive; unknown tokens warn and are ignored. `EST`=`America/New_York`, `CST`=`America/Chicago`, `MST`=`America/Denver`, `PHX`=`America/Phoenix`, `PST`=`America/Los_Angeles`. Empty = offset inert. **Required for the offset to take effect.** |
 | `SUNRISE_STRATEGY_TIME` | Nonnegative integer | `30` | Minutes after sunrise to open LOW window. |
 | `SUNRISE_ENTRY_WINDOW_MINUTES` | Positive integer | `120` | Window length after open, minutes. |
 | `SUNRISE_REQUIRE_TEMP_RISING` | Boolean toggle | `true` | Deprecated; still parsed with warning. Replace with rise-required amount. |
@@ -294,6 +296,44 @@ NWS trading-day windows are `[01:00 local, next 01:00)` except Phoenix
 `[00:00 local, next 00:00)`. Forecast times are persisted in UTC; forecast-date
 keys identify the station-local trading-day start, not necessarily today's UTC
 calendar date. Host timezone is not the city timezone.
+
+#### KXLOW city → timezone mapping
+
+Source of truth: `core/local_time_gate.py` (`SERIES_TIMEZONE`).
+
+`SUNRISE_OFFSET_TIME` is interpreted in the **EST reference frame**
+(`America/New_York`), matching the NWS ~08:00 ET morning METAR release. The
+`SUNRISE_OFFSET_TIMEZONES` allowlist selects which cities apply it, so in-scope
+cities all open at the **same absolute instant** (e.g. 08:00 ET = 07:00 CT =
+06:00 MST, etc.). A city whose zone is not listed keeps `sunrise +
+SUNRISE_STRATEGY_TIME`.
+
+The offset applies to the cities in the listed zone only. Updating campaigns is
+a one-line change, e.g. `SUNRISE_OFFSET_TIMEZONES=EST` today, then `=EST,CST`
+after DST, etc.
+
+| Timezone (IANA) | Cities (KXLOW series) |
+| --- | --- |
+| `America/New_York` (ET) | Atlanta (`KXLOWTATL`), Boston (`KXLOWTBOS`), Miami (`KXLOWTMIA`), New York City (`KXLOWTNYC`), Newark (`KXLOWTEWR`), Trenton (`KXLOWTTTN`), Philadelphia (`KXLOWTPHIL`), Washington DC (`KXLOWTDC`), Louisville (`KXLOWTSDF`) |
+| `America/Chicago` (CT) | Austin (`KXLOWTAUS`), Chicago (`KXLOWTCHI`), Dallas (`KXLOWTDAL`), Houston (`KXLOWTHOU`), Minneapolis (`KXLOWTMIN`), New Orleans (`KXLOWTNOLA`), Oklahoma City (`KXLOWTOKC`), San Antonio (`KXLOWTSATX`) |
+| `America/Denver` (MT, DST) | Denver (`KXLOWTDEN`) |
+| `America/Phoenix` (MST, no DST) | Phoenix (`KXLOWTPHX`) |
+| `America/Los_Angeles` (PT) | Las Vegas (`KXLOWTLV`), Los Angeles (`KXLOWTLAX`), San Francisco (`KXLOWTSFO`), Seattle (`KXLOWTSEA`), San Diego (`KXLOWTSAN`) |
+
+With `SUNRISE_OFFSET_TIME=08:00` (EST reference), the resulting local open
+time and absolute instant per zone:
+
+| Allowlist token | Zone | Local open (when in scope) | Absolute instant |
+| --- | --- | --- | --- |
+| `EST` | America/New_York | 08:00 ET | 08:00 ET (13:00 UTC std / 12:00 UTC DST) |
+| `CST` | America/Chicago | 07:00 CT | 08:00 ET (14:00 UTC std / 13:00 UTC DST) |
+| `MST` | America/Denver | 06:00 MT | 08:00 ET (15:00 UTC std / 14:00 UTC DST) |
+| `PHX` | America/Phoenix | 06:00 MST | 08:00 ET (15:00 UTC always; no DST) |
+| `PST` | America/Los_Angeles | 05:00 PT | 08:00 ET (16:00 UTC std / 15:00 UTC DST) |
+
+Cities not in the allowlist are unaffected (they remain `sunrise +
+SUNRISE_STRATEGY_TIME`).
+
 
 ### pricing & sizing
 
