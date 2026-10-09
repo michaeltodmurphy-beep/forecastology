@@ -83,6 +83,32 @@ def maybe_acquire_instance_lock(
 
 
 
+def _stdout_targets_same_file(log_path: Path) -> bool:
+    """True when this process's stdout IS the configured log file.
+
+    When an operator redirects stdout into the same file the rotating file
+    handler writes to (``python run.py >> logs/run.log 2>&1``, or a service
+    unit whose StandardOutput points at the log), attaching BOTH the console
+    and file sinks renders every event into that one file twice.
+
+    Best-effort and conservative: on POSIX we compare stdout's device+inode
+    (``os.fstat(1)``) against the log file's.  A non-redirected TTY is a char
+    device and never matches, so there is no false positive.  Windows and any
+    stat failure return False to preserve the historical two-sink behavior.
+    """
+    try:
+        if not log_path.exists():
+            return False
+        stdout_stat = os.fstat(1)
+        file_stat = os.stat(log_path)
+        return (stdout_stat.st_dev, stdout_stat.st_ino) == (
+            file_stat.st_dev,
+            file_stat.st_ino,
+        )
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 def configure_logging(
     *,
     log_file: str,
@@ -110,6 +136,14 @@ def configure_logging(
     log_path = Path(log_file)
     if log_path.parent and str(log_path.parent) != ".":
         log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Auto-suppress the console sink when stdout IS the log file: keeping both
+    # would render every event twice into that single file.  The file sink
+    # already captures everything, so dropping the console sink loses nothing.
+    console_suppressed_for_merge = False
+    if log_to_console and log_to_file and _stdout_targets_same_file(log_path):
+        console_suppressed_for_merge = True
+        log_to_console = False
 
     pre_chain = [
         structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
@@ -162,6 +196,19 @@ def configure_logging(
         root_logger.addHandler(rotating_file_handler)
 
     root_logger.setLevel(logging.INFO)
+
+    if console_suppressed_for_merge:
+        logging.getLogger(__name__).info(
+            "logging.console_sink_suppressed",
+            extra={
+                "event": "logging.console_sink_suppressed",
+                "reason": "stdout_is_log_file",
+                "detail": (
+                    "stdout resolves to the configured log file; console sink "
+                    "skipped to avoid duplicate lines (LOG_TO_CONSOLE is still on)"
+                ),
+            },
+        )
 
     # httpx logs every outbound HTTP request at INFO, which floods the log.
     logging.getLogger("httpx").setLevel(logging.WARNING)

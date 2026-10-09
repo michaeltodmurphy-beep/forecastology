@@ -2123,6 +2123,24 @@ class TemperatureStrategy:
         if yes_bid is not None and yes_ask is not None:
             self.cache.update_quote(market_ticker, yes_bid, yes_ask)
 
+        # F1c: one-sided ticker quote -> store it with the present side used
+        # as the synthetic opposite side.  A genuinely one-sided book (only a
+        # bid, or only an ask) near settlement previously stored NOTHING, so
+        # the held-position loop saw no fresh quote and counted the position
+        # 'blind' (phase.c.unprotected_escalation, 'stop-loss CANNOT FIRE').
+        # Using the present side for the missing side is safe for a
+        # stop-loss: for a bid-only book the sellable price IS the bid, and
+        # for an ask-only book we key the stop off that ask.  We deliberately
+        # do NOT touch last_price here, so stale last_price-without-a-quote
+        # still counts as blind (the blind-path tests depend on that).
+        elif yes_bid is not None or yes_ask is not None:
+            _synthetic = yes_bid if yes_bid is not None else yes_ask
+            self.cache.update_quote(
+                market_ticker,
+                yes_bid if yes_bid is not None else _synthetic,
+                yes_ask if yes_ask is not None else _synthetic,
+            )
+
         # RISK FIRST: feed the stop-loss watcher before any discovery/bookkeeping
         if self.stop_loss_watcher is not None and (yes_ask is not None or yes_bid is not None):
             await self.stop_loss_watcher.on_market_update(
@@ -6083,6 +6101,38 @@ class TemperatureStrategy:
             logger.info("phase.c.stop_loss_position_missing", ticker=ticker)
             return True
 
+        # Bottomed-out latch short-circuit (see _dispatch_stop_loss_exit).
+        # Once a bracket is latched UNFILLABLE (no bid to sell into), every
+        # fresh WS trigger would otherwise re-run ownership classification and
+        # re-log the CRITICAL phase.c.stop_loss_triggered at ~4 Hz even though
+        # the dispatch itself is suppressed.  Short-circuit here, BEFORE the
+        # noisy work, and rate-limit the (info) suppression log to at most one
+        # per 60s per ticker -- the live incident produced hundreds per second.
+        # A live bid (revived) clears the latch and falls through to exit.
+        if getattr(bracket, "_sl_unfillable", False):
+            if not self._sl_unfillable_revived(ticker):
+                now_mono = asyncio.get_event_loop().time()
+                last_log = getattr(bracket, "_last_unfillable_suppress_log", 0)
+                if now_mono - last_log >= 60:
+                    bracket._last_unfillable_suppress_log = now_mono
+                    logger.info(
+                        "sl.exit_unfillable_suppressed",
+                        ticker=ticker,
+                        action_key=f"{ticker}:STOP_LOSS",
+                        reason="no_bid_latched",
+                        trigger_source="websocket_watcher",
+                        note="latched; suppressing repeated trigger logs until bid returns",
+                    )
+                return False
+            bracket._sl_unfillable = False
+            logger.warning(
+                "sl.exit_unfillable_revived",
+                ticker=ticker,
+                action_key=f"{ticker}:STOP_LOSS",
+                reason="live_bid_returned",
+                trigger_source="websocket_watcher",
+            )
+
         bracket.position_quantity = quantity
         app_known = self._app_owned_qty.get(ticker, quantity)
         self._set_ownership(
@@ -6092,14 +6142,21 @@ class TemperatureStrategy:
             source="watcher_trigger",
             action="position_reconciled",
         )
-        logger.warning(
-            "phase.c.stop_loss_triggered",
-            ticker=ticker,
-            side=side,
-            last_price=trigger_price,
-            stop_loss=self.config.stop_loss_price,
-            source="websocket_watcher",
-        )
+        # Rate-limit the trigger warning per ticker (first emission is
+        # unconditional so tests still observe it): a re-firing stop is only
+        # useful to see at most every few seconds, not every 250ms WS tick.
+        now_trig = asyncio.get_event_loop().time()
+        last_trigger_log = getattr(bracket, "_last_sl_trigger_log", 0)
+        if last_trigger_log == 0 or now_trig - last_trigger_log >= 5:
+            bracket._last_sl_trigger_log = now_trig
+            logger.warning(
+                "phase.c.stop_loss_triggered",
+                ticker=ticker,
+                side=side,
+                last_price=trigger_price,
+                stop_loss=self.config.stop_loss_price,
+                source="websocket_watcher",
+            )
         if not getattr(bracket, "_stop_loss_counted", False):
             await self._increment_stop_loss_count_for_market(bracket.market_ticker)
             bracket._stop_loss_counted = True

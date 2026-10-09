@@ -6030,6 +6030,86 @@ async def test_dispatch_rearms_when_bid_returns_after_unfillable(monkeypatch):
     assert any(event == "sl.exit_unfillable_revived" for event, _ in logged)
     assert created, "a fresh exit task must be dispatched once the book revives"
 
+
+@pytest.mark.asyncio
+async def test_watcher_latched_unfillable_short_circuits_before_noisy_logs(monkeypatch):
+    """Regression for the live stop-loss thrash incident.
+
+    Once a bracket is latched UNFILLABLE (no bid), _execute_stop_loss_from_watcher
+    must short-circuit BEFORE emitting phase.c.stop_loss_triggered / ownership
+    classification, and must not re-run the exit path on every WS tick.  Repeated
+    ticks are rate-limited to a single suppression log per 60s.
+    """
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTAUS-26OCT08-B61.5"
+    strategy = _make_panic_strategy(monkeypatch, stop_loss_price=62)
+    strategy._reconciliation_complete = True
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTAUS",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=6, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 6
+    bracket._sl_unfillable = True
+    # Book still dead: no bid (matches the incident's no_bid_latched state).
+    strategy.cache.update_quote(ticker, 0, 1)
+
+    dispatched = []
+
+    async def fake_dispatch(bracket_arg, *, trigger_price, trigger_source):
+        dispatched.append((trigger_price, trigger_source))
+
+    strategy._dispatch_stop_loss_exit = fake_dispatch
+
+    # Simulate many WS ticks while latched.
+    for _ in range(10):
+        result = await strategy._execute_stop_loss_from_watcher(ticker, "yes", 6, 0)
+        assert result is False
+
+    # Exit path never re-entered while latched with no bid.
+    assert dispatched == [], "exit must not be re-dispatched while latched with no bid"
+    # The noisy CRITICAL/WARNING trigger log must NOT appear for latched ticks.
+    assert not any(ev == "phase.c.stop_loss_triggered" for ev, _ in logged), (
+        "phase.c.stop_loss_triggered must be suppressed while latched"
+    )
+    # Suppression IS logged, but rate-limited (<=1 across 10 rapid ticks).
+    suppressed = [ev for ev, _ in logged if ev == "sl.exit_unfillable_suppressed"]
+    assert 1 <= len(suppressed) <= 2, f"expected rate-limited suppression, got {len(suppressed)}"
+
+
+@pytest.mark.asyncio
+async def test_watcher_latched_unfillable_resumes_when_bid_returns(monkeypatch):
+    """A latched bracket resumes the exit once a live bid reappears."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTAUS-26OCT08-B62.5"
+    strategy = _make_panic_strategy(monkeypatch, stop_loss_price=62)
+    strategy._reconciliation_complete = True
+    bracket = MarketBracket(
+        market_ticker=ticker, event_ticker="EVT1", series_ticker="KXLOWTAUS",
+        bracket_label="held", phase=Phase.HOLDING, position_quantity=6, avg_entry=80,
+    )
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    strategy._app_owned_qty[ticker] = 6
+    bracket._sl_unfillable = True
+    # A buyer returns: live bid above the no-bid ceiling.
+    strategy.cache.update_quote(ticker, 40, 45)
+
+    dispatched = []
+
+    async def fake_dispatch(bracket_arg, *, trigger_price, trigger_source):
+        dispatched.append((trigger_price, trigger_source))
+
+    strategy._dispatch_stop_loss_exit = fake_dispatch
+
+    result = await strategy._execute_stop_loss_from_watcher(ticker, "yes", 6, 40)
+    assert bracket._sl_unfillable is False
+    assert any(ev == "sl.exit_unfillable_revived" for ev, _ in logged)
+    assert dispatched, "exit must be dispatched once the book revives"
+    assert result is False
+
+
 @pytest.mark.asyncio
 async def test_panic_flatten_phase_c_no_trigger_when_ask_above_stop(monkeypatch):
     """Phase C with PANIC_FLATTEN: when yes_ask > stop_loss_price, no trigger fires
@@ -7436,6 +7516,73 @@ async def test_ticker_then_orderbook_trigger_fires_only_once(monkeypatch):
     assert len(exit_calls) == 1, (
         f"Expected exactly 1 exit call, got {len(exit_calls)}. "
         "Double sell must be prevented by exit_in_progress guard."
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_sided_ticker_quote_populates_quote_cache(monkeypatch):
+    """F1c: a one-sided ticker quote (bid only or ask only) must populate the
+    quote cache using the present side synthetically, so a held position does
+    not count as 'blind'.
+
+    Regression for the live incident where thin/settling brackets delivered
+    only one side of the book and Phase C spammed phase.c.unprotected_escalation.
+    """
+    ticker = "KXLOWTAUS-26OCT08-B61.5"
+    strategy = make_strategy(monkeypatch)
+
+    # Bid-only tick: no ask present.  Quote must be cached as (bid, bid).
+    await strategy._handle_ticker({"msg": {
+        "market_ticker": ticker,
+        "yes_bid_dollars": "0.42",
+    }})
+    assert strategy.cache.get_quote(ticker) == (42, 42), (
+        "bid-only tick must cache a synthetic two-sided quote"
+    )
+
+    # Ask-only tick for a different ticker: quote cached as (ask, ask).
+    ticker2 = "KXLOWTBOS-26OCT08-B50.5"
+    await strategy._handle_ticker({"msg": {
+        "market_ticker": ticker2,
+        "yes_ask_dollars": "0.37",
+    }})
+    assert strategy.cache.get_quote(ticker2) == (37, 37), (
+        "ask-only tick must cache a synthetic two-sided quote"
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_sided_quote_prevents_false_blind_escalation(monkeypatch):
+    """A held position receiving only one-sided ticks must NOT escalate as
+    blind once the one-sided quote has populated the quote cache."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTAUS-26OCT08-B61.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 6, "average_fill_cost_cents": 80}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        max_no_price_cycles=1,
+        sl_unprotected_max_blind_cycles=3,
+    )
+    bracket = _make_held_bracket(ticker, "KXLOWTAUS")
+    bracket.position_quantity = 6
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+
+    # A one-sided (bid-only) tick populates the quote cache.
+    await strategy._handle_ticker({"msg": {
+        "market_ticker": ticker,
+        "yes_bid_dollars": "0.80",
+    }})
+
+    # REST returns nothing (simulating the failing fallback in the incident).
+    strategy._fetch_market_data_via_rest = AsyncMock(return_value=None)
+
+    for _ in range(5):
+        await strategy._evaluate_held_positions()
+
+    assert not any(ev == "phase.c.unprotected_escalation" for ev, _ in logged), (
+        "one-sided quote must prevent false blind escalation"
     )
 
 
