@@ -253,3 +253,118 @@ async def test_no_double_dispatch_after_inline_and_subsequent_market_updates():
     await asyncio.sleep(0)  # let cleanup callbacks fire
 
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# F4: no-bid latch must STOP the watcher respawn loop (live thrash regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_suppressed_result_stops_respawn_loop():
+    """A handler returning 'suppressed' must park the position in SUPPRESSED and
+    MUST NOT be re-spawned by the poll backstop (this was the live ~4 Hz
+    sl.exit_order_failed thrash for a stranded no-bid ticker)."""
+    calls = []
+
+    async def exit_handler(ticker, side, quantity, best_ask):
+        calls.append((ticker, side, quantity, best_ask))
+        # Bottomed-out / no-bid latch: no order attempted.
+        return "suppressed"
+
+    watcher = StopLossWatcher(exit_handler)
+    await watcher.register_position("TICKER", side="yes", quantity=6, sl_price=62)
+
+    assert await watcher.on_market_update("TICKER", 1) is True  # inline dispatch
+    await watcher._worker_tasks["TICKER"]
+    await asyncio.sleep(0)
+
+    # One attempt, then parked SUPPRESSED.
+    assert len(calls) == 1
+    assert watcher._positions["TICKER"].state == "SUPPRESSED"
+    assert watcher._positions["TICKER"].exit_in_progress is False
+
+    # The poll backstop must NOT re-spawn the worker for a SUPPRESSED position,
+    # even across many cycles.
+    for _ in range(20):
+        await watcher._run_cycle_once()
+        await asyncio.sleep(0)
+
+    assert len(calls) == 1, (
+        f"suppressed position must not be respawned; got {len(calls)} attempts"
+    )
+    assert watcher._positions["TICKER"].state == "SUPPRESSED"
+
+
+@pytest.mark.asyncio
+async def test_suppressed_market_updates_do_not_respawn():
+    """Repeated WS ticks below sl_price while SUPPRESSED must not spawn workers."""
+    calls = []
+
+    async def exit_handler(ticker, side, quantity, best_ask):
+        calls.append((ticker, side, quantity, best_ask))
+        return "suppressed"
+
+    watcher = StopLossWatcher(exit_handler)
+    await watcher.register_position("TICKER", side="yes", quantity=6, sl_price=62)
+
+    assert await watcher.on_market_update("TICKER", 1) is True
+    await watcher._worker_tasks["TICKER"]
+    await asyncio.sleep(0)
+
+    for _ in range(10):
+        fired = await watcher.on_market_update("TICKER", 1)
+        assert fired is False, "suppressed position must not re-trigger"
+        await asyncio.sleep(0)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_rearm_resumes_from_suppressed_when_bid_returns():
+    """When a live bid returns, rearm_position must move SUPPRESSED -> TRIGGERED
+    so the poll backstop resumes the exit."""
+    calls = []
+
+    async def exit_handler(ticker, side, quantity, best_ask):
+        calls.append((ticker, side, quantity, best_ask))
+        # First attempt is suppressed; the rearmed attempt succeeds.
+        return "suppressed" if len(calls) == 1 else True
+
+    watcher = StopLossWatcher(exit_handler)
+    await watcher.register_position("TICKER", side="yes", quantity=6, sl_price=62)
+
+    assert await watcher.on_market_update("TICKER", 1) is True
+    await watcher._worker_tasks["TICKER"]
+    await asyncio.sleep(0)
+    assert watcher._positions["TICKER"].state == "SUPPRESSED"
+
+    # Bid returns -> state machine re-arms.
+    assert await watcher.rearm_position("TICKER", trigger_price=40) is True
+    assert watcher._positions["TICKER"].state == "TRIGGERED"
+
+    await watcher._run_cycle_once()
+    await watcher._worker_tasks["TICKER"]
+    await asyncio.sleep(0)
+
+    assert len(calls) == 2
+    assert "TICKER" not in watcher._positions  # terminal after success
+
+
+@pytest.mark.asyncio
+async def test_suppressed_does_not_log_exit_order_failed(capsys):
+    """The suppressed path must NOT emit an sl.exit_order_failed line."""
+    calls = []
+
+    async def exit_handler(ticker, side, quantity, best_ask):
+        calls.append((ticker, side, quantity, best_ask))
+        return "suppressed"
+
+    watcher = StopLossWatcher(exit_handler)
+    await watcher.register_position("TICKER", side="yes", quantity=6, sl_price=62)
+    assert await watcher.on_market_update("TICKER", 1) is True
+    await watcher._worker_tasks["TICKER"]
+    await asyncio.sleep(0)
+
+    assert watcher._positions["TICKER"].state == "SUPPRESSED"
+    assert len(calls) == 1

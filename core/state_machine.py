@@ -6123,7 +6123,11 @@ class TemperatureStrategy:
                         trigger_source="websocket_watcher",
                         note="latched; suppressing repeated trigger logs until bid returns",
                     )
-                return False
+                # Signal the watcher to stop respawning its worker every 250ms
+                # (that respawn loop, not this method, was the live thrash).
+                # 'suppressed' is NOT a failure, so the watcher emits no
+                # sl.exit_order_failed line.
+                return "suppressed"
             bracket._sl_unfillable = False
             logger.warning(
                 "sl.exit_unfillable_revived",
@@ -6132,6 +6136,14 @@ class TemperatureStrategy:
                 reason="live_bid_returned",
                 trigger_source="websocket_watcher",
             )
+            # The watcher parked this ticker in SUPPRESSED; move it back to an
+            # active (TRIGGERED) state so the normal exit path can run now that
+            # a buyer reappeared.
+            if self.stop_loss_watcher is not None:
+                await self.stop_loss_watcher.rearm_position(
+                    ticker,
+                    trigger_price=trigger_price,
+                )
 
         bracket.position_quantity = quantity
         app_known = self._app_owned_qty.get(ticker, quantity)

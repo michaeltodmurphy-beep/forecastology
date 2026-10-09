@@ -9,8 +9,10 @@ from execution.errors import PermanentExecutionError, TransientExecutionError
 logger = structlog.get_logger(__name__)
 
 PositionSide = Literal["yes", "no"]
-StopLossWatcherState = Literal["IDLE", "TRIGGERED", "SUBMITTING", "RETRYING", "TERMINAL"]
-ExitHandlerResult = Literal["terminal", "in_flight", "retry"]
+StopLossWatcherState = Literal[
+    "IDLE", "TRIGGERED", "SUBMITTING", "RETRYING", "SUPPRESSED", "TERMINAL"
+]
+ExitHandlerResult = Literal["terminal", "in_flight", "retry", "suppressed"]
 ExitHandler = Callable[[str, PositionSide, int, int], Awaitable[bool | ExitHandlerResult]]
 
 
@@ -47,6 +49,14 @@ class StopLossWatcher:
             return "terminal"
         if result == "in_flight":
             return "in_flight"
+        # No-bid latch: the state machine declared the position bottomed-out
+        # (no buyer to sell into).  The watcher must STOP re-arming its worker
+        # every poll cycle -- that was the live 'sl.exit_order_failed' thrash
+        # (hundreds of lines/sec for a single stranded ticker).  This is NOT a
+        # failure, so no failure log is emitted.  The position stays suppressed
+        # until rearm_position() is called (a live bid returned).
+        if result == "suppressed":
+            return "suppressed"
         return "retry"
 
     async def register_position(
@@ -94,6 +104,7 @@ class StopLossWatcher:
                 return False
             if position.exit_in_progress:
                 return False
+            # Resume from either a terminal or a suppressed (no-bid latch) state.
             position.state = "TRIGGERED"
             if trigger_price is not None:
                 position.trigger_price = trigger_price
@@ -163,7 +174,7 @@ class StopLossWatcher:
                     position.state = "IDLE"
                     position.trigger_price = None
                 return False
-            if position.state in {"TRIGGERED", "SUBMITTING", "RETRYING"} or position.exit_in_progress:
+            if position.state in {"TRIGGERED", "SUBMITTING", "RETRYING", "SUPPRESSED"} or position.exit_in_progress:
                 suppressed_state = position.state
             else:
                 # Fresh trigger: transition state and inline-dispatch the worker.
@@ -181,14 +192,17 @@ class StopLossWatcher:
                     )
 
         if suppressed_state is not None:
-            logger.info(
-                "sl.trigger_suppressed_in_flight",
-                ticker=ticker,
-                action_key=self._action_key(ticker),
-                best_ask=best_ask,
-                best_bid=best_bid,
-                state=suppressed_state,
-            )
+            # SUPPRESSED is a steady no-bid latch state; suppress its log too so
+            # a stranded ticker does not spam one line per WS tick.
+            if suppressed_state != "SUPPRESSED":
+                logger.info(
+                    "sl.trigger_suppressed_in_flight",
+                    ticker=ticker,
+                    action_key=self._action_key(ticker),
+                    best_ask=best_ask,
+                    best_bid=best_bid,
+                    state=suppressed_state,
+                )
             return False
 
         # Spawn the worker outside the lock — mirrors _run_cycle_once discipline.
@@ -258,6 +272,23 @@ class StopLossWatcher:
             await self._set_position_state(ticker, state="TERMINAL", exit_in_progress=False)
             logger.info("sl.exit_order_succeeded", ticker=ticker, quantity=quantity)
             await self.unregister_position(ticker)
+            return
+
+        if normalized == "suppressed":
+            # Bottomed-out / no-bid latch: stop retrying, but keep the position
+            # registered so a later bid revival can re-arm it (rearm_position
+            # only resumes from TERMINAL, so use SUPPRESSED and let rearm handle
+            # SUPPRESSED too).  Crucially, do NOT log sl.exit_order_failed --
+            # there was no order attempt, and logging it here was what flooded
+            # the live log.
+            await self._set_position_state(ticker, state="SUPPRESSED", exit_in_progress=False)
+            logger.info(
+                "sl.exit_suppressed_no_bid",
+                ticker=ticker,
+                quantity=quantity,
+                state="SUPPRESSED",
+                reason="no_bid_latched",
+            )
             return
 
         next_state: StopLossWatcherState = "SUBMITTING" if normalized == "in_flight" else "RETRYING"

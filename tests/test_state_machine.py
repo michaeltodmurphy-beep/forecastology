@@ -6065,7 +6065,10 @@ async def test_watcher_latched_unfillable_short_circuits_before_noisy_logs(monke
     # Simulate many WS ticks while latched.
     for _ in range(10):
         result = await strategy._execute_stop_loss_from_watcher(ticker, "yes", 6, 0)
-        assert result is False
+        assert result == "suppressed", (
+            "latched no-bid path must return 'suppressed' so the watcher stops "
+            "respawning its worker (returning False caused the live thrash)"
+        )
 
     # Exit path never re-entered while latched with no bid.
     assert dispatched == [], "exit must not be re-dispatched while latched with no bid"
