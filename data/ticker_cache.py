@@ -149,8 +149,19 @@ class TickerCache:
         if not asks:
             return None
         top_ask = asks[0]
-        if max_gap_cents <= 0 or len(asks) < 2:
+        if max_gap_cents <= 0:
+            # Guard disabled by config: legacy behaviour, return the raw top ask.
             return top_ask
+        if len(asks) < 2:
+            # ONE-SIDED BOOK: there is no second level to corroborate the top
+            # ask.  A lone thin NO-bid far above the rest of the book (or a book
+            # that only ever received a single gapped NO-bid level) would yield
+            # an artificially low YES ask that CANNOT be validated here.  We
+            # must NOT trust it -- return None so callers fall back to the
+            # authoritative ticker-channel ask (see get_effective_ask), which is
+            # the exchange's real best ask.  This is the guard fix that prevents
+            # a one-sided NO-bid spike from tripping a false stop-loss.
+            return None
         next_ask = asks[1]
         if (next_ask - top_ask) > max_gap_cents:
             # Outlier/spoof: the top ask is not corroborated by the book.
@@ -217,6 +228,44 @@ class TickerCache:
             if yes_ask is not None and yes_ask > 0:
                 return yes_ask
         return None
+
+    def get_safe_ask(self, ticker: str, max_gap_cents: int = 0) -> Optional[int]:
+        """Return the YES ask to use for STOP-LOSS evaluation, cross-checked.
+
+        The stop-loss trigger is ``ask <= STOP_LOSS_PRICE_ASK``.  The two ask
+        sources are:
+          * the order-book ask (`best_ask` / `get_confirmed_ask`), derived as
+            ``100 - best_NO_bid`` -- can be a lone/one-sided NO-bid artefact;
+          * the ticker-channel ask (`quotes`), the exchange's real best ask.
+
+        A book-derived ask that sits materially BELOW the ticker-channel ask
+        (by more than ``max_gap_cents``) is a shake-out artefact: it must not be
+        used to trip a stop-loss.  In that case we return the ticker ask (the
+        corroborated value).  Conversely a book ask at/above the ticker ask, or
+        one that agrees with it, is honoured.  When only one source is present
+        we use whichever we have.
+
+        ``max_gap_cents <= 0`` disables the cross-check (book ask wins when
+        present).  This is the second half of the guard fix: even a two-sided
+        book that is stale relative to the ticker channel cannot drag the ask
+        down far enough to fire a false stop.
+        """
+        book_ask = self.get_confirmed_ask(ticker, max_gap_cents)
+        quote = self.quotes.get(ticker)
+        ticker_ask = quote[1] if quote is not None else None
+        if ticker_ask is not None and ticker_ask <= 0:
+            ticker_ask = None
+
+        if book_ask is None:
+            return ticker_ask
+        if ticker_ask is None:
+            return book_ask
+        if max_gap_cents <= 0:
+            return book_ask
+        if (ticker_ask - book_ask) > max_gap_cents:
+            # Book ask is a shake-out artefact materially below the real ask.
+            return ticker_ask
+        return book_ask
 
     def get_effective_bid(self, ticker: str, max_gap_cents: int = 0) -> Optional[int]:
         """Single source of truth for the YES bid used in TRADE DECISIONS.

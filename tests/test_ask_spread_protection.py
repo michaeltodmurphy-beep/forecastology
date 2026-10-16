@@ -64,11 +64,17 @@ def test_confirmed_ask_disabled_when_threshold_zero():
     assert cache.get_confirmed_ask(ticker, 0) == 65
 
 
-def test_confirmed_ask_single_level_falls_back_to_top():
-    """Only one NO-bid level -> no corroboration; return the lone top ask."""
+def test_confirmed_ask_single_level_is_untrusted():
+    """Only one NO-bid level -> no corroboration; the lone top ask is untrusted.
+
+    Regression guard for the Dallas false-stop: a one-sided / gapped NO-bid
+    yields an artificially low YES ask that cannot be corroborated by a second
+    level, so we must NOT return it.  Returning None makes SL callers fall back
+    to the authoritative ticker-channel ask (see get_safe_ask / get_effective_ask).
+    """
     ticker = "T"
     cache = _prime_cache(ticker, [(0.35, 5)])
-    assert cache.get_confirmed_ask(ticker, 5) == 65
+    assert cache.get_confirmed_ask(ticker, 5) is None
 
 
 def test_confirmed_ask_returns_none_without_book():
@@ -77,15 +83,19 @@ def test_confirmed_ask_returns_none_without_book():
 
 
 def test_confirmed_ask_ignores_zero_quantity_levels():
-    """Zero-quantity NO bids must not count as corroboration."""
+    """Zero-quantity NO bids must not count as corroboration.
+
+    After the 35c level is drained, only the 7c NO bid remains -> the book is
+    one-sided -> the lone top ask (93) is untrusted -> None.
+    """
     ticker = "T"
     cache = _prime_cache(ticker, [(0.35, 1), (0.07, 10)])
     # Drop the 35c level's quantity to 0 via a delta.
     cache.update_orderbook_delta(
         ticker, {"price_dollars": "0.35", "delta_fp": "-1", "side": "no"}
     )
-    # Only the 7c NO bid remains -> YES ask 93 -> single level -> 93.
-    assert cache.get_confirmed_ask(ticker, 5) == 93
+    # Only the 7c NO bid remains -> single level -> no corroboration -> None.
+    assert cache.get_confirmed_ask(ticker, 5) is None
 
 
 # ---------------------------------------------------------------------------
@@ -288,4 +298,75 @@ async def test_phase_c_loop_ignores_spoofed_quote_ask(monkeypatch):
     assert raw_quote is not None and raw_quote[1] == 52
     assert raw_quote[1] <= 62, "raw quote ask would have fired the SL (the bug)"
     assert strategy.cache.get_effective_ask(ticker, 5) == 92 > 62
+
+
+# ---------------------------------------------------------------------------
+# get_safe_ask: the SL cross-check that defeats the one-sided gapped book
+# ---------------------------------------------------------------------------
+
+def test_safe_ask_uses_ticker_ask_when_book_is_one_sided():
+    """One-sided book: a lone gapped NO-bid (derived 61c ask) must lose to the
+    authoritative ticker ask (85c).  Mirrors the Dallas false-stop condition."""
+    ticker = "T"
+    # Single NO-bid at 39c -> derived YES ask 61c; no second level to corroborate.
+    cache = _prime_cache(ticker, [(0.39, 1)])
+    # Real exchange ask from the ticker channel is 85c.
+    cache.update_quote(ticker, 84, 85)
+    assert cache.get_confirmed_ask(ticker, 5) is None  # one-sided -> untrusted
+    assert cache.get_safe_ask(ticker, 5) == 85
+
+
+def test_safe_ask_falls_back_to_book_when_no_quote():
+    """No ticker quote available -> use the (corroborated) book ask."""
+    ticker = "T"
+    cache = _prime_cache(ticker, [(0.35, 5), (0.32, 5)])  # asks 65c / 68c
+    assert cache.get_safe_ask(ticker, 5) == 65
+
+
+def test_safe_ask_rejects_book_ask_far_below_ticker():
+    """Even a two-sided but stale book can't drag the ask below the ticker."""
+    ticker = "T"
+    # Corroborated book asks 61c / 63c (gap 2, so the book guard passes 61).
+    cache = _prime_cache(ticker, [(0.39, 5), (0.37, 5)])
+    # Ticker channel says the real ask is 85c.
+    cache.update_quote(ticker, 84, 85)
+    assert cache.get_confirmed_ask(ticker, 5) == 61
+    # The cross-check rejects 61 (far below 85) and returns the ticker ask.
+    assert cache.get_safe_ask(ticker, 5) == 85
+
+
+def test_safe_ask_honours_agreeing_sources():
+    """When book and ticker agree, the book ask is used."""
+    ticker = "T"
+    cache = _prime_cache(ticker, [(0.15, 5), (0.14, 5)])  # asks 85c / 86c
+    cache.update_quote(ticker, 84, 85)
+    assert cache.get_safe_ask(ticker, 5) == 85
+
+
+@pytest.mark.asyncio
+async def test_delta_one_sided_book_does_not_trip_false_stop(monkeypatch):
+    """End-to-end: a lone gapped NO-bid delta must NOT forward a low ask to the SL.
+
+    Reproduces the Dallas incident: book shows a single NO-bid that derives a
+    61c ask, but the ticker channel's real ask is 85c.  The SL watcher must
+    receive 85c, so a 62c stop does NOT fire.
+    """
+    from test_state_machine import make_strategy
+
+    strategy = make_strategy(monkeypatch, stop_loss_price=62, ask_spread_protection=5)
+    watcher = _FakeWatcher()
+    strategy.stop_loss_watcher = watcher
+
+    ticker = "KXLOWTDAL-26OCT14-T77"
+    # Ticker channel: real ask 85c.
+    strategy.cache.update_quote(ticker, 84, 85)
+    # Orderbook: a lone gapped NO-bid at 39c -> derived YES ask 61c.
+    await strategy._handle_orderbook_snapshot(
+        {"msg": {"market_ticker": ticker, "yes_dollars_fp": [], "no_dollars_fp": [["0.39", "1"]]}}
+    )
+
+    assert watcher.calls, "watcher should still be called"
+    _, forwarded_ask = watcher.calls[-1]
+    assert forwarded_ask == 85, "one-sided gapped book must not forward 61c"
+    assert forwarded_ask > 62, "the 62c stop must NOT fire on the artefact"
 

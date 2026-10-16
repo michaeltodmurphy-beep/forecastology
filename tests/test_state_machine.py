@@ -7589,6 +7589,52 @@ async def test_one_sided_quote_prevents_false_blind_escalation(monkeypatch):
     )
 
 
+
+
+@pytest.mark.asyncio
+async def test_rest_one_sided_ask_only_book_is_not_no_live_price(monkeypatch):
+    """Regression (live incident 2026-10-09, KXLOWTDAL-26OCT09-B65.5).
+
+    A held position whose REST fallback returns a valid ASK but NO bid
+    (``yes_bid=None``) is a one-sided, bidless book -- NOT "no price".
+    Before the fix this logged phase.c.no_live_price / no_websocket_or_rest_price
+    every cycle even though the panic path simultaneously read the ask as 1c,
+    which is self-contradictory and misdiagnosed a bidless collapse as a feed
+    outage.  The fix derives current_price from the ask so the ask-side
+    PANIC_FLATTEN trigger evaluates correctly and the position is not falsely
+    reported blind.  This is generic (any ticker), not Dallas-specific."""
+    logged = capture_logs(monkeypatch)
+    ticker = "KXLOWTDAL-26OCT09-B65.5"
+    executor = FakeExecutor()
+    executor.positions = {ticker: {"count": 5, "average_fill_cost_cents": 62}}
+    strategy = make_strategy(
+        monkeypatch, executor=executor,
+        stop_loss_price=62, sl_exit_mode="PANIC_FLATTEN",
+    )
+    # The exact incident shape: ask present (1c), bid absent, no trade price.
+    strategy._fetch_market_data_via_rest = AsyncMock(
+        return_value={"yes_ask": 1, "yes_bid": None, "price": None}
+    )
+    bracket = _make_held_bracket(ticker, "KXLOWTDAL")
+    bracket.position_quantity = 5
+    bracket.avg_entry = 62
+    strategy.active_positions[ticker] = bracket
+    strategy.brackets[ticker] = bracket
+    # No WS quote at all: cache holds nothing for this ticker.
+    strategy.cache.update_quote(ticker, None, None)
+
+    await strategy._evaluate_held_positions()
+
+    # Must NOT be misclassified as a feed outage.
+    assert not any(event == "phase.c.no_live_price" for event, _ in logged), (
+        "a bidless ask-only book must not log no_live_price"
+    )
+    # The ask-only book must be surfaced with an explicit ask-only source.
+    price_checks = [kw for event, kw in logged if event == "phase.c.price_check"]
+    assert price_checks, "price_check must be emitted"
+    assert price_checks[-1]["price_source"] == "fallback_ask_only"
+
+
 # ---------------------------------------------------------------------------
 # Bug A fix: Unprotected-position escalation and panic-flatten
 # ---------------------------------------------------------------------------

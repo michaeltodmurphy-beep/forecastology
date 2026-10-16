@@ -2263,19 +2263,19 @@ class TemperatureStrategy:
             if self.stop_loss_watcher is not None and price > 0:
                 sl_ask = price
                 try:
-                    confirmed = self.cache.get_confirmed_ask(
+                    safe = self.cache.get_safe_ask(
                         market_ticker, self.config.ask_spread_protection
                     )
-                    if confirmed is not None and confirmed > price:
+                    if safe is not None and safe != price:
                         logger.warning(
-                            "sl.spoof_guard_ignored",
+                            "sl.ask_guard_adjusted",
                             ticker=market_ticker,
-                            top_ask=price,
-                            confirmed_ask=confirmed,
-                            gap_cents=confirmed - price,
+                            book_ask=price,
+                            safe_ask=safe,
                             threshold_cents=self.config.ask_spread_protection,
                         )
-                        sl_ask = confirmed
+                    if safe is not None:
+                        sl_ask = safe
                 except Exception as exc:  # fail-open: never block the SL path
                     logger.warning(
                         "sl.spoof_guard_error",
@@ -2325,19 +2325,19 @@ class TemperatureStrategy:
             if self.stop_loss_watcher is not None and current_price > 0:
                 sl_ask = current_price
                 try:
-                    confirmed = self.cache.get_confirmed_ask(
+                    safe = self.cache.get_safe_ask(
                         market_ticker, self.config.ask_spread_protection
                     )
-                    if confirmed is not None and confirmed > current_price:
+                    if safe is not None and safe != current_price:
                         logger.warning(
-                            "sl.spoof_guard_ignored",
+                            "sl.ask_guard_adjusted",
                             ticker=market_ticker,
-                            top_ask=current_price,
-                            confirmed_ask=confirmed,
-                            gap_cents=confirmed - current_price,
+                            book_ask=current_price,
+                            safe_ask=safe,
                             threshold_cents=self.config.ask_spread_protection,
                         )
-                        sl_ask = confirmed
+                    if safe is not None:
+                        sl_ask = safe
                 except Exception as exc:  # fail-open: never block the SL path
                     logger.warning(
                         "sl.spoof_guard_error",
@@ -5117,12 +5117,24 @@ class TemperatureStrategy:
                         yes_ask = _confirmed_ask
                 except Exception:
                     pass
-                if yes_bid > 0:
+                if yes_bid is not None and yes_bid > 0:
                     current_price = yes_bid
                     price_source = "websocket"
                 elif yes_bid == 0:
                     zero_bid_collapse = True
                     price_source = "websocket"
+                elif yes_bid is None and yes_ask is not None and yes_ask > 0:
+                    # One-sided book: a valid positive ASK but NO bid at all.
+                    # This is NOT "no price" -- it is a real top-of-book with
+                    # the bid side empty (common for a temperature bracket
+                    # approaching a decided outcome, e.g. the Dallas 2026-10-09
+                    # B65.5 collapse that logged no_live_price while the ask sat
+                    # at 1c).  Derive current_price from the ask so the stop-loss
+                    # can evaluate on the ask side (PANIC_FLATTEN triggers on
+                    # ask <= stop regardless) instead of being wrongly reported
+                    # as "no_websocket_or_rest_price".
+                    current_price = yes_ask
+                    price_source = "websocket_ask_only"
 
             if current_price is None:
                 now_fetch = asyncio.get_event_loop().time()
@@ -5179,6 +5191,14 @@ class TemperatureStrategy:
                         elif rest_data.get("price") is not None:
                             current_price = rest_data["price"]
                             price_source = "fallback_quote"
+                        elif yes_ask is not None and yes_ask > 0:
+                            # One-sided REST book: valid ask, no bid, no
+                            # trade price.  Same rationale as the WS case
+                            # above -- a positive ask IS a usable price for
+                            # the ask-side stop-loss trigger; do not treat a
+                            # bidless top-of-book as "no price".
+                            current_price = yes_ask
+                            price_source = "fallback_ask_only"
 
             if position_absent and not mass_absence and self._market_is_settled(rest_data):
                 logger.info(
