@@ -241,6 +241,11 @@ def make_config(**overrides):
         mysql_database_url="******localhost:3306/test",
         trading_mode="PAPER",
         initial_contract_count=2,
+        # Pin to 0 so a HIGH_INITIAL_CONTRACT_COUNT value present in the
+        # ambient environment / .env does not leak into test configs (same
+        # defense as the intraday_exit_*/hwm_* pins below). Tests that need a
+        # distinct HIGH size pass high_initial_contract_count explicitly.
+        high_initial_contract_count=0,
         monitor_start_price=80,
         buy_trigger_price_low=82,
         buy_trigger_price_high=82,
