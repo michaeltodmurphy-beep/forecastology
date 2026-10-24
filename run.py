@@ -148,6 +148,13 @@ async def main():
         await _start_nws_backend()
         cache = TickerCache()
         ws_manager = WebSocketManager(ws_url=config.ws_url, api_key=config.kalshi_api_key, private_key_path=config.kalshi_private_key_path)
+        # The shared executor enforces ONE global cap for all markets, so size it
+        # for the LARGER of the two families' entry sizes.  Per-family caps are
+        # still enforced by hedge_policy in the state machine / scanner; this is
+        # only the outer safety bound (and prevents a larger HIGH order from
+        # being self-rejected when HIGH_INITIAL_CONTRACT_COUNT > INITIAL_CONTRACT_COUNT).
+        _high_count = config.high_initial_contract_count or config.initial_contract_count
+        _base_entry_count = max(config.initial_contract_count, _high_count)
         executor = create_executor(
             trading_mode=config.trading_mode,
             ticker_cache=cache,
@@ -155,7 +162,7 @@ async def main():
             api_key=config.kalshi_api_key,
             private_key_path=config.kalshi_private_key_path,
             dry_run=config.dry_run,
-            max_buy_qty=config.initial_contract_count * (2 ** (config.hedge_max_factor - 1)),
+            max_buy_qty=_base_entry_count * (2 ** (config.hedge_max_factor - 1)),
             entry_cross_spread_to_ceiling=config.entry_cross_spread_to_ceiling,
             position_cap_fail_closed=config.position_cap_fail_closed,
         )

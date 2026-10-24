@@ -93,6 +93,23 @@ def get_buy_trigger_price(config: "AppConfig", market_ticker: str) -> Optional[i
     return None
 
 
+def resolve_initial_contract_count(config: "AppConfig", market_ticker: str) -> int:
+    """Return the configured entry size (contracts) for *market_ticker*'s family.
+
+    HIGH (KXHIGH*) brackets use ``high_initial_contract_count`` when it is set
+    (> 0); otherwise -- and for LOW / unknown families -- the shared
+    ``initial_contract_count`` is used.  This keeps HIGH and LOW entry sizing
+    independent while remaining backward-compatible when
+    ``HIGH_INITIAL_CONTRACT_COUNT`` is unset (default 0 -> fall back to LOW).
+    """
+    upper = (market_ticker or "").upper()
+    if "KXHIGH" in upper:
+        high_count = int(getattr(config, "high_initial_contract_count", 0) or 0)
+        if high_count > 0:
+            return high_count
+    return int(config.initial_contract_count)
+
+
 # Local-time boundaries (ticker's own city-local clock) that divide the trading
 # day into the three entry spread bands.
 _MIDAM_BAND_START = datetime.time(9, 1)   # 09:01 local starts the mid-AM band
@@ -3257,7 +3274,7 @@ class TemperatureStrategy:
                 count = await self._get_stop_loss_count_for_market(ticker)
                 hedge_max = int(self.config.hedge_max_factor)
                 next_qty, is_allowed, max_allowed_qty = hedge_policy(
-                    self.config.initial_contract_count, hedge_max, count
+                    resolve_initial_contract_count(self.config, ticker), hedge_max, count
                 )
                 live_total_qty = max(int(bracket.position_quantity or 0), 0)
                 try:
@@ -3302,7 +3319,7 @@ class TemperatureStrategy:
                         series_ticker=bracket.series_ticker,
                         hedge_step=count,
                         hedge_factor=hedge_max,
-                        initial_qty=self.config.initial_contract_count,
+                        initial_qty=resolve_initial_contract_count(self.config, ticker),
                         max_allowed_qty=max_allowed_qty,
                         action="entry_blocked_at_cap",
                     )
@@ -3329,7 +3346,7 @@ class TemperatureStrategy:
                         series_ticker=bracket.series_ticker,
                         hedge_step=count,
                         hedge_factor=hedge_max,
-                        initial_qty=self.config.initial_contract_count,
+                        initial_qty=resolve_initial_contract_count(self.config, ticker),
                         existing_position_qty=known_app_qty,
                         proposed_qty=next_qty,
                         total_position_qty=known_app_qty + next_qty,
@@ -3366,7 +3383,7 @@ class TemperatureStrategy:
                             series_ticker=bracket.series_ticker,
                             hedge_step=count,
                             hedge_factor=hedge_max,
-                            initial_qty=self.config.initial_contract_count,
+                            initial_qty=resolve_initial_contract_count(self.config, ticker),
                             proposed_qty=next_qty,
                             max_allowed_qty=max_allowed_qty,
                             action="duplicate_entry_suppressed",
@@ -3389,7 +3406,7 @@ class TemperatureStrategy:
                         series_ticker=bracket.series_ticker,
                         hedge_step=count,
                         hedge_factor=hedge_max,
-                        initial_qty=self.config.initial_contract_count,
+                        initial_qty=resolve_initial_contract_count(self.config, ticker),
                         proposed_qty=next_qty,
                         max_allowed_qty=max_allowed_qty,
                         action="recovery_entry",
@@ -3602,14 +3619,17 @@ class TemperatureStrategy:
             reason="submission_ask_within_ceiling", ask=price, max_price=_ceiling,
         )
 
-        proposed_qty = quantity or self.config.initial_contract_count
+        proposed_qty = quantity or resolve_initial_contract_count(
+            self.config, bracket.market_ticker
+        )
 
         # Hard pre-submit cap guard ΓÇö last line of defence in case upstream logic
         # ever regresses.  Compute the absolute maximum permitted quantity and
         # refuse to place an order that would exceed it.
         hedge_max = int(self.config.hedge_max_factor)
         _, _, max_allowed_qty = hedge_policy(
-            self.config.initial_contract_count, hedge_max, 0
+            resolve_initial_contract_count(self.config, bracket.market_ticker),
+            hedge_max, 0
         )
         if proposed_qty > max_allowed_qty:
             self._record_gate(
@@ -3619,7 +3639,9 @@ class TemperatureStrategy:
             logger.critical(
                 "hedge.cap_blocked",
                 ticker=bracket.market_ticker,
-                initial_contract_count=self.config.initial_contract_count,
+                initial_contract_count=resolve_initial_contract_count(
+                    self.config, bracket.market_ticker
+                ),
                 proposed_qty=proposed_qty,
                 max_allowed_qty=max_allowed_qty,
                 hedge_factor=hedge_max,
@@ -3651,7 +3673,9 @@ class TemperatureStrategy:
             logger.critical(
                 "hedge.cap_blocked",
                 ticker=bracket.market_ticker,
-                initial_contract_count=self.config.initial_contract_count,
+                initial_contract_count=resolve_initial_contract_count(
+                    self.config, bracket.market_ticker
+                ),
                 existing_position_qty=existing_position_qty,
                 proposed_qty=proposed_qty,
                 total_position_qty=total_position_qty,
@@ -3896,7 +3920,9 @@ class TemperatureStrategy:
         past it.  Falls back to *fallback* (or 0) if config is missing.
         """
         try:
-            target = int(self.config.initial_contract_count)
+            target = int(resolve_initial_contract_count(
+                self.config, bracket.market_ticker
+            ))
         except (TypeError, ValueError):
             target = 0
         if target <= 0:
@@ -4286,7 +4312,8 @@ class TemperatureStrategy:
                 # ΓöÇΓöÇ Hard cap guard ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
                 hedge_max = int(self.config.hedge_max_factor)
                 _, _, max_allowed_qty = hedge_policy(
-                    self.config.initial_contract_count, hedge_max, 0
+                    resolve_initial_contract_count(self.config, ticker),
+                    hedge_max, 0
                 )
                 existing_qty = max(int(bracket.position_quantity or 0), 0)
                 allowed_chase = max(0, max_allowed_qty - existing_qty)

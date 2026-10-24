@@ -1,0 +1,13 @@
+﻿41:     return celsius * _CELSIUS_TO_F_FACTOR + 32.0
+42: 
+43: 
+44: def _round_f_half_up(temp_f: float) -> int:
+45:     """Round a Fahrenheit temperature to the nearest whole degree, ties up.
+46: 
+47:     NWS publishes its 5-minute observations already rounded to the nearest
+48:     whole degree, and Kalshi settles on that whole-number value.  A raw
+49:     Celsius->Fahrenheit conversion can land on a decimal (e.g. 21.0C -> 69.8F)
+50:     that the exchange would have reported as 70; applying half-up rounding here
+51:     reproduces the published whole-degree value the market actually uses.
+52:     """
+53:     return int(math.floor(temp_f + 0.5))

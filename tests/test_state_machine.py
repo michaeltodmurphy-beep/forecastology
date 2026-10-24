@@ -8852,3 +8852,66 @@ async def test_intraday_exit_exclude_empty_set_is_inert(monkeypatch):
 
     assert not any(ev == "intraday.exit_skipped_excluded" for ev, _ in logged)
     assert (ticker, "12:00") in strategy._intraday_checkpoint_pending
+
+
+class TestFamilySpecificInitialContractCount:
+    """HIGH vs LOW entry sizing via resolve_initial_contract_count and _execute_entry."""
+
+    def test_resolver_low_uses_initial(self):
+        from core.state_machine import resolve_initial_contract_count
+        cfg = make_config(initial_contract_count=10, high_initial_contract_count=4)
+        assert resolve_initial_contract_count(cfg, "KXLOWTLAX-26JUL30-B60.5") == 10
+
+    def test_resolver_high_uses_high_override(self):
+        from core.state_machine import resolve_initial_contract_count
+        cfg = make_config(initial_contract_count=10, high_initial_contract_count=4)
+        assert resolve_initial_contract_count(cfg, "KXHIGHLAX-26JUL30-T90") == 4
+
+    def test_resolver_high_falls_back_when_unset(self):
+        from core.state_machine import resolve_initial_contract_count
+        cfg = make_config(initial_contract_count=10)  # high_initial_contract_count default 0
+        assert resolve_initial_contract_count(cfg, "KXHIGHLAX-26JUL30-T90") == 10
+
+    def test_entry_target_qty_is_family_aware(self, monkeypatch):
+        strategy = make_strategy(
+            monkeypatch, initial_contract_count=10, high_initial_contract_count=4,
+        )
+        high = MarketBracket("KXHIGHLAX-26JUL30-T90", "KXHIGHLAX-26JUL30", "KXHIGHLAX", "T90")
+        low = MarketBracket("KXLOWTLAX-26JUL30-B60.5", "KXLOWTLAX-26JUL30", "KXLOWTLAX", "B60.5")
+        assert strategy._entry_target_qty(high) == 4
+        assert strategy._entry_target_qty(low) == 10
+
+    @pytest.mark.asyncio
+    async def test_execute_entry_high_orders_high_quantity(self, monkeypatch):
+        strategy = make_strategy(
+            monkeypatch, initial_contract_count=10, high_initial_contract_count=3,
+        )
+        strategy.executor.buy_success = True
+        ticker = "KXHIGHLAX-26JUL30-T90"
+        strategy.cache.update_quote(ticker, 80, 82)
+        bracket = MarketBracket(
+            ticker, "KXHIGHLAX-26JUL30", "KXHIGHLAX", "T90", phase=Phase.ENTERING,
+        )
+        strategy.brackets[ticker] = bracket
+        await strategy._execute_entry(bracket)
+        assert len(strategy.executor.orders) == 1
+        order, _ceiling = strategy.executor.orders[0]
+        assert order.quantity == 3
+
+    @pytest.mark.asyncio
+    async def test_execute_entry_low_orders_low_quantity(self, monkeypatch):
+        strategy = make_strategy(
+            monkeypatch, initial_contract_count=10, high_initial_contract_count=3,
+        )
+        strategy.executor.buy_success = True
+        ticker = "KXLOWTLAX-26JUL30-B60.5"
+        strategy.cache.update_quote(ticker, 80, 82)
+        bracket = MarketBracket(
+            ticker, "KXLOWTLAX-26JUL30", "KXLOWTLAX", "B60.5", phase=Phase.ENTERING,
+        )
+        strategy.brackets[ticker] = bracket
+        await strategy._execute_entry(bracket)
+        assert len(strategy.executor.orders) == 1
+        order, _ceiling = strategy.executor.orders[0]
+        assert order.quantity == 10
+

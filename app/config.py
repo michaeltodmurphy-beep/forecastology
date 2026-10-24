@@ -91,6 +91,50 @@ def _parse_initial_contract_count(raw: str | None) -> int:
         return 1
 
 
+def _parse_high_initial_contract_count(raw: str | None) -> int:
+    """Parse HIGH_INITIAL_CONTRACT_COUNT from an env-var string.
+
+    Family-specific entry size for HIGH (KXHIGH*) brackets.  OPT-IN: unlike
+    INITIAL_CONTRACT_COUNT there is no "default of 1".
+
+    - Missing / empty -> returns 0, the sentinel meaning "fall back to
+      INITIAL_CONTRACT_COUNT" (behaviour is unchanged unless the operator
+      explicitly sets a HIGH size).
+    - Positive integer strings ("1", "10") -> returned as-is.
+    - Float strings ("10.0", "10.9") -> truncated to int with a warning.
+    - Values below 1 ("0", "-3") -> normalized to 0 (fallback) with a warning;
+      a HIGH size of 0 is NEVER interpreted as "buy zero contracts".
+    - Unparseable input -> logs a warning and returns 0 (fallback).
+    """
+    if not raw or not raw.strip():
+        return 0
+    stripped = raw.strip()
+    try:
+        parsed_float = float(stripped)
+        parsed_int = int(parsed_float)
+        if parsed_float != parsed_int:
+            logger.warning(
+                "config.high_initial_contract_count_non_integer",
+                raw=raw,
+                truncated_to=parsed_int,
+            )
+        if parsed_int < 1:
+            logger.warning(
+                "config.high_initial_contract_count_below_minimum",
+                raw=raw,
+                fallback="INITIAL_CONTRACT_COUNT",
+            )
+            return 0
+        return parsed_int
+    except (ValueError, TypeError):
+        logger.warning(
+            "config.high_initial_contract_count_invalid",
+            raw=raw,
+            fallback="INITIAL_CONTRACT_COUNT",
+        )
+        return 0
+
+
 _INTRADAY_EXIT_SCHEDULE_DEFAULT = "12:00:0.85,15:00:0.90,18:00:0.90"
 
 
@@ -506,6 +550,10 @@ class AppConfig(BaseSettings):
     mysql_database_url: str = 'mysql+aiomysql://user:pass@localhost:3306/forecastology'
     trading_mode: Literal['PAPER', 'LIVE'] = 'PAPER'
     initial_contract_count: int = 1
+    # HIGH-family entry size override (KXHIGH* only). 0 = fall back to
+    # INITIAL_CONTRACT_COUNT. Parsed by from_env(); resolved per-ticker by
+    # core.state_machine.resolve_initial_contract_count().
+    high_initial_contract_count: int = 0
     monitor_start_price: int
     buy_trigger_price_low: int
     buy_trigger_price_high: int
@@ -1351,6 +1399,9 @@ class AppConfig(BaseSettings):
         )
         hedge_max_factor = _parse_hedge_max_factor(os.getenv("HEDGE_MAX_FACTOR"))
         initial_contract_count = _parse_initial_contract_count(os.getenv("INITIAL_CONTRACT_COUNT"))
+        high_initial_contract_count = _parse_high_initial_contract_count(
+            os.getenv("HIGH_INITIAL_CONTRACT_COUNT")
+        )
         low_ticker_daily_closeout_enabled = _parse_trade_toggle(
             os.getenv("LOW_TICKER_DAILY_CLOSEOUT_ENABLED"),
             "LOW_TICKER_DAILY_CLOSEOUT_ENABLED",
@@ -1558,6 +1609,7 @@ class AppConfig(BaseSettings):
             falling_knife_decay_minutes=falling_knife_decay_minutes,
             hedge_max_factor=hedge_max_factor,
             initial_contract_count=initial_contract_count,
+            high_initial_contract_count=high_initial_contract_count,
             buy_trigger_price_low=os.environ["BUY_TRIGGER_PRICE_LOW"],
             buy_trigger_price_high=os.environ["BUY_TRIGGER_PRICE_HIGH"],
             buy_trigger_price_low_warm=buy_trigger_price_low_warm,

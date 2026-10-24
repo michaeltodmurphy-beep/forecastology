@@ -34,7 +34,12 @@ from app.database import DatabaseManager
 from app.models import ExecutedTrade, TradeAction, TradeStatus, Position as PositionModel
 from core.constants import SERIES_LIST, get_eastern_today_date_prefix
 from core.event_exposure import event_exposure_allows_buy
-from core.state_machine import hedge_policy, get_buy_trigger_price, get_max_spread_for_entry
+from core.state_machine import (
+    hedge_policy,
+    get_buy_trigger_price,
+    get_max_spread_for_entry,
+    resolve_initial_contract_count,
+)
 from core.types import OrderRequest, OrderSide, ensure_app_client_order_id
 from data.ticker_cache import TickerCache
 from execution.factory import create_executor
@@ -144,10 +149,11 @@ async def buy_market(
 
     Returns the execution result when contracts filled, False otherwise.
     """
+    entry_qty = resolve_initial_contract_count(config, ticker)
     _, _, max_allowed_qty = hedge_policy(
-        config.initial_contract_count, config.hedge_max_factor, 0
+        entry_qty, config.hedge_max_factor, 0
     )
-    proposed_qty = config.initial_contract_count
+    proposed_qty = entry_qty
 
     if proposed_qty > max_allowed_qty:
         logger.critical(
@@ -283,7 +289,8 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
                             max_spread=max_spread, band=band)
 
                 if not await event_exposure_allows_buy(
-                    config, db, ticker, config.initial_contract_count, ask,
+                    config, db, ticker,
+                    resolve_initial_contract_count(config, ticker), ask,
                     source="scanner",
                 ):
                     continue
@@ -321,7 +328,9 @@ async def run_scan_cycle(config: AppConfig, db: DatabaseManager):
                             total_cost_cents=result.total_cost_cents,
                             trade_mode=config.trading_mode,
                             status=(TradeStatus.FILLED
-                                    if result.fill_quantity >= config.initial_contract_count
+                                    if result.fill_quantity >= resolve_initial_contract_count(
+                                        config, ticker
+                                    )
                                     else TradeStatus.PARTIAL),
                             kalshi_order_id=result.order_id or None,
                             notes=result.notes,

@@ -480,6 +480,44 @@ class TestParseInitialContractCount:
         assert _parse_initial_contract_count("?!") == 1
 
 
+class TestParseHighInitialContractCount:
+    """Unit tests for _parse_high_initial_contract_count helper.
+
+    Unlike INITIAL_CONTRACT_COUNT, this is opt-in: an unset/invalid value
+    returns 0, the sentinel for "fall back to INITIAL_CONTRACT_COUNT".
+    """
+
+    def test_missing_returns_zero_fallback(self):
+        from app.config import _parse_high_initial_contract_count
+        assert _parse_high_initial_contract_count(None) == 0
+        assert _parse_high_initial_contract_count("") == 0
+        assert _parse_high_initial_contract_count("   ") == 0
+
+    def test_integer_string_parses(self):
+        from app.config import _parse_high_initial_contract_count
+        assert _parse_high_initial_contract_count("10") == 10
+        assert _parse_high_initial_contract_count("1") == 1
+
+    def test_float_string_truncates(self):
+        from app.config import _parse_high_initial_contract_count
+        assert _parse_high_initial_contract_count("10.0") == 10
+        assert _parse_high_initial_contract_count("10.9") == 10
+
+    def test_zero_falls_back_not_zero_contracts(self):
+        # 0 is NEVER a valid order size; it means "use INITIAL_CONTRACT_COUNT".
+        from app.config import _parse_high_initial_contract_count
+        assert _parse_high_initial_contract_count("0") == 0
+
+    def test_negative_falls_back(self):
+        from app.config import _parse_high_initial_contract_count
+        assert _parse_high_initial_contract_count("-3") == 0
+
+    def test_garbage_falls_back(self):
+        from app.config import _parse_high_initial_contract_count
+        assert _parse_high_initial_contract_count("abc") == 0
+        assert _parse_high_initial_contract_count("?!") == 0
+
+
 class TestIntradayScheduleParsing:
     """Unit tests for _parse_intraday_schedule_raw and _parse_intraday_schedule."""
 

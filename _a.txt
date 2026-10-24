@@ -1,0 +1,116 @@
+﻿226:     hours: Optional[float] = None,
+227:     max_age_minutes: Optional[float] = None,
+228:     now_utc: Optional[datetime.datetime] = None,
+229: ) -> tuple[ObsList, str]:
+230:     """Fetch station observations using the configured source with fallback.
+231: 
+232:     ``obs_source="awc"`` (default): try aviationweather.gov first; fall back
+233:     to ``nws_url`` on network error, non-200 response, or fewer than 2 usable
+234:     observations.
+235: 
+236:     ``obs_source="nws"``: legacy behaviour â€” use ``nws_url`` directly.
+237: 
+238:     *hours* bounds how far back the AWC primary path looks.  When ``None`` the
+239:     AWC client default (2.0h) is used, which is fine for callers that only need
+240:     the most recent reports (e.g. the temperature-rise latch).  Callers that
+241:     need the WHOLE trading day (e.g. the day-min "already dipped below"
+242:     tracker, anchored at station-local midnight) MUST pass an explicit *hours*
+243:     large enough to cover it -- otherwise the AWC primary path silently
+244:     truncates the window and early-day dips are missed.  The NWS fallback path
+245:     ignores *hours* (it uses the ``start=`` query embedded in *nws_url*).
+246: 
+247:     Freshness handling (Phase A):
+248: 
+249:         When *max_age_minutes* is supplied and the AWC result's newest
+250:         observation is older than that ceiling, the NWS endpoint is ALSO
+251:         queried and whichever source has the *newer* newest-observation wins.
+252:         This defends against AWC "succeeding" (HTTP 200, >=2 records) while
+253:         silently serving a stale newest report -- e.g. a nationwide upstream
+254:         reporting gap.  When ``None`` (the default) AWC is served as-is and
+255:         no extra request is made, preserving existing callers' behaviour.
+256: 
+257:     Returns ``(obs_list, source)`` where *source* is ``"awc"`` or ``"nws"``.
+258:     Logs source switches at INFO and per-fetch source at DEBUG.
+259:     Raises on NWS fetch failure (let caller handle).
+260:     """
+261:     if obs_source == "nws":
+262:         logger.debug("sunrise.obs_fetch", source="nws", station=station_id)
+263:         obs = parse_nws_obs_payload(nws_client._get_json(nws_url))  # noqa: SLF001
+264:         _maybe_log_source_change(station_id, "nws")
+265:         return obs, "nws"
+266: 
+267:     _now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+268: 
+269:     # ---- AWC primary path ------------------------------------------------
+270:     reason: Optional[str] = None
+271:     try:
+272:         obs = fetch_awc_obs(
+273:             station_id,
+274:             hours=hours if hours is not None else 2.0,
+275:             user_agent=user_agent,
+276:             timeout=timeout,
+277:         )
+278:         if len(obs) >= 2:
+279:             awc_age = _newest_age_minutes(obs, _now)
+280:             if (
+281:                 max_age_minutes is not None
+282:                 and awc_age is not None
+283:                 and awc_age > max_age_minutes
+284:             ):
+285:                 # AWC looks stale -- consult NWS and keep whichever source is
+286:                 # fresher.  A failure of the cross-check must never lose the
+287:                 # AWC result, so it is wrapped defensively.
+288:                 logger.info(
+289:                     "sunrise.obs_freshness_crosscheck",
+290:                     station=station_id,
+291:                     awc_age_minutes=round(awc_age, 1),
+292:                     max_age_minutes=max_age_minutes,
+293:                 )
+294:                 try:
+295:                     nws_obs = parse_nws_obs_payload(
+296:                         nws_client._get_json(nws_url)  # noqa: SLF001
+297:                     )
+298:                     nws_age = _newest_age_minutes(nws_obs, _now)
+299:                     if nws_age is not None and (
+300:                         awc_age is None or nws_age < awc_age
+301:                     ):
+302:                         logger.info(
+303:                             "sunrise.obs_freshness_crosscheck",
+304:                             station=station_id,
+305:                             winner="nws",
+306:                             awc_age_minutes=round(awc_age, 1),
+307:                             nws_age_minutes=round(nws_age, 1),
+308:                         )
+309:                         _maybe_log_source_change(station_id, "nws")
+310:                         return nws_obs, "nws"
+311:                     logger.info(
+312:                         "sunrise.obs_freshness_crosscheck",
+313:                         station=station_id,
+314:                         winner="awc",
+315:                         awc_age_minutes=round(awc_age, 1),
+316:                         nws_age_minutes=(
+317:                             round(nws_age, 1) if nws_age is not None else None
+318:                         ),
+319:                     )
+320:                 except Exception as exc:  # noqa: BLE001
+321:                     logger.info(
+322:                         "sunrise.obs_freshness_crosscheck",
+323:                         station=station_id,
+324:                         winner="awc",
+325:                         reason="nws_crosscheck_failed",
+326:                         error_class=type(exc).__name__,
+327:                         error_message=str(exc)[:200],
+328:                     )
+329:             logger.debug(
+330:                 "sunrise.obs_fetch source=awc station=%s count=%d", station_id, len(obs)
+331:             )
+332:             _maybe_log_source_change(station_id, "awc")
+333:             return obs, "awc"
+334:         reason = f"insufficient_obs count={len(obs)}"
+335:     except Exception as exc:  # noqa: BLE001
+336:         reason = type(exc).__name__
+337:         logger.info(
+338:             "sunrise.obs_source_fallback",
+339:             station=station_id,
+340:             reason=reason,
+341:             error_class=type(exc).__name__,
